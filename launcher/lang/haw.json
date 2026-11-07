@@ -1241,5 +1241,8 @@
   "Open in private window": "E wehe i loko o ka puka makani pilikino",
   "Open this link in a private window to pick another account.": "E wehe i kēia loulou ma kahi puka makani pilikino e koho ai i kekahi moʻokāki ʻē aʻe.",
   "Use a different Microsoft account": "E hoʻohana i kahi moʻokāki Microsoft ʻē aʻe",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "ʻAʻole hiki ke hoʻouka i nā memo paʻi. {error}",
+  "Loading patch notes…": "Ke hoʻouka nei i nā memo paʻi…",
+  "What changed in each release, newest first.": "He aha ka mea i hoʻololi ʻia i kēlā me kēia hoʻokuʻu ʻana, ka mea hou loa."
 }

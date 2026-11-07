@@ -1241,5 +1241,8 @@
   "Open in private window": "ಖಾಸಗಿ ವಿಂಡೋದಲ್ಲಿ ತೆರೆಯಿರಿ",
   "Open this link in a private window to pick another account.": "ಬೇರೆ ಖಾತೆಯನ್ನು ಆಯ್ಕೆ ಮಾಡಲು ಈ ಲಿಂಕ್ ಅನ್ನು ಖಾಸಗಿ ವಿಂಡೋದಲ್ಲಿ ತೆರೆಯಿರಿ.",
   "Use a different Microsoft account": "ಬೇರೆ Microsoft ಖಾತೆಯನ್ನು ಬಳಸಿ",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "ಪ್ಯಾಚ್ ಟಿಪ್ಪಣಿಗಳನ್ನು ಲೋಡ್ ಮಾಡಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ. {error}",
+  "Loading patch notes…": "ಪ್ಯಾಚ್ ಟಿಪ್ಪಣಿಗಳನ್ನು ಲೋಡ್ ಮಾಡಲಾಗುತ್ತಿದೆ...",
+  "What changed in each release, newest first.": "ಪ್ರತಿ ಬಿಡುಗಡೆಯಲ್ಲಿ ಏನು ಬದಲಾಗಿದೆ, ಹೊಸದು ಮೊದಲು."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Iftaħ f'tieqa privata",
   "Open this link in a private window to pick another account.": "Iftaħ dan il-link f'tieqa privata biex tagħżel kont ieħor.",
   "Use a different Microsoft account": "Uża kont Microsoft differenti",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Ma setgħetx tagħbija noti tal-garża. {error}",
+  "Loading patch notes…": "Tagħbija noti tal-garża...",
+  "What changed in each release, newest first.": "Dak li nbidel f'kull rilaxx, l-aktar ġdid l-ewwel."
 }

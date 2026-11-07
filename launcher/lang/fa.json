@@ -1241,5 +1241,8 @@
   "Open in private window": "باز کردن در پنجره ناشناس",
   "Open this link in a private window to pick another account.": "برای انتخاب حساب دیگر، این پیوند را در یک پنجره ناشناس باز کنید.",
   "Use a different Microsoft account": "استفاده از حساب مایکروسافت دیگر",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "یادداشت‌های وصله بارگیری نشدند. {error}",
+  "Loading patch notes…": "در حال بارگیری یادداشت‌های وصله…",
+  "What changed in each release, newest first.": "آنچه در هر نسخه تغییر کرد، ابتدا جدیدترین."
 }

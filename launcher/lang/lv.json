@@ -1241,5 +1241,8 @@
   "Open in private window": "Atvērt privātajā logā",
   "Open this link in a private window to pick another account.": "Atveriet šo saiti privātajā logā, lai izvēlētos citu kontu.",
   "Use a different Microsoft account": "Izmantot citu Microsoft kontu",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Nevarēja ielādēt ielāpu piezīmes. {error}",
+  "Loading patch notes…": "Notiek ielāpu piezīmju ielāde…",
+  "What changed in each release, newest first.": "Kas mainījās katrā laidienā, jaunākie vispirms."
 }

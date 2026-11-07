@@ -1241,5 +1241,8 @@
   "Open in private window": "Aperi in fenestra privata",
   "Open this link in a private window to pick another account.": "Aperi hoc link in fenestra privata ut aliam rationem eligas.",
   "Use a different Microsoft account": "Aliam Microsoft rationem adhibe",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Non poterat load notas lacus.{error}",
+  "Loading patch notes…": "Loading lacus notas…",
+  "What changed in each release, newest first.": "Quae in unaquaque emissione mutata, novissima prima."
 }

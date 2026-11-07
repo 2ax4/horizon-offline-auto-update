@@ -1241,5 +1241,8 @@
   "Open in private window": "Raba priváhta láseš",
   "Open this link in a private window to pick another account.": "Raba dán liŋkka priváhta láseš válljen dihte eará konto.",
   "Use a different Microsoft account": "Geavat eará Microsoft konto",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Ii sáhttán bidjat sisa patch-mearkkaid. {error}",
+  "Loading patch notes…": "Lassin patch-mearkkaid...",
+  "What changed in each release, newest first.": "Mii rievddai juohke almmuheamis, ođđaseamos vuosttaš."
 }

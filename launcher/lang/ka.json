@@ -1241,5 +1241,8 @@
   "Open in private window": "გახსნა პირად ფანჯარაში",
   "Open this link in a private window to pick another account.": "სხვა ანგარიშის ასარჩევად გახსენით ეს ბმული პირად ფანჯარაში.",
   "Use a different Microsoft account": "გამოიყენეთ სხვა Microsoft-ის ანგარიში",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "პატჩის შენიშვნების ჩატვირთვა ვერ მოხერხდა. {error}",
+  "Loading patch notes…": "პაჩის შენიშვნების ჩატვირთვა…",
+  "What changed in each release, newest first.": "რა შეიცვალა თითოეულ გამოშვებაში, ჯერ უახლესი."
 }

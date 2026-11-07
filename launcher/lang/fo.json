@@ -1241,5 +1241,8 @@
   "Open in private window": "Opna í privatum glugga",
   "Open this link in a private window to pick another account.": "Opna hesa leinkju í privatum glugga fyri at velja eina aðra kontu.",
   "Use a different Microsoft account": "Brúka eina aðra Microsoft kontu",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Kundi ikki heinta plásturseðlar. {error}",
+  "Loading patch notes…": "Heinta plásturnotur...",
+  "What changed in each release, newest first.": "Hvat broyttist í hvørjari útgávu, nýggjasta fyrst."
 }

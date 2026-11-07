@@ -1241,5 +1241,8 @@
   "Open in private window": "Gizli pəncərədə açın",
   "Open this link in a private window to pick another account.": "Başqa hesab seçmək üçün bu linki gizli pəncərədə açın.",
   "Use a different Microsoft account": "Başqa Microsoft hesabından istifadə edin",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Yamaq qeydlərini yükləmək mümkün olmadı. {error}",
+  "Loading patch notes…": "Yamaq qeydləri yüklənir...",
+  "What changed in each release, newest first.": "Hər buraxılışda nə dəyişdi, ən yeni."
 }

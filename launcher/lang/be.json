@@ -1241,5 +1241,8 @@
   "Open in private window": "Адкрыць у прыватным акне",
   "Open this link in a private window to pick another account.": "Адкрыйце гэту спасылку ў прыватным акне, каб выбраць іншы ўліковы запіс.",
   "Use a different Microsoft account": "Выкарыстаць іншы ўліковы запіс Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Не ўдалося загрузіць нататкі аб выпраўленні. {error}",
+  "Loading patch notes…": "Загрузка нататак да патча...",
+  "What changed in each release, newest first.": "Што змянілася ў кожным выпуску, спачатку самае новае."
 }

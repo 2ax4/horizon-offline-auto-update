@@ -1241,5 +1241,8 @@
   "Open in private window": "Abrir nunha xanela privada",
   "Open this link in a private window to pick another account.": "Abre esta ligazón nunha xanela privada para escoller outra conta.",
   "Use a different Microsoft account": "Usar outra conta de Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Non se puideron cargar as notas do parche. {error}",
+  "Loading patch notes…": "Cargando notas do parche...",
+  "What changed in each release, newest first.": "O que cambiou en cada versión, o máis novo primeiro."
 }

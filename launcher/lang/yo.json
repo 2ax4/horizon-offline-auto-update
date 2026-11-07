@@ -1241,5 +1241,8 @@
   "Open in private window": "Ṣii ninu ferese aladani",
   "Open this link in a private window to pick another account.": "Ṣii ọna asopọ yii ninu ferese aladani lati yan akọọlẹ miiran.",
   "Use a different Microsoft account": "Lo akọọlẹ Microsoft miiran",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Ko le gbe awọn akọsilẹ patch silẹ. {error}",
+  "Loading patch notes…": "Nkojọpọ awọn akọsilẹ patch…",
+  "What changed in each release, newest first.": "Kini o yipada ni itusilẹ kọọkan, tuntun akọkọ."
 }

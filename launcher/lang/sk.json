@@ -1241,5 +1241,8 @@
   "Open in private window": "Otvoriť v súkromnom okne",
   "Open this link in a private window to pick another account.": "Otvorte tento odkaz v súkromnom okne a vyberte iné konto.",
   "Use a different Microsoft account": "Použiť iné konto Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Nepodarilo sa načítať poznámky k oprave. {error}",
+  "Loading patch notes…": "Načítavajú sa poznámky o oprave…",
+  "What changed in each release, newest first.": "Čo sa zmenilo v každom vydaní, najnovšie ako prvé."
 }

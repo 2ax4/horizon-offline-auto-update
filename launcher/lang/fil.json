@@ -1241,5 +1241,8 @@
   "Open in private window": "Buksan sa private window",
   "Open this link in a private window to pick another account.": "Buksan ang link na ito sa private window para pumili ng ibang account.",
   "Use a different Microsoft account": "Gumamit ng ibang Microsoft account",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Hindi ma-load ang mga patch notes. {error}",
+  "Loading patch notes…": "Nilo-load ang mga patch notes...",
+  "What changed in each release, newest first.": "Ano ang nagbago sa bawat release, pinakabago muna."
 }

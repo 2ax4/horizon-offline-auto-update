@@ -1241,5 +1241,8 @@
   "Open in private window": "Odpri v zasebnem oknu",
   "Open this link in a private window to pick another account.": "Odprite to povezavo v zasebnem oknu, da izberete drug račun.",
   "Use a different Microsoft account": "Uporabi drug Microsoftov račun",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Opomb popravkov ni bilo mogoče naložiti. {error}",
+  "Loading patch notes…": "Nalaganje opomb o popravku ...",
+  "What changed in each release, newest first.": "Kaj se je spremenilo v vsaki izdaji, najprej najnovejše."
 }

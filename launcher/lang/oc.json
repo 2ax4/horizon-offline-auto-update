@@ -1241,5 +1241,8 @@
   "Open in private window": "Dobrir dins una fenèstra privada",
   "Open this link in a private window to pick another account.": "Dobrissètz aqueste ligam dins una fenèstra privada per causir un autre compte.",
   "Use a different Microsoft account": "Utilizar un autre compte Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Impossible de cargar las nòtas de correccion. {error}",
+  "Loading patch notes…": "En cargament de nòtas de correccion...",
+  "What changed in each release, newest first.": "Çò que cambièt dins cada sortida, lo mai novèl primièr."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "פתח בחלון פרטי",
   "Open this link in a private window to pick another account.": "פתח את הקישור הזה בחלון פרטי כדי לבחור חשבון אחר.",
   "Use a different Microsoft account": "השתמש בחשבון Microsoft אחר",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "לא ניתן היה לטעון הערות תיקון. {error}",
+  "Loading patch notes…": "טוען הערות תיקון...",
+  "What changed in each release, newest first.": "מה השתנה בכל מהדורה, הכי חדש ראשון."
 }

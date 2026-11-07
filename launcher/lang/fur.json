@@ -1241,5 +1241,8 @@
   "Open in private window": "Vierç intun barcon privât",
   "Open this link in a private window to pick another account.": "Vierç chest leam intun barcon privât par sielzi un altri conto.",
   "Use a different Microsoft account": "Dopre un altri conto Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "No si è rivât a cjargjâ lis notis di corezion. {error}",
+  "Loading patch notes…": "Caricant notis di corezion...",
+  "What changed in each release, newest first.": "Ce che al cambià in ogni publicazion, il plui gnûf prin."
 }

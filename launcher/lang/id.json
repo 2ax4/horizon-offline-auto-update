@@ -1241,5 +1241,8 @@
   "Open in private window": "Buka di jendela pribadi",
   "Open this link in a private window to pick another account.": "Buka tautan ini di jendela pribadi untuk memilih akun lain.",
   "Use a different Microsoft account": "Gunakan akun Microsoft lain",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Tidak dapat memuat catatan patch. {error}",
+  "Loading patch notes…": "Memuat catatan rilis…",
+  "What changed in each release, newest first.": "Perubahan di setiap rilis, diurutkan dari yang terbaru."
 }

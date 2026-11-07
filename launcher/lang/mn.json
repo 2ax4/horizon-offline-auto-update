@@ -1241,5 +1241,8 @@
   "Open in private window": "Хувийн цонхонд нээх",
   "Open this link in a private window to pick another account.": "Өөр данс сонгохын тулд энэ холбоосыг хувийн цонхонд нээнэ үү.",
   "Use a different Microsoft account": "Өөр Microsoft данс ашиглах",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Засварын тэмдэглэлийг ачаалж чадсангүй. {error}",
+  "Loading patch notes…": "Засварын тэмдэглэлүүдийг ачаалж байна...",
+  "What changed in each release, newest first.": "Хувилбар болгонд юу өөрчлөгдсөн, хамгийн шинэ нь."
 }

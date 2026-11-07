@@ -1241,5 +1241,8 @@
   "Open in private window": "Hape në dritare private",
   "Open this link in a private window to pick another account.": "Hape këtë lidhje në një dritare private për të zgjedhur një llogari tjetër.",
   "Use a different Microsoft account": "Përdor një llogari tjetër të Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Shënimet e korrigjimit nuk mund të ngarkoheshin. {error}",
+  "Loading patch notes…": "Po ngarkohen shënimet e arnimit…",
+  "What changed in each release, newest first.": "Çfarë ndryshoi në çdo version, së pari më e reja."
 }

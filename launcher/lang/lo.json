@@ -1241,5 +1241,8 @@
   "Open in private window": "ເປີດໃນໜ້າຕ່າງສ່ວນຕົວ",
   "Open this link in a private window to pick another account.": "ເປີດລິ້ງນີ້ໃນໜ້າຕ່າງສ່ວນຕົວເພື່ອເລືອກບັນຊີອື່ນ.",
   "Use a different Microsoft account": "ໃຊ້ບັນຊີ Microsoft ອື່ນ",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "ບໍ່ສາມາດໂຫຼດບັນທຶກການແກ້ໄຂໄດ້. {error}",
+  "Loading patch notes…": "ກຳລັງໂຫຼດບັນທຶກການແກ້ໄຂ...",
+  "What changed in each release, newest first.": "ສິ່ງທີ່ມີການປ່ຽນແປງໃນແຕ່ລະການປ່ອຍ, ໃຫມ່ທີ່ສຸດທໍາອິດ."
 }

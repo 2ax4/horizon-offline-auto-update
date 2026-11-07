@@ -1241,5 +1241,8 @@
   "Open in private window": "Ireki leiho pribatuan",
   "Open this link in a private window to pick another account.": "Ireki esteka hau leiho pribatu batean beste kontu bat aukeratzeko.",
   "Use a different Microsoft account": "Erabili beste Microsoft kontu bat",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Ezin izan dira adabaki-oharrak kargatu. {error}",
+  "Loading patch notes…": "Adabaki-oharrak kargatzen…",
+  "What changed in each release, newest first.": "Argitalpen bakoitzean zer aldatu den, berriena lehenik."
 }

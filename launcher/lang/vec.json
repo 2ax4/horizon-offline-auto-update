@@ -1241,5 +1241,8 @@
   "Open in private window": "Vèrxi in na finestra privada",
   "Open this link in a private window to pick another account.": "Vèrxi sto link in na finestra privada par scoeger on altro conto.",
   "Use a different Microsoft account": "Dòpara on altro conto Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "No se pol caricare łe note deła patch. {error}",
+  "Loading patch notes…": "Se carica łe note deła patch…",
+  "What changed in each release, newest first.": "Cossa che xe canbià in ogni version, prima ła pì nova."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Maak oop in privaat venster",
   "Open this link in a private window to pick another account.": "Maak hierdie skakel in 'n privaat venster oop om 'n ander rekening te kies.",
   "Use a different Microsoft account": "Gebruik 'n ander Microsoft-rekening",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Kon nie pleisternotas laai nie. {error}",
+  "Loading patch notes…": "Laai tans pleisternotas …",
+  "What changed in each release, newest first.": "Wat in elke uitgawe verander het, nuutste eerste."
 }

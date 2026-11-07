@@ -1241,5 +1241,8 @@
   "Open in private window": "Вӑрттӑн чӳречере уҫӑр",
   "Open this link in a private window to pick another account.": "Урӑх аккаунт суйлама ку ссылкӑна вӑрттӑн чӳречере уҫӑр.",
   "Use a different Microsoft account": "Урӑх Microsoft аккаунтне усӑ курӑр",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Патч-нотӑсене ҫӗклеймерӗм. {error}",
+  "Loading patch notes…": "Патч заметкисене ҫӗклетпӗр...",
+  "What changed in each release, newest first.": "Кашни кӑларӑмра мӗн улшӑннӑ, чи ҫӗнни малтан."
 }

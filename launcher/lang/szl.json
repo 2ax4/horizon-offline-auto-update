@@ -1241,5 +1241,8 @@
   "Open in private window": "Ôtworz w prywatnym ôknie",
   "Open this link in a private window to pick another account.": "Ôtworz ten link w prywatnym ôknie, żeby wybrać inksze kōnto.",
   "Use a different Microsoft account": "Użyj inkszego kōnta Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Niy mōg załadować notatek ô patchach. {error}",
+  "Loading patch notes…": "Ładowanie notatkōw ô plastrach...",
+  "What changed in each release, newest first.": "Co sie zmiyniało w kożdym wydaniu, nojnowsze piyrsze."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Vula efasiteleni eliyimfihlo",
   "Open this link in a private window to pick another account.": "Vula lesi sixhumanisi efasiteleni eliyimfihlo ukuze ukhethe elinye i-akhawunti.",
   "Use a different Microsoft account": "Sebenzisa enye i-akhawunti ye-Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Ayikwazanga ukulayisha amanothi epeshi. {error}",
+  "Loading patch notes…": "Ilayisha amanothi epeshi...",
+  "What changed in each release, newest first.": "Yini eshintshile ekukhishweni ngakunye, okusha kakhulu kuqala."
 }

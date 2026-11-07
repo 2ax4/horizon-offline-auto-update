@@ -1241,5 +1241,8 @@
   "Open in private window": "Atidaryti privačiame lange",
   "Open this link in a private window to pick another account.": "Atidarykite šią nuorodą privačiame lange, kad pasirinktumėte kitą paskyrą.",
   "Use a different Microsoft account": "Naudoti kitą „Microsoft“ paskyrą",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Nepavyko įkelti pataisų užrašų. {error}",
+  "Loading patch notes…": "Įkeliami pataisų užrašai…",
+  "What changed in each release, newest first.": "Kas pasikeitė kiekviename leidime, pirmiausia naujausi."
 }

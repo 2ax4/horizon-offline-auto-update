@@ -1241,5 +1241,8 @@
   "Open in private window": "Oscail i bhfuinneog phríobháideach",
   "Open this link in a private window to pick another account.": "Oscail an nasc seo i bhfuinneog phríobháideach chun cuntas eile a roghnú.",
   "Use a different Microsoft account": "Úsáid cuntas Microsoft eile",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Níorbh fhéidir nótaí paiste a lódáil. {error}",
+  "Loading patch notes…": "Nótaí paiste á lódáil…",
+  "What changed in each release, newest first.": "Cad a d'athraigh i ngach eisiúint, is nua ar dtús."
 }

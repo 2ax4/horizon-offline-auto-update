@@ -1241,5 +1241,8 @@
   "Open in private window": "Жеке терезеде ашу",
   "Open this link in a private window to pick another account.": "Басқа тіркелгіні таңдау үшін бұл сілтемені жеке терезеде ашыңыз.",
   "Use a different Microsoft account": "Басқа Microsoft тіркелгісін пайдалану",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Түзету жазбаларын жүктеу мүмкін болмады. {error}",
+  "Loading patch notes…": "Түзету жазбалары жүктелуде…",
+  "What changed in each release, newest first.": "Әрбір шығарылымда не өзгерді, ең жаңасы."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Megnyitás privát ablakban",
   "Open this link in a private window to pick another account.": "Nyisd meg ezt a linket privát ablakban, hogy másik fiókot válassz.",
   "Use a different Microsoft account": "Másik Microsoft-fiók használata",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Nem sikerült betölteni a javítójegyzeteket. {error}",
+  "Loading patch notes…": "Javítójegyzetek betöltése…",
+  "What changed in each release, newest first.": "Ami az egyes kiadásokban változott, a legújabb az első."
 }

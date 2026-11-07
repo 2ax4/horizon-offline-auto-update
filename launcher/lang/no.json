@@ -1241,5 +1241,8 @@
   "Open in private window": "Åpne i et privat vindu",
   "Open this link in a private window to pick another account.": "Åpne denne lenken i et privat vindu for å velge en annen konto.",
   "Use a different Microsoft account": "Bruk en annen Microsoft-konto",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Kunne ikke laste inn patch-notater. {error}",
+  "Loading patch notes…": "Laster oppdateringsnotater …",
+  "What changed in each release, newest first.": "Hva endret seg i hver utgivelse, nyeste først."
 }

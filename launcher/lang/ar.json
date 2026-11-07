@@ -1241,5 +1241,8 @@
   "Open in private window": "فتح في نافذة خاصة",
   "Open this link in a private window to pick another account.": "افتح هذا الرابط في نافذة خاصة لاختيار حساب آخر.",
   "Use a different Microsoft account": "استخدام حساب Microsoft مختلف",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "تعذر تحميل ملاحظات التحديث. {error}",
+  "Loading patch notes…": "جاري تحميل ملاحظات التحديث…",
+  "What changed in each release, newest first.": "ما تم تغييره في كل إصدار، والأحدث أولاً."
 }

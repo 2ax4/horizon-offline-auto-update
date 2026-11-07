@@ -1241,5 +1241,8 @@
   "Open in private window": "Buka dalam tetingkap peribadi",
   "Open this link in a private window to pick another account.": "Buka pautan ini dalam tetingkap peribadi untuk memilih akaun lain.",
   "Use a different Microsoft account": "Gunakan akaun Microsoft lain",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Tidak dapat memuatkan nota tampalan. {error}",
+  "Loading patch notes…": "Memuatkan nota tampalan…",
+  "What changed in each release, newest first.": "Perkara yang berubah dalam setiap keluaran, terbaharu dahulu."
 }

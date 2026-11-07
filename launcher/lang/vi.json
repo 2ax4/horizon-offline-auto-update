@@ -1241,5 +1241,8 @@
   "Open in private window": "Mở trong cửa sổ ẩn danh",
   "Open this link in a private window to pick another account.": "Mở liên kết này trong cửa sổ ẩn danh để chọn tài khoản khác.",
   "Use a different Microsoft account": "Dùng tài khoản Microsoft khác",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Không thể tải ghi chú vá. {error}",
+  "Loading patch notes…": "Đang tải ghi chú vá lỗi…",
+  "What changed in each release, newest first.": "Điều gì đã thay đổi trong mỗi bản phát hành, mới nhất trước tiên."
 }

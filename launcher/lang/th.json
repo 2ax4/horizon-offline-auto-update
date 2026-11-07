@@ -1241,5 +1241,8 @@
   "Open in private window": "เปิดในหน้าต่างส่วนตัว",
   "Open this link in a private window to pick another account.": "เปิดลิงก์นี้ในหน้าต่างส่วนตัวเพื่อเลือกบัญชีอื่น",
   "Use a different Microsoft account": "ใช้บัญชี Microsoft อื่น",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "โหลดแพตช์โน้ตไม่ได้ {error}",
+  "Loading patch notes…": "กำลังโหลดบันทึกการแก้ไข…",
+  "What changed in each release, newest first.": "สิ่งที่เปลี่ยนในแต่ละรุ่น เรียงจากใหม่สุด"
 }

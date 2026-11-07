@@ -1241,5 +1241,8 @@
   "Open in private window": "தனிப்பட்ட சாளரத்தில் திற",
   "Open this link in a private window to pick another account.": "வேறொரு கணக்கைத் தேர்ந்தெடுக்க, இந்த இணைப்பைத் தனிப்பட்ட சாளரத்தில் திறக்கவும்.",
   "Use a different Microsoft account": "வேறு Microsoft கணக்கைப் பயன்படுத்தவும்",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "பேட்ச் குறிப்புகளை ஏற்ற முடியவில்லை. {error}",
+  "Loading patch notes…": "பேட்ச் குறிப்புகளை ஏற்றுகிறது…",
+  "What changed in each release, newest first.": "ஒவ்வொரு வெளியீட்டிலும் என்ன மாறியது, புதியது முதலில்."
 }

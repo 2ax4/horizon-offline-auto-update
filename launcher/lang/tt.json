@@ -1241,5 +1241,8 @@
   "Open in private window": "Шәхси тәрәзәдә ачу",
   "Open this link in a private window to pick another account.": "Икенче счет сайлау өчен бу сылтаманы шәхси тәрәзәдә ачыгыз.",
   "Use a different Microsoft account": "Башка Microsoft счетын куллану",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Пач язмаларын йөкләп булмады. {error}",
+  "Loading patch notes…": "Пач язмаларын йөкләү…",
+  "What changed in each release, newest first.": "Releaseәр чыгарылышта нәрсә үзгәрде, иң яңасы."
 }

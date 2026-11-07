@@ -1241,5 +1241,8 @@
   "Open in private window": "Opna í huliðsglugga",
   "Open this link in a private window to pick another account.": "Opnaðu þennan tengil í huliðsglugga til að velja annan reikning.",
   "Use a different Microsoft account": "Nota annan Microsoft reikning",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Gat ekki hlaðið plástranótum. {error}",
+  "Loading patch notes…": "Hleður plástursnótum...",
+  "What changed in each release, newest first.": "Hvað breyttist í hverri útgáfu, nýjasta fyrst."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Ku fur daaqad gaar ah",
   "Open this link in a private window to pick another account.": "Ku fur isku xirkan daaqad gaar ah si aad u doorato xisaab kale.",
   "Use a different Microsoft account": "Isticmaal xisaab Microsoft oo kale",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Waa la rari waayay qoraalada balastarrada {error}",
+  "Loading patch notes…": "Soodejinaya qoraalada balastar…",
+  "What changed in each release, newest first.": "Maxaa iska beddelay siideyn kasta, ugu horrayn."
 }

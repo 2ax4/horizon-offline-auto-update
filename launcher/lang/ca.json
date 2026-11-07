@@ -1241,5 +1241,8 @@
   "Open in private window": "Obre en una finestra privada",
   "Open this link in a private window to pick another account.": "Obriu aquest enllaç en una finestra privada per triar un altre compte.",
   "Use a different Microsoft account": "Utilitza un altre compte de Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "No s'han pogut carregar les notes del pedaç. {error}",
+  "Loading patch notes…": "S'estan carregant les notes del pedaç...",
+  "What changed in each release, newest first.": "Què va canviar en cada llançament, primer el més nou."
 }

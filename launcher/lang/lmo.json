@@ -1241,5 +1241,8 @@
   "Open in private window": "Vèrt in d'una finestra privada",
   "Open this link in a private window to pick another account.": "Vèrt chèsto link in d'una finestra privada per sceglier un alter cunt.",
   "Use a different Microsoft account": "Dopera un alter cunt Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Pudeva minga caricar i nott del patch. {error}",
+  "Loading patch notes…": "Caricament di not del patch...",
+  "What changed in each release, newest first.": "Quel che l’è cambiad in ogni publicasiün, el pusè nöf prima."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Gizli pencerede aç",
   "Open this link in a private window to pick another account.": "Başka bir hesap seçmek için bu bağlantıyı gizli pencerede açın.",
   "Use a different Microsoft account": "Farklı bir Microsoft hesabı kullan",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Hazırlanmadı. Horizon, Minecraft {version} sürümünü kendi kurulumunuzdan hazırlayabilir; Mojang'dan indirmek için oturum açın."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Hazırlanmadı. Horizon, Minecraft {version} sürümünü kendi kurulumunuzdan hazırlayabilir; Mojang'dan indirmek için oturum açın.",
+  "Couldn't load patch notes. {error}": "Couldn't load patch notes. {error}",
+  "Loading patch notes…": "Sürüm notları yükleniyor…",
+  "What changed in each release, newest first.": "Her sürümde neyin değiştiği, en yeniden eskiye."
 }

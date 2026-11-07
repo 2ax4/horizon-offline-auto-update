@@ -1241,5 +1241,8 @@
   "Open in private window": "Открыть в приватном окне",
   "Open this link in a private window to pick another account.": "Откройте эту ссылку в приватном окне, чтобы выбрать другой аккаунт.",
   "Use a different Microsoft account": "Использовать другой аккаунт Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Не подготовлено. Horizon может подготовить Minecraft {version} из вашей собственной установки; войдите, чтобы скачать его с Mojang."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Не подготовлено. Horizon может подготовить Minecraft {version} из вашей собственной установки; войдите, чтобы скачать его с Mojang.",
+  "Couldn't load patch notes. {error}": "Не удалось загрузить список изменений. {error}",
+  "Loading patch notes…": "Загрузка описания изменений…",
+  "What changed in each release, newest first.": "Что изменилось в каждом релизе, сначала новые."
 }

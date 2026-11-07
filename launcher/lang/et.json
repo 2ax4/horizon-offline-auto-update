@@ -1241,5 +1241,8 @@
   "Open in private window": "Ava privaatses aknas",
   "Open this link in a private window to pick another account.": "Ava see link privaatses aknas, et valida teine konto.",
   "Use a different Microsoft account": "Kasuta teist Microsofti kontot",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Paigutuste märkmeid ei saanud laadida. {error}",
+  "Loading patch notes…": "Paigutuste märkmete laadimine…",
+  "What changed in each release, newest first.": "Mis igas versioonis muutus, uusim enne."
 }

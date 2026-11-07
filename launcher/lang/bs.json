@@ -1241,5 +1241,8 @@
   "Open in private window": "Otvori u privatnom prozoru",
   "Open this link in a private window to pick another account.": "Otvori ovaj link u privatnom prozoru da odabereš drugi nalog.",
   "Use a different Microsoft account": "Koristi drugi Microsoft nalog",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Nije moguće učitati bilješke o zakrpama. {error}",
+  "Loading patch notes…": "Učitavanje bilješki o zakrpi…",
+  "What changed in each release, newest first.": "Što se promijenilo u svakom izdanju, prvo najnovije."
 }

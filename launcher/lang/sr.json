@@ -1241,5 +1241,8 @@
   "Open in private window": "Отвори у приватном прозору",
   "Open this link in a private window to pick another account.": "Отворите ову везу у приватном прозору да бисте изабрали други налог.",
   "Use a different Microsoft account": "Користи други Microsoft налог",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Није могуће учитати белешке о закрпама. {error}",
+  "Loading patch notes…": "Учитавају се белешке о закрпи…",
+  "What changed in each release, newest first.": "Шта се променило у сваком издању, прво најновије."
 }

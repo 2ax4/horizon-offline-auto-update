@@ -1241,5 +1241,8 @@
   "Open in private window": "Отваряне в поверителен прозорец",
   "Open this link in a private window to pick another account.": "Отворете тази връзка в поверителен прозорец, за да изберете друг акаунт.",
   "Use a different Microsoft account": "Използвайте друг акаунт в Microsoft",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Бележките за корекции не можаха да се заредят. {error}",
+  "Loading patch notes…": "Бележките за корекцията се зареждат...",
+  "What changed in each release, newest first.": "Какво се промени във всяка версия, първо най-новите."
 }

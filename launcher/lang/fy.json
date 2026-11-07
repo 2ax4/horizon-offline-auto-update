@@ -1241,5 +1241,8 @@
   "Open in private window": "Iepenje yn in priveefinster",
   "Open this link in a private window to pick another account.": "Iepenje dizze keppeling yn in priveefinster om in oar akkount te kiezen.",
   "Use a different Microsoft account": "Brûk in oar Microsoft akkount",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Koe patchnotysjes net lade. {error}",
+  "Loading patch notes…": "Patch-notysjes laden…",
+  "What changed in each release, newest first.": "Wat feroare yn elke release, nijste earst."
 }

@@ -1241,5 +1241,8 @@
   "Open in private window": "Maxfiy oynada ochish",
   "Open this link in a private window to pick another account.": "Boshqa hisobni tanlash uchun bu havolani maxfiy oynada oching.",
   "Use a different Microsoft account": "Boshqa Microsoft hisob qaydnomasidan foydalanish",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Yamoq qaydlarini yuklab bo‘lmadi. {error}",
+  "Loading patch notes…": "Yamoq qaydlari yuklanmoqda…",
+  "What changed in each release, newest first.": "Har bir nashrda nima o'zgardi, birinchi navbatda eng yangisi."
 }

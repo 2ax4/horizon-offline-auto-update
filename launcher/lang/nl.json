@@ -1241,5 +1241,8 @@
   "Open in private window": "Openen in privévenster",
   "Open this link in a private window to pick another account.": "Open deze link in een privévenster om een ander account te kiezen.",
   "Use a different Microsoft account": "Een ander Microsoft-account gebruiken",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Kan patchopmerkingen niet laden. {error}",
+  "Loading patch notes…": "Patchopmerkingen laden...",
+  "What changed in each release, newest first.": "Wat er in elke release is veranderd, de nieuwste eerst."
 }

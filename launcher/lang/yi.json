@@ -1241,5 +1241,8 @@
   "Open in private window": "עפענען אין אַ פּריוואַטן פֿענצטער",
   "Open this link in a private window to pick another account.": "עפֿן דעם לינק אין אַ פּריוואַטן פֿענצטער צו קלייַבן אַן אַנדער חשבון.",
   "Use a different Microsoft account": "נוצן אַן אַנדער Microsoft חשבון",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "קען נישט לאָדן פּאַטש הערות. {error}",
+  "Loading patch notes…": "לאָודינג פּאַטש הערות…",
+  "What changed in each release, newest first.": "וואָס געביטן אין יעדער מעלדונג, נואַסט ערשטער."
 }

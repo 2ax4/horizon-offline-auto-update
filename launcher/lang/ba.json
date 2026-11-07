@@ -1241,5 +1241,8 @@
   "Open in private window": "Шәхси тәҙрәлә асыу",
   "Open this link in a private window to pick another account.": "Башҡа иҫәп яҙмаһын һайлау өсөн был һылтанманы шәхси тәҙрәлә асығыҙ.",
   "Use a different Microsoft account": "Башҡа Microsoft иҫәп яҙмаһын ҡулланыу",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Патч иҫкәрмәләрен тейәп булманы. {error}",
+  "Loading patch notes…": "Патч иҫкәрмәләрен тейәү...",
+  "What changed in each release, newest first.": "Һәр релизда нимә үҙгәрҙе, иң яңыһы тәүҙә."
 }

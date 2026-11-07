@@ -1241,5 +1241,8 @@
   "Open in private window": "Avaa yksityisessä ikkunassa",
   "Open this link in a private window to pick another account.": "Avaa tämä linkki yksityisessä ikkunassa valitaksesi toisen tilin.",
   "Use a different Microsoft account": "Käytä toista Microsoft-tiliä",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Korjausmuistiinpanoja ei voitu ladata. {error}",
+  "Loading patch notes…": "Ladataan korjausmuistiinpanoja…",
+  "What changed in each release, newest first.": "Mikä muuttui jokaisessa julkaisussa, uusin ensin."
 }

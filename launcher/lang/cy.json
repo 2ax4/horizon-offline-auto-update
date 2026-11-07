@@ -1241,5 +1241,8 @@
   "Open in private window": "Agor mewn ffenestr breifat",
   "Open this link in a private window to pick another account.": "Agorwch y ddolen hon mewn ffenestr breifat i ddewis cyfrif arall.",
   "Use a different Microsoft account": "Defnyddio cyfrif Microsoft gwahanol",
-  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead."
+  "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+  "Couldn't load patch notes. {error}": "Methu llwytho nodiadau clytiau. {error}",
+  "Loading patch notes…": "Wrthi'n llwytho nodiadau clytiau…",
+  "What changed in each release, newest first.": "Beth newidiodd ym mhob datganiad, mwyaf newydd yn gyntaf."
 }
