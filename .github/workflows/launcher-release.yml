@@ -187,6 +187,30 @@ jobs:
             exit 1
           }
 
+      - name: Smoke the offline account flow (add, list, forget)
+        run: |
+          set -e
+          bin="$BIN_DIR/${{ matrix.binary }}"
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$bin" account offline __SmokeTest__
+          "$bin" --json account list | "$PY" -c '
+            import json, sys
+            d = json.load(sys.stdin)
+            names = [a["name"] for a in d["offline"]]
+            assert "__SmokeTest__" in names, "offline account missing after add: %r" % names
+            assert any("selected" in a for a in d["offline"]), "selected field missing from account list"
+            print("offline account add + list: OK")
+          '
+          "$bin" account forget-offline __SmokeTest__
+          "$bin" --json account list | "$PY" -c '
+            import json, sys
+            d = json.load(sys.stdin)
+            names = [a["name"] for a in d["offline"]]
+            assert "__SmokeTest__" not in names, "offline account still listed after forget: %r" % names
+            print("offline account forget: OK")
+          '
+
       - name: Package
         run: |
           rm -rf dist out && mkdir -p dist out
