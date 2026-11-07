@@ -299,11 +299,12 @@ jobs:
             || true)"
           # The patch-set hash this build carries, computed exactly like
           # auto-offline-release.yml does: this checkout (the release's CI commit) holds
-          # the same offline/patches and this very workflow file. auto-offline-release.yml
-          # compares it against the release body, so a changed patch set (new patch or a
-          # changed launcher-release.yml) rebuilds the same version instead of being
-          # skipped as "already released".
-          phash=$(cat offline/patches/*.patch .github/workflows/launcher-release.yml | sha256sum | cut -c1-8)
+          # the same offline/patches, the same offline lang data and this very workflow
+          # file. auto-offline-release.yml compares it against the release body, so a
+          # changed patch set (new patch, changed lang data or a changed
+          # launcher-release.yml) rebuilds the same version instead of being skipped as
+          # "already released".
+          phash=$(cat offline/patches/*.patch offline/lang-sync.py offline/lang-overrides.json .github/workflows/launcher-release.yml | sha256sum | cut -c1-8)
           {
             echo "Includes offline account support that does not need a Microsoft account. Based on ${ver}"
             echo "offline-phash:${phash}"

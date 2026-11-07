@@ -1,17 +1,17 @@
-From 7ecce7b711091a17e34e14c817f8175108a9c621 Mon Sep 17 00:00:00 2001
+From c37bd73c9fbd7ecced47da91be2e36a608a5074b Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 13:35:56 +0000
 Subject: [PATCH] Ad-free: remove the partner banners
 
 ---
  launcher/src/glass_servers.rs |  43 ----
- launcher/src/partner.rs       | 357 ----------------------------------
+ launcher/src/partner.rs       | 362 ----------------------------------
  launcher/src/servers_page.rs  |  31 +--
- 3 files changed, 4 insertions(+), 427 deletions(-)
+ 3 files changed, 4 insertions(+), 432 deletions(-)
  delete mode 100644 launcher/src/partner.rs
 
 diff --git a/launcher/src/glass_servers.rs b/launcher/src/glass_servers.rs
-index 2f1fb53ce..46b7f3bfb 100644
+index 2f1fb53..46b7f3b 100644
 --- a/launcher/src/glass_servers.rs
 +++ b/launcher/src/glass_servers.rs
 @@ -66,9 +66,6 @@ impl Launcher {
@@ -73,10 +73,10 @@ index 2f1fb53ce..46b7f3bfb 100644
  /// The open server's port.
 diff --git a/launcher/src/partner.rs b/launcher/src/partner.rs
 deleted file mode 100644
-index d6ac26123..000000000
+index 84631c2..0000000
 --- a/launcher/src/partner.rs
 +++ /dev/null
-@@ -1,357 +0,0 @@
+@@ -1,362 +0,0 @@
 -//! Sculk, a server host that sponsors Horizon (Ludovic, 2026-10-26): its wide banner on the Servers
 -//! page, and a card made for the sidebar on the other pages, where the banner's baked-in text was too
 -//! small to read. The pictures are in the binary, never fetched; a click opens Sculk's page in the
@@ -230,7 +230,7 @@ index d6ac26123..000000000
 -}
 -
 -/// "HORIZON15 · 15% off" in a dashed cyan frame, as on Sculk's banner.
--fn code_chip(size: f32, height: f32) -> Div {
+-fn code_chip(size: f32, height: f32, glass: bool) -> Div {
 -    div()
 -        .flex()
 -        .items_center()
@@ -241,7 +241,7 @@ index d6ac26123..000000000
 -        .border_1()
 -        .border_dashed()
 -        .border_color(rgba(CYAN, 0.7))
--        .rounded(px(6.))
+-        .rounded(px(if glass { 6. } else { 0. }))
 -        .font_family(crate::theme::MONO)
 -        .text_size(px(size))
 -        .whitespace_nowrap()
@@ -282,7 +282,7 @@ index d6ac26123..000000000
 -        .flex_none()
 -        .w(px(width))
 -        .bg(rgb(CARD))
--        .rounded(px(10.))
+-        .rounded(px(if t.glass { 10. } else { 0. }))
 -        .group_hover(id, |s| s.top(px(-2.)));
 -    let logo = |height: f32| {
 -        img(LOGO.clone())
@@ -330,7 +330,7 @@ index d6ac26123..000000000
 -                    .px(px(12.))
 -                    .pt(px(6.))
 -                    .pb(px(12.))
--                    .child(code_chip(11., 26.).flex_1()),
+-                    .child(code_chip(11., 26., t.glass).flex_1()),
 -            )
 -    } else {
 -        let art_h = width * ART_HEIGHT / ART_WIDTH;
@@ -339,7 +339,7 @@ index d6ac26123..000000000
 -            .items_center()
 -            .justify_center()
 -            .h(px(36.))
--            .rounded(px(8.))
+-            .rounded(px(if t.glass { 8. } else { 0. }))
 -            .bg(rgb(CYAN))
 -            .group_hover(id, |s| s.bg(rgb(CYAN_HOVER)))
 -            .text_color(rgb(ON_CYAN))
@@ -383,7 +383,12 @@ index d6ac26123..000000000
 -                            .child(horizon_launcher::i18n::tr("Ready in under a minute")),
 -                    )
 -                    .child(div().mt(px(16.)).child(button))
--                    .child(div().mt(px(8.)).flex().child(code_chip(12., 30.).flex_1())),
+-                    .child(
+-                        div()
+-                            .mt(px(8.))
+-                            .flex()
+-                            .child(code_chip(12., 30., t.glass).flex_1()),
+-                    ),
 -            )
 -    };
 -    let el = div()
@@ -435,7 +440,7 @@ index d6ac26123..000000000
 -    }
 -}
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 861c2c291..2499a7859 100644
+index 2ae0743..e7b2458 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -1369,34 +1369,11 @@ impl Launcher {
