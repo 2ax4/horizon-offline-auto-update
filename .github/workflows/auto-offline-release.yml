@@ -286,7 +286,15 @@ jobs:
             exit 0
           fi
           gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f "ref=refs/tags/${MARKER}" -f "sha=${SHA}" >/dev/null || true
-          failed_log="$(gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --log-failed 2>/dev/null | tail -120 || true)"
+          # The failed steps' logs can still be empty right after the job ends (GitHub
+          # finalizes them a moment later); retry a few times before giving up, so the
+          # issue actually carries the error instead of a log-less shell.
+          failed_log=""
+          for attempt in 1 2 3 4; do
+            failed_log="$(gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --log-failed 2>/dev/null | tail -120 || true)"
+            [ -n "$failed_log" ] && break
+            sleep 20
+          done
           {
             echo "The build of ${TAG} failed."
             echo

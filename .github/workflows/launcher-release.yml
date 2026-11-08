@@ -188,28 +188,97 @@ jobs:
           }
 
       - name: Smoke the offline account flow (add, list, forget)
+        env:
+          # A data folder of the smoke's own: the flow is judged on a fresh directory,
+          # never on whatever the runner's real data dir holds (no leftovers from the
+          # Tests step, no location.json pointer, no runner state can reach it).
+          HORIZON_LAUNCHER_HOME: ${{ runner.temp }}/offline-smoke
         run: |
           set -e
           bin="$BIN_DIR/${{ matrix.binary }}"
-          PY=python3
-          command -v python3 >/dev/null 2>&1 || PY=python
-          "$bin" account offline __SmokeTest__
-          "$bin" --json account list | "$PY" -c '
-            import json, sys
-            d = json.load(sys.stdin)
-            names = [a["name"] for a in d["offline"]]
-            assert "__SmokeTest__" in names, "offline account missing after add: %r" % names
-            assert any("selected" in a for a in d["offline"]), "selected field missing from account list"
-            print("offline account add + list: OK")
-          '
-          "$bin" account forget-offline __SmokeTest__
-          "$bin" --json account list | "$PY" -c '
-            import json, sys
-            d = json.load(sys.stdin)
-            names = [a["name"] for a in d["offline"]]
-            assert "__SmokeTest__" not in names, "offline account still listed after forget: %r" % names
-            print("offline account forget: OK")
-          '
+          # Git Bash on Windows hands `${{ runner.temp }}` over with backslashes.
+          home="${HORIZON_LAUNCHER_HOME//\\//}"
+          rm -rf "$home"
+          mkdir -p "$home"
+          export HORIZON_LAUNCHER_HOME="$home"
+          # The launcher's own data folder is `$HORIZON_LAUNCHER_HOME` here, so its
+          # accounts.json sits directly in it. On failure the folder and the JSON land
+          # in the run summary, which reads without signing in (job logs do not).
+          dump() {
+            {
+              echo "### offline smoke failed"
+              echo
+              echo "- failed command: \`$*\`"
+              echo "- smoke data folder: \`$home\`"
+              echo
+              echo "<details open><summary>What the folder held</summary>"
+              echo
+              echo '```'
+              ls -la "$home" 2>&1 || true
+              echo '```'
+              echo '</details>'
+              echo
+              echo "<details open><summary>accounts.json</summary>"
+              echo
+              echo '```'
+              cat "$home/accounts.json" 2>&1 || true
+              echo '```'
+              echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          run() {
+            if ! "$@"; then
+              dump "$@"
+              echo "::error title=offline smoke::$* failed (see the run summary)"
+              exit 1
+            fi
+          }
+          # The JSON assertions are plain `grep -F` on the launcher's own pretty JSON:
+          # no python, whose `python3` on Windows runners can be the Store alias that
+          # prints a hint and exits non-zero.
+          list() { "$bin" --json account list; }
+          expect() {
+            local pattern=$1 label=$2 out
+            if ! out=$(list); then
+              dump "--json account list"
+              echo "::error title=offline smoke::account list failed (see the run summary)"
+              exit 1
+            fi
+            printf '%s\n' "$out"
+            if ! printf '%s\n' "$out" | grep -qF -- "$pattern"; then
+              {
+                echo "### offline smoke failed: $label"
+                echo
+                echo '```json'
+                printf '%s\n' "$out"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error title=offline smoke::$label"
+              exit 1
+            fi
+          }
+          run "$bin" account offline __SmokeTest__
+          expect '"name": "__SmokeTest__"' "offline account missing after add"
+          expect '"selected": true' "nothing plays after add"
+          run "$bin" account forget-offline __SmokeTest__
+          if ! out=$(list); then
+            dump "--json account list"
+            echo "::error title=offline smoke::account list failed (see the run summary)"
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -qF '"__SmokeTest__"'; then
+            {
+              echo "### offline smoke failed: the account is still listed after forget"
+              echo
+              echo '```json'
+              printf '%s\n' "$out"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=offline smoke::still listed after forget"
+            exit 1
+          fi
+          echo "offline account add + list + forget: OK"
 
       - name: Package
         run: |
