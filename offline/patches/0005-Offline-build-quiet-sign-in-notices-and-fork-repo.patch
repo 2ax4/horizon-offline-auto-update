@@ -1,14 +1,14 @@
-From 0a36867843cd926bc4412ecef142e6f395d21975 Mon Sep 17 00:00:00 2001
+From d95fa70d93a206a0e5b9ce8c2b492c8c346cf2fb Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 13:35:56 +0000
-Subject: [PATCH] Offline build: quiet sign-in notices and fork repo
+Subject: [PATCH 4/9] Offline build: quiet sign-in notices and fork repo
 
 ---
- launcher/src/backend.rs | 55 +++++++++++++++++++++++------------------
- 1 file changed, 31 insertions(+), 24 deletions(-)
+ launcher/src/backend.rs | 53 +++++++++++++++++++++++------------------
+ 1 file changed, 30 insertions(+), 23 deletions(-)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index f7e37e958..36c5985c0 100644
+index 7f3fc2465..18cd54cd4 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -10,6 +10,7 @@ use std::sync::mpsc::Sender;
@@ -44,7 +44,7 @@ index f7e37e958..36c5985c0 100644
                  github_tag,
                  &version,
                  asset,
-@@ -2078,8 +2089,6 @@ fn download_for_owner(
+@@ -2118,8 +2129,6 @@ fn download_for_owner(
      log: &dyn Fn(String),
  ) -> Result<(), String> {
      let mut accounts = account::Accounts::load();
@@ -53,8 +53,8 @@ index f7e37e958..36c5985c0 100644
      let pass = account::launch(
          &account::Endpoints::live(),
          account::client_id().as_deref(),
-@@ -3090,9 +3099,6 @@ pub fn need_prepared(tag: &str) -> Result<(), String> {
-     }
+@@ -3171,9 +3180,6 @@ pub fn play_step(step: &str) {
+     eprintln!("Horizon: Play: {step}…");
  }
  
 -/// The client's command, once the owner gate lets it start and its resources are prepared. Past
@@ -63,16 +63,7 @@ index f7e37e958..36c5985c0 100644
  pub fn client(tag: &str) -> Result<Command, String> {
      client_as(tag, None)
  }
-@@ -3106,7 +3112,7 @@ pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, St
-         return Err(error);
-     }
-     let session = match who {
--        None => account::session_for_game(&game_home(), false).map_err(|e| e.to_string()),
-+        None => account::session_for_game(&game_home()).map_err(|e| e.to_string()),
-         Some(who) => account::session_for_game_as(&game_home(), who),
-     }
-     .map_err(|refused| format!("{refused} {}", crate::i18n::tr(SIGN_IN_HINT)))?;
-@@ -3280,13 +3286,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
+@@ -3369,13 +3375,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
  pub fn releases_and_updates(
      on_releases: impl FnOnce(Result<Vec<Release>, String>),
  ) -> Result<Updates, String> {
@@ -99,7 +90,7 @@ index f7e37e958..36c5985c0 100644
      on_releases: impl FnOnce(Result<Vec<Release>, String>),
  ) -> Result<Updates, String> {
      let list = match load() {
-@@ -3300,10 +3318,11 @@ fn releases_and_updates_with(
+@@ -3389,10 +3407,11 @@ fn releases_and_updates_with(
      let installed_versions = installed();
      let horizon = horizon_update(&installable_updates(&releases), &installed_versions)
          .or_else(|| architecture_update(&releases, &installed_versions));
@@ -112,7 +103,7 @@ index f7e37e958..36c5985c0 100644
      })
  }
  
-@@ -4368,13 +4387,6 @@ pub struct Settings {
+@@ -4464,13 +4483,6 @@ pub struct Settings {
      /// one now (the owner gate's screen).
      #[serde(default)]
      pub owner_notice_seen: bool,
@@ -126,7 +117,7 @@ index f7e37e958..36c5985c0 100644
      /// What the window does while the game runs. Stays by default.
      #[serde(default)]
      pub while_playing: WhilePlaying,
-@@ -4423,12 +4435,6 @@ pub struct Settings {
+@@ -4519,12 +4531,6 @@ pub struct Settings {
      /// An older file's switch for the release profile, read when `native_profile` is unset.
      #[serde(default, skip_serializing_if = "std::ops::Not::not")]
      pub native_release: bool,
@@ -139,7 +130,7 @@ index f7e37e958..36c5985c0 100644
  }
  
  impl Settings {
-@@ -4694,8 +4700,6 @@ mod tests {
+@@ -4790,8 +4796,6 @@ mod tests {
      }
  
      /// The launcher downloads Mojang's game files (client jar, libraries, assets) only for an
@@ -148,7 +139,7 @@ index f7e37e958..36c5985c0 100644
      #[test]
      fn mojang_downloads_only_for_an_owner() {
          let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
-@@ -4790,7 +4794,10 @@ mod tests {
+@@ -4886,7 +4890,10 @@ mod tests {
          };
          assert!(body("download_for").contains("mojang::download("));
          assert!(body("download_for_owner").contains("account::launch("));

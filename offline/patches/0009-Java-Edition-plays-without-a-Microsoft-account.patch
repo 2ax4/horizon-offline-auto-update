@@ -1,7 +1,7 @@
-From 0aa6b7d6deb39ca2cfa4315115764d2290c23562 Mon Sep 17 00:00:00 2001
+From 9725bfed69a8c05e174411b0ba5ee0b8ca060c2b Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:22:25 +0000
-Subject: [PATCH] Java Edition plays without a Microsoft account
+Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -24,10 +24,10 @@ empty token.
  3 files changed, 104 insertions(+), 64 deletions(-)
 
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 4c6185849..b22e6ac6d 100644
+index 6ffe417a8..bc45e8dc7 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
-@@ -2296,7 +2296,8 @@ fn account_sessions_until(
+@@ -2528,7 +2528,8 @@ fn account_sessions_until(
  }
  
  /// Who plays the real Minecraft: Java Edition (a Java instance), past the owner gate itself
@@ -37,7 +37,7 @@ index 4c6185849..b22e6ac6d 100644
  /// from the services, an account that owned it plays with its last token. Mojang's game takes the
  /// token on its command line, as Mojang's launcher gives it; that command is never logged.
  pub fn java_player() -> Result<crate::java_launch::Player, String> {
-@@ -2319,6 +2320,12 @@ fn java_player_with(
+@@ -2551,6 +2552,12 @@ fn java_player_with(
      store: &dyn SecretStore,
      accounts: &mut Accounts,
  ) -> Result<crate::java_launch::Player, String> {
@@ -50,7 +50,7 @@ index 4c6185849..b22e6ac6d 100644
      let pass = launch(ep, client_id, store, accounts).map_err(|e| e.to_string())?;
      let kept = || {
          let order = accounts.selected().into_iter().chain(&accounts.accounts);
-@@ -2339,5 +2346,34 @@ fn java_player_with(
+@@ -2571,5 +2578,34 @@ fn java_player_with(
      })
  }
  
@@ -86,7 +86,7 @@ index 4c6185849..b22e6ac6d 100644
  #[cfg(test)]
  mod tests;
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 1d27ac299..9cbbdd198 100644
+index 465a0818d..19622ce4e 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -1214,6 +1214,30 @@ fn the_java_edition_plays_as_an_owner_even_offline() {
@@ -121,10 +121,10 @@ index 1d27ac299..9cbbdd198 100644
  fn secrets_file(name: &str) -> PathBuf {
      let dir = std::env::temp_dir().join(format!("horizon-secrets-{name}-{}", std::process::id()));
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 36c5985c0..2b04d2102 100644
+index 18cd54cd4..5b0646203 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -2079,9 +2079,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
+@@ -2119,9 +2119,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
      binary.is_file().then_some(binary)
  }
  
@@ -137,7 +137,7 @@ index 36c5985c0..2b04d2102 100644
  fn download_for_owner(
      pins: &sources::Pins,
      dir: &Path,
-@@ -2098,12 +2098,12 @@ fn download_for_owner(
+@@ -2138,12 +2138,12 @@ fn download_for_owner(
      if let Err(e) = accounts.save() {
          log(format!("Horizon: the accounts are not saved: {e}"));
      }
@@ -153,7 +153,7 @@ index 36c5985c0..2b04d2102 100644
  pub fn download_version_for_owner(
      id: &str,
      manifest_sha1: &str,
-@@ -2124,9 +2124,10 @@ pub fn download_version_for_owner(
+@@ -2164,9 +2164,10 @@ pub fn download_version_for_owner(
      Ok(dir)
  }
  
@@ -167,7 +167,7 @@ index 36c5985c0..2b04d2102 100644
  /// instance's folder. The caller wraps it (`launch::wrap`) and never logs it: it holds the token.
  /// A Java instance's game, ready to start; `server` (`host[:port]`) is joined once it has.
  pub fn java_game(
-@@ -2219,50 +2220,42 @@ pub fn java_game(
+@@ -2259,50 +2260,42 @@ pub fn java_game(
      )
  }
  
@@ -237,7 +237,7 @@ index 36c5985c0..2b04d2102 100644
  }
  
  /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
-@@ -4699,9 +4692,11 @@ mod tests {
+@@ -4795,9 +4788,11 @@ mod tests {
          fs::remove_dir_all(&dir).unwrap();
      }
  
@@ -251,20 +251,20 @@ index 36c5985c0..2b04d2102 100644
          let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
          let _ = fs::remove_dir_all(&dir);
          let pins = sources::Pins::read(&serde_json::json!({ "minecraft": {
-@@ -4717,17 +4712,15 @@ mod tests {
+@@ -4813,17 +4808,15 @@ mod tests {
          };
          let log = |_: String| {};
          let no_owner = || Ok(account::Launch::default());
 -        for (pass, signed_in) in [
--            (Err(account::NoOwner), false),
--            (Err(account::NoOwner), true),
+-            (Err(account::NoOwner::default()), false),
+-            (Err(account::NoOwner::default()), true),
 -            (no_owner(), false),
 -            (no_owner(), true),
 -        ] {
 -            assert!(download_for(&pins, &dir, pass, signed_in, &fetch, &log).is_err());
 +        // No owner — nobody signed in, or the check failed: Mojang is asked all the same (and
 +        // the download fails here, without network).
-+        for pass in [Err(account::NoOwner), no_owner()] {
++        for pass in [Err(account::NoOwner::default()), no_owner()] {
 +            asked.lock().unwrap().clear();
 +            assert!(download_for(&pins, &dir, pass, &fetch, &log).is_err());
 +            assert!(!asked.lock().unwrap().is_empty());
@@ -277,7 +277,7 @@ index 36c5985c0..2b04d2102 100644
          let owner = account::Account {
              uuid: "069a79f444e94726a5befca90e38aaf5".into(),
              name: "Notch".into(),
-@@ -4742,22 +4735,9 @@ mod tests {
+@@ -4838,22 +4831,9 @@ mod tests {
              owner: Some((owner, secrets)),
              ..Default::default()
          });
@@ -293,7 +293,7 @@ index 36c5985c0..2b04d2102 100644
 -        )
 -        .unwrap();
          asked.lock().unwrap().clear();
--        for (pass, signed_in) in [(Err(account::NoOwner), true), (no_owner(), true)] {
+-        for (pass, signed_in) in [(Err(account::NoOwner::default()), true), (no_owner(), true)] {
 -            assert!(download_for(&pins, &dir, pass, signed_in, &fetch, &log).is_err());
 -        }
 -        assert!(asked.lock().unwrap().is_empty());

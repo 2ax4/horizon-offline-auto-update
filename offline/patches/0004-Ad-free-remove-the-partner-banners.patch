@@ -1,7 +1,7 @@
-From c37bd73c9fbd7ecced47da91be2e36a608a5074b Mon Sep 17 00:00:00 2001
+From 117436a24d9e28862f8507ed2f773cc1f1be048a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 13:35:56 +0000
-Subject: [PATCH] Ad-free: remove the partner banners
+Subject: [PATCH 3/9] Ad-free: remove the partner banners
 
 ---
  launcher/src/glass_servers.rs |  43 ----
@@ -11,7 +11,7 @@ Subject: [PATCH] Ad-free: remove the partner banners
  delete mode 100644 launcher/src/partner.rs
 
 diff --git a/launcher/src/glass_servers.rs b/launcher/src/glass_servers.rs
-index 2f1fb53..46b7f3b 100644
+index 2f1fb53ce..46b7f3bfb 100644
 --- a/launcher/src/glass_servers.rs
 +++ b/launcher/src/glass_servers.rs
 @@ -66,9 +66,6 @@ impl Launcher {
@@ -73,7 +73,7 @@ index 2f1fb53..46b7f3b 100644
  /// The open server's port.
 diff --git a/launcher/src/partner.rs b/launcher/src/partner.rs
 deleted file mode 100644
-index 84631c2..0000000
+index 84631c263..000000000
 --- a/launcher/src/partner.rs
 +++ /dev/null
 @@ -1,362 +0,0 @@
@@ -440,7 +440,7 @@ index 84631c2..0000000
 -    }
 -}
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 2ae0743..e7b2458 100644
+index 2ae0743e9..e7b2458bb 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -1369,34 +1369,11 @@ impl Launcher {

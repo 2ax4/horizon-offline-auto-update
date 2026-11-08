@@ -1,7 +1,7 @@
-From 15743aefb97098082616a05ae8cfbe01cc5b5629 Mon Sep 17 00:00:00 2001
+From 8ee57e09140b92fd12f3add7e7e2d91382edbdc3 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 13:35:56 +0000
-Subject: [PATCH] Offline updates follow the fork's releases
+Subject: [PATCH 2/9] Offline updates follow the fork's releases
 
 ---
  crates/horizon-release-sign/release-keys.txt  |   1 +
@@ -20,10 +20,10 @@ index c39be4435..c51015423 100644
  MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
 +DfcWSiaD14ScBMxU0btrJMPDSspw+flKz43XoXHSsh4=
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 253ced157..f7e37e958 100644
+index 9b3abafb2..7f3fc2465 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -3873,7 +3873,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
+@@ -3967,7 +3967,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
      {
          return Ok(None);
      }

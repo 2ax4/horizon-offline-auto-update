@@ -1,7 +1,8 @@
-From 38a3ded80490c15d5122e343fe266e51e68db2c0 Mon Sep 17 00:00:00 2001
+From 14887d3127d193f8b4634bcbbdf10f0fceb9a576 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 13:35:56 +0000
-Subject: [PATCH] Offline build: the glass look keeps only the offline account
+Subject: [PATCH 6/9] Offline build: the glass look keeps only the offline
+ account
 
 ---
  launcher/src/frame.rs         |  30 +-------
@@ -226,10 +227,10 @@ index 5627412f1..40d799b54 100644
 -    }
  }
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 3b08d8cb8..8b5ce9be7 100644
+index 625e81dd9..73b00d1b0 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -3444,7 +3444,7 @@ impl Launcher {
+@@ -3469,7 +3469,7 @@ impl Launcher {
                  &t,
              )),
              // The glass look's Overview ends with the screenshots and the patch log: Prepare is in
@@ -238,7 +239,7 @@ index 3b08d8cb8..8b5ce9be7 100644
              None if t.glass => rows,
              None => rows
                  .child(index_row(
-@@ -3467,7 +3467,7 @@ impl Launcher {
+@@ -3492,7 +3492,7 @@ impl Launcher {
              )),
          };
          // The top bar shows who plays; a row only when there is something to do about it. The

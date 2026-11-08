@@ -1,8 +1,9 @@
 name: auto-offline-release
 on:
   schedule:
-    # upstream check twice an hour, off the crowded :00/:30 minutes
-    - cron: '13,43 * * * *'
+    # upstream check every ten minutes, off the crowded :00/:30 minutes; GitHub drops
+    # scheduled ticks under load, so more ticks mean the next release is picked up sooner
+    - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
     inputs:
       retry:

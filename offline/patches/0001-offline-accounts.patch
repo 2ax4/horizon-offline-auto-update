@@ -1,12 +1,13 @@
-From 5cca440a8afa399ae614fe8d92ad039b945ba828 Mon Sep 17 00:00:00 2001
+From 86a1e715249c9250f75f973fe68cbee174bdd878 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 13:35:56 +0000
-Subject: [PATCH] Offline accounts: add and play with no Microsoft account
+Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
 
 ---
  docs/launcher-commands.md      |   4 -
  launcher/src/account.rs        |  62 ++------------
  launcher/src/account/tests.rs  |  83 ++++++-------------
+ launcher/src/backend.rs        |   2 +-
  launcher/src/cli.rs            |  66 ++++++---------
  launcher/src/dev_options.rs    |  62 --------------
  launcher/src/frame.rs          |  36 +-------
@@ -17,11 +18,11 @@ Subject: [PATCH] Offline accounts: add and play with no Microsoft account
  launcher/src/owner_page.rs     |  51 +++++++-----
  launcher/src/switch_page.rs    |   4 +-
  launcher/tests/owner_gate.rs   |  53 ++++++++----
- 13 files changed, 166 insertions(+), 407 deletions(-)
+ 14 files changed, 165 insertions(+), 410 deletions(-)
  delete mode 100644 launcher/src/dev_options.rs
 
 diff --git a/docs/launcher-commands.md b/docs/launcher-commands.md
-index d69815ff3..3bd47fc1d 100644
+index bbc79e851..cfac379d3 100644
 --- a/docs/launcher-commands.md
 +++ b/docs/launcher-commands.md
 @@ -188,8 +188,6 @@ MCP: `account_sign_out`, needs `confirm: true`.
@@ -43,7 +44,7 @@ index d69815ff3..3bd47fc1d 100644
  
  - `NAME`
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 58b898c4e..4c6185849 100644
+index 4b6ad3f20..6ffe417a8 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -6,8 +6,6 @@
@@ -64,7 +65,7 @@ index 58b898c4e..4c6185849 100644
  /// What every Play says while no account in the launcher owns the game.
  pub const NEEDS_OWNER: &str =
      "Sign in with a Microsoft account that owns Minecraft: Java Edition to play";
-@@ -1516,9 +1514,6 @@ pub enum Player {
+@@ -1718,9 +1716,6 @@ pub enum Player {
      GameName,
  }
  
@@ -74,7 +75,7 @@ index 58b898c4e..4c6185849 100644
  /// The secrets an account keeps in `store`, if it still has them there.
  fn secrets_in(store: &dyn SecretStore, uuid: &str) -> Option<Secrets> {
      store
-@@ -1597,7 +1592,6 @@ impl Accounts {
+@@ -1799,7 +1794,6 @@ impl Accounts {
          Ok(())
      }
      /// Whether an account here owned the game at its last check (the keychain's answer, no
@@ -82,7 +83,7 @@ index 58b898c4e..4c6185849 100644
      pub fn has_owner(&self, store: &dyn SecretStore) -> bool {
          // The selected account first: it owning the game ends the search after one account's
          // item — every account's item read can ask for the keychain (macOS, #4912).
-@@ -1616,21 +1610,7 @@ impl Accounts {
+@@ -1818,21 +1812,7 @@ impl Accounts {
          }
      }
  
@@ -105,7 +106,7 @@ index 58b898c4e..4c6185849 100644
          match who {
              Player::Microsoft(uuid) => {
                  if !self.accounts.iter().any(|a| a.uuid == uuid) {
-@@ -1639,9 +1619,6 @@ impl Accounts {
+@@ -1841,9 +1821,6 @@ impl Accounts {
                  self.selected = Some(uuid);
              }
              Player::Offline(name) => {
@@ -115,7 +116,7 @@ index 58b898c4e..4c6185849 100644
                  let name = self.add_offline(&name)?;
                  self.selected = None;
                  self.offline_selected = Some(name);
-@@ -1720,8 +1697,6 @@ impl Accounts {
+@@ -1922,8 +1899,6 @@ impl Accounts {
          }
      }
  
@@ -124,7 +125,7 @@ index 58b898c4e..4c6185849 100644
      pub fn remove(&mut self, store: &dyn SecretStore, uuid: &str) -> Result<(), String> {
          let _operation = session::lock(store)?;
          store.delete(uuid)?;
-@@ -1855,23 +1830,6 @@ pub fn launch(
+@@ -2087,23 +2062,6 @@ pub fn launch(
      }
  }
  
@@ -140,7 +141,7 @@ index 58b898c4e..4c6185849 100644
 -    offline_without_owner: bool,
 -) -> Result<Launch, NoOwner> {
 -    match launch(ep, client_id, store, accounts) {
--        Err(NoOwner) if offline_without_owner => Ok(Launch::default()),
+-        Err(NoOwner { .. }) if offline_without_owner => Ok(Launch::default()),
 -        pass => pass,
 -    }
 -}
@@ -148,7 +149,7 @@ index 58b898c4e..4c6185849 100644
  /// Write the session for the game, readable by this user only, in a fresh file it deletes
  /// when it reads it.
  pub fn write_session_file(
-@@ -2105,19 +2063,17 @@ pub struct GameSession {
+@@ -2337,19 +2295,17 @@ pub struct GameSession {
  }
  
  /// The owner gate for the game about to start, then the selected account's session in a file
@@ -174,7 +175,7 @@ index 58b898c4e..4c6185849 100644
      )?;
      let env = split_sessions(
          game_home,
-@@ -2172,7 +2128,7 @@ fn launch_as(
+@@ -2404,7 +2360,7 @@ fn launch_as(
          accounts.offline.clone(),
      );
      let pass = accounts
@@ -184,7 +185,7 @@ index 58b898c4e..4c6185849 100644
      (
          accounts.selected,
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 0a1c643f0..1d27ac299 100644
+index 96e9d3443..465a0818d 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -686,76 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
@@ -242,10 +243,10 @@ index 0a1c643f0..1d27ac299 100644
 -    assert_eq!(accounts, Accounts::default());
 -    let (_, ep) = mock(|m| m.owns_game = false);
 -    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false);
--    assert_eq!(refused.unwrap_err(), NoOwner);
+-    assert_eq!(refused.unwrap_err(), NoOwner::default());
      let mut accounts = signed_in(&store, &secrets("mc-token", true));
 -    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false);
--    assert_eq!(refused.unwrap_err(), NoOwner);
+-    assert_eq!(refused.unwrap_err(), NoOwner::default());
 -}
 -
 -#[test]
@@ -314,8 +315,21 @@ index 0a1c643f0..1d27ac299 100644
      // Forgetting drops the look and the name's skin and cape files too.
      let dir = std::env::temp_dir().join(format!("horizon-accounts-{}", std::process::id()));
      let _ = std::fs::remove_dir_all(&dir);
+diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
+index eb0bbb861..9b3abafb2 100644
+--- a/launcher/src/backend.rs
++++ b/launcher/src/backend.rs
+@@ -3189,7 +3189,7 @@ pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, St
+     play_step("reading the sign-in");
+     let hint = |refused: String| format!("{refused} {}", crate::i18n::tr(SIGN_IN_HINT));
+     let session = match who {
+-        None => account::session_for_game(&game_home(), false).map_err(|refused| {
++        None => account::session_for_game(&game_home()).map_err(|refused| {
+             // A keyring that didn't answer isn't a missing sign-in (#12179).
+             match refused.keyring {
+                 Some(why) => why,
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index 506b90988..2dbc4f23e 100644
+index d8794c0bc..591f7726b 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
 @@ -126,14 +126,16 @@ enum AccountCmd {
@@ -342,7 +356,7 @@ index 506b90988..2dbc4f23e 100644
      /// Show or set an offline name's skin and cape: a 64x64 (or 64x32) skin PNG, a 64x32 cape
      /// PNG, the model. Kept by the launcher and given to the game when that name plays
      Skin {
-@@ -844,7 +846,6 @@ enum Cmd {
+@@ -846,7 +848,6 @@ enum Cmd {
          action: Option<AccountCmd>,
      },
      /// Show the launcher's settings, or set one (the Settings page): selected-version TAG,
@@ -350,7 +364,7 @@ index 506b90988..2dbc4f23e 100644
      /// minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions
      /// on|off, prune-old-versions on|off (delete old versions after an install, keeping the
      /// selected one, the ones instances use and the newest few), keep-versions N (how many of the
-@@ -1004,7 +1005,7 @@ pub fn command() -> clap::Command {
+@@ -1006,7 +1007,7 @@ pub fn command() -> clap::Command {
  pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
  
  /// The keys `settings` sets.
@@ -359,7 +373,7 @@ index 506b90988..2dbc4f23e 100644
      "selected-version",
      "minecraft-dir",
      "server-dir",
-@@ -1012,7 +1013,6 @@ const SETTING_KEYS: [&str; 15] = [
+@@ -1014,7 +1015,6 @@ const SETTING_KEYS: [&str; 15] = [
      "prune-old-versions",
      "keep-versions",
      "opening-animation",
@@ -367,7 +381,7 @@ index 506b90988..2dbc4f23e 100644
      "proxy",
      "while-playing",
      "language",
-@@ -1050,18 +1050,6 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
+@@ -1052,18 +1052,6 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
              }
          }
          "opening-animation" => s.skip_opening = !on_off(value)?,
@@ -386,7 +400,7 @@ index 506b90988..2dbc4f23e 100644
          "while-playing" => {
              s.while_playing = backend::WhilePlaying::parse(value)
                  .ok_or_else(|| format!("{value}: say stay, minimize or hide"))?
-@@ -1137,7 +1125,6 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
+@@ -1139,7 +1127,6 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
  fn settings_json(s: &backend::Settings) -> serde_json::Value {
      serde_json::json!({
          "selected_version": backend::resolve_version(None).ok(),
@@ -394,7 +408,7 @@ index 506b90988..2dbc4f23e 100644
          "minecraft_dir": s.minecraft_dir,
          "server_dir": backend::server_dir(None),
          "install_new_versions": s.install_new_versions.unwrap_or(true),
-@@ -1343,7 +1330,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+@@ -1345,7 +1332,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                      // The instance's version is never looked at here: the newest installed
                      // release or Nightly, or that one with `--update` (never a native build).
                      None => native_mods::base_for(None, &backend::installed(), update)
@@ -403,7 +417,7 @@ index 506b90988..2dbc4f23e 100644
                  };
                  let built = native_mods::build_server(
                      &base,
-@@ -1385,7 +1372,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+@@ -1387,7 +1374,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                  None => {
                      let plays = target.resolve_version(None).ok();
                      native_mods::base_for(plays.as_deref(), &backend::installed(), update)
@@ -412,7 +426,7 @@ index 506b90988..2dbc4f23e 100644
                  }
              };
              let folder = match folder {
-@@ -1520,7 +1507,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+@@ -1522,7 +1509,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                  None => None,
              };
              if let Some(who) = &who {
@@ -421,7 +435,7 @@ index 506b90988..2dbc4f23e 100644
              }
              let mut cmd =
                  backend::client_as(&instance.resolve_version(version.as_deref())?, who.as_ref())?;
-@@ -1930,8 +1917,9 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -1932,8 +1919,9 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                  }));
              } else if accounts.accounts.is_empty() && accounts.offline.is_empty() {
                  println!(
@@ -433,19 +447,19 @@ index 506b90988..2dbc4f23e 100644
                  );
              } else {
                  for a in &accounts.accounts {
-@@ -1953,7 +1941,10 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
-                     );
+@@ -1961,9 +1949,8 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                  }
                  if !accounts.has_owner(account::store()) {
--                    println!("{} {}", account::NoOwner, tr(backend::SIGN_IN_HINT));
-+                    println!(
+                     println!(
+-                        "{} {}",
+-                        account::NoOwner::default(),
+-                        tr(backend::SIGN_IN_HINT)
 +                        "A Microsoft account that owns Minecraft: Java Edition is only needed for \
 +                         online-mode servers and for downloading the game (`account sign-in`)."
-+                    );
+                     );
                  }
              }
-         }
-@@ -2044,7 +2035,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -2055,7 +2042,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                  ),
                  (None, None) => return Err(find(&accounts, &who).unwrap_err()),
              };
@@ -454,7 +468,7 @@ index 506b90988..2dbc4f23e 100644
              accounts.save()?;
              println!("The game plays as {name}.");
          }
-@@ -2053,7 +2044,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -2064,7 +2051,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                  Some(n) => account::Player::Offline(n),
                  None => account::Player::GameName,
              };
@@ -463,7 +477,7 @@ index 506b90988..2dbc4f23e 100644
              accounts.save()?;
              match accounts.name_arg() {
                  Some(n) => println!("The game plays offline as {n}."),
-@@ -3203,14 +3194,11 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
+@@ -3240,14 +3227,11 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
                      ))
                  }
              };
@@ -633,7 +647,7 @@ index 5d48c63c8..27dbf43bc 100644
              PlayPress::Play => {
                  play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index d46a60d66..3b08d8cb8 100644
+index cfc476505..625e81dd9 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -13,7 +13,6 @@ mod console;
@@ -644,7 +658,7 @@ index d46a60d66..3b08d8cb8 100644
  mod export_page;
  mod frame;
  mod game_tools;
-@@ -57,7 +56,6 @@ mod native_log_page;
+@@ -56,7 +55,6 @@ mod native_log_page;
  mod new_instance;
  mod owner_page;
  mod packs_page;
@@ -652,7 +666,7 @@ index d46a60d66..3b08d8cb8 100644
  mod perf;
  mod picture_cache;
  mod plate;
-@@ -383,10 +381,6 @@ struct Launcher {
+@@ -381,10 +379,6 @@ struct Launcher {
      owner: Option<bool>,
      /// Play was refused (or Home's Sign in pressed): the owner gate's screen is open.
      owner_screen_open: bool,
@@ -663,7 +677,7 @@ index d46a60d66..3b08d8cb8 100644
      /// The game is waiting for its session (a token renewal), or a Java instance for its files
      /// and Java (`start_java`), before it starts.
      starting_client: Option<String>,
-@@ -528,30 +522,6 @@ impl Launcher {
+@@ -530,30 +524,6 @@ impl Launcher {
              }
          })
          .detach();
@@ -694,7 +708,7 @@ index d46a60d66..3b08d8cb8 100644
          let mut settings = Settings::load();
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
-@@ -693,8 +663,6 @@ impl Launcher {
+@@ -695,8 +665,6 @@ impl Launcher {
              keychain: None,
              owner: None,
              owner_screen_open: false,
@@ -703,7 +717,7 @@ index d46a60d66..3b08d8cb8 100644
              starting_client: None,
              play_when_prepared: None,
              friend_code: line_edit::LineEdit::new(String::new(), 256, 32),
-@@ -1223,8 +1191,7 @@ impl Launcher {
+@@ -1230,8 +1198,7 @@ impl Launcher {
                                  continue;
                              }
                          };
@@ -713,7 +727,7 @@ index d46a60d66..3b08d8cb8 100644
                              self.owner = Some(true);
                          }
                          if let Some(file) = file {
-@@ -1881,7 +1848,6 @@ impl Launcher {
+@@ -1899,7 +1866,6 @@ impl Launcher {
          self.starting_client = Some(tag.clone());
          self.play_pressed = Some(Instant::now());
          let tx = self.tx.clone();
@@ -721,16 +735,16 @@ index d46a60d66..3b08d8cb8 100644
          // Registry mods update before the game reads them (`horizon::auto`); native mods only
          // at start, where a build can follow.
          let auto = self
-@@ -1901,7 +1867,7 @@ impl Launcher {
-                     let _ = mods_tx.send(mods_page::Event::AutoUpdated(lines, Vec::new()));
+@@ -1923,7 +1889,7 @@ impl Launcher {
                  }
              }
+             backend::play_step("reading the sign-in");
 -            let session = account::session_for_game(&backend::game_home(), offline_without_owner);
 +            let session = account::session_for_game(&backend::game_home());
+             backend::play_step("starting the game");
              let _ = tx.send(Msg::Session(session));
          });
-     }
-@@ -2467,10 +2433,7 @@ fn segments<T: Copy + PartialEq + 'static>(
+@@ -2494,10 +2460,7 @@ fn segments<T: Copy + PartialEq + 'static>(
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  enum PlayPress {
      Play,
@@ -741,7 +755,7 @@ index d46a60d66..3b08d8cb8 100644
      Nothing,
  }
  
-@@ -2517,13 +2480,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
+@@ -2544,13 +2507,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
      Some(next)
  }
  
@@ -758,7 +772,7 @@ index d46a60d66..3b08d8cb8 100644
      }
  }
  
-@@ -2531,7 +2492,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+@@ -2558,7 +2519,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
  /// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
  /// the game would open on half-written files.
  fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
@@ -767,7 +781,7 @@ index d46a60d66..3b08d8cb8 100644
  }
  
  /// Whether `tag` can start being deleted now: it is installed, no install is writing it, and it
-@@ -2937,7 +2898,6 @@ impl Launcher {
+@@ -2964,7 +2925,6 @@ impl Launcher {
              },
          ));
          let items = self.instance_items(heading, cx);
@@ -775,7 +789,7 @@ index d46a60d66..3b08d8cb8 100644
          let list = div()
              .flex()
              .flex_col()
-@@ -2953,8 +2913,6 @@ impl Launcher {
+@@ -2980,8 +2940,6 @@ impl Launcher {
          if !servers.is_empty() {
              list = list.child(heading(tr("SERVERS").into()));
          }
@@ -784,7 +798,7 @@ index d46a60d66..3b08d8cb8 100644
          for e in servers {
              let up = self.servers.is_up(&e.dir);
              let open = self.page == Page::Servers && self.servers.open.as_ref() == Some(&e.dir);
-@@ -3101,34 +3059,6 @@ impl Launcher {
+@@ -3128,34 +3086,6 @@ impl Launcher {
              }
              _ => {}
          }
@@ -819,7 +833,7 @@ index d46a60d66..3b08d8cb8 100644
          if !self.links.sponsor.is_empty() {
              foot = foot.child(link(
                  "sponsor",
-@@ -3158,11 +3088,7 @@ impl Launcher {
+@@ -3185,11 +3115,7 @@ impl Launcher {
                  .id("launcher-version")
                  .px(px(8.))
                  .pt(px(6.))
@@ -832,7 +846,7 @@ index d46a60d66..3b08d8cb8 100644
          );
          // Custom title bars carry the mark and name already.
          let brand = (!titlebar::draws_brand(window)).then(|| {
-@@ -3379,10 +3305,8 @@ impl Launcher {
+@@ -3404,10 +3330,8 @@ impl Launcher {
          let left = self.download_left();
          let steps = self.preparing.then(|| self.steps(&version, left));
  
@@ -844,7 +858,7 @@ index d46a60d66..3b08d8cb8 100644
              .flatten();
          // No launcher folder with Minecraft on this computer: an owner needs none.
          let no_install = self.settings.minecraft_dir.is_none();
-@@ -3397,7 +3321,7 @@ impl Launcher {
+@@ -3422,7 +3346,7 @@ impl Launcher {
                  &[("version", &version)],
              ),
              Some(false) => trf(
@@ -853,7 +867,7 @@ index d46a60d66..3b08d8cb8 100644
                  &[("version", &version)],
              ),
              None => backend::resources_summary(prepared, !silent, &version),
-@@ -3456,12 +3380,25 @@ impl Launcher {
+@@ -3481,12 +3405,25 @@ impl Launcher {
                          cx.notify();
                      })),
                  ),
@@ -885,7 +899,7 @@ index d46a60d66..3b08d8cb8 100644
              None => div().child(prepare),
          };
          let owner = self.owner == Some(true);
-@@ -3529,11 +3466,10 @@ impl Launcher {
+@@ -3554,11 +3491,10 @@ impl Launcher {
                  &t,
              )),
          };
@@ -900,7 +914,7 @@ index d46a60d66..3b08d8cb8 100644
                  rows = rows.child(index_row(
                      5,
                      tr("Microsoft account"),
-@@ -4094,7 +4030,6 @@ impl Launcher {
+@@ -4113,7 +4049,6 @@ impl Launcher {
              )
              .child(self.collection_section(cx))
              .children(self.agents_section(cx))
@@ -908,7 +922,7 @@ index d46a60d66..3b08d8cb8 100644
      }
  
      /// The warning before a native build: what the mods can do and which mods. The build starts
-@@ -5954,22 +5889,13 @@ mod tests {
+@@ -5917,22 +5852,13 @@ mod tests {
          );
      }
  
@@ -949,7 +963,7 @@ index b278ae968..f2a208fdc 100644
                      "sign_in": sign_in,
                  }))
 diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
-index 3e0acab44..5cb33571f 100644
+index cc94b1717..7430b2f0e 100644
 --- a/launcher/src/owner_page.rs
 +++ b/launcher/src/owner_page.rs
 @@ -1,28 +1,14 @@
@@ -1016,7 +1030,7 @@ index 3e0acab44..5cb33571f 100644
              .child(line(
                  "Your worlds, offline names and settings stay where they are.",
                  n.muted,
-@@ -164,7 +152,7 @@ impl Launcher {
+@@ -209,7 +197,7 @@ impl Launcher {
                  )
              }
              Shown::Starting(_) => None,
@@ -1025,7 +1039,7 @@ index 3e0acab44..5cb33571f 100644
              _ => Some(
                  microsoft::sign_in_button("owner-sign-in", &t).on_click(cx.listener(
                      |this, _: &ClickEvent, _, cx| {
-@@ -186,6 +174,25 @@ impl Launcher {
+@@ -231,6 +219,25 @@ impl Launcher {
              .gap(px(10.))
              .mt(px(14.))
              .children(main)
@@ -1052,7 +1066,7 @@ index 3e0acab44..5cb33571f 100644
                  shell::action("owner-later", shell::Action::Quiet, &t)
                      .child(shell::label(tr("Not now").to_string()))
 diff --git a/launcher/src/switch_page.rs b/launcher/src/switch_page.rs
-index b968f9d1e..419225692 100644
+index 153ffd242..c8258dc1a 100644
 --- a/launcher/src/switch_page.rs
 +++ b/launcher/src/switch_page.rs
 @@ -24,9 +24,7 @@ impl Launcher {
