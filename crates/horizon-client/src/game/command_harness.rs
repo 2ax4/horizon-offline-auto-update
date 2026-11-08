@@ -166,7 +166,7 @@ impl Game<'_> {
         // its hub record, which leave_guest would otherwise overwrite.
         self.in_owner_level(|g| {
             let mut host = g.lan.take().ok_or("command harness: no hub")?;
-            g.start_server_trip(&mut host, conn, plan.dim, Some(plan));
+            g.start_server_trip(&mut host, conn, plan.dim, Some(plan), false);
             g.lan = Some(host);
             Ok(())
         })
@@ -271,9 +271,19 @@ impl Game<'_> {
                     self.chat_capture = Some(Vec::new());
                     self.cmds.results = Some(Vec::new());
                     self.harness_owner(|g| {
+                        let previous = g.command_source;
+                        if op["source"].as_str() == Some("console") {
+                            // Actual server source; permission-only `as_console`
+                            // otherwise keeps the connected owner's entity.
+                            g.command_source = Some(super::commands::execute::Source {
+                                silent: false,
+                                ..g.server_source()
+                            });
+                        }
                         g.as_console(|g| {
                             g.run_command(command.strip_prefix('/').unwrap_or(command))
                         });
+                        g.command_source = previous;
                         Ok(())
                     })?;
                     let messages = self.chat_capture.take().unwrap_or_default();

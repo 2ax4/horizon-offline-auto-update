@@ -114,7 +114,8 @@ public final class VanillaCommandExecOracle {
             WorldDataConfiguration config = WorldDataConfiguration.DEFAULT;
             LevelSettings settings = new LevelSettings("Harness", GameType.SURVIVAL, LevelSettings.DifficultySettings.DEFAULT, true, config);
             WorldLoader.PackConfig packConfig = new WorldLoader.PackConfig(packs, config, false, true);
-            WorldLoader.InitConfig init = new WorldLoader.InitConfig(packConfig, Commands.CommandSelection.INTEGRATED, LevelBasedPermissionSet.OWNER);
+            WorldLoader.InitConfig init = new WorldLoader.InitConfig(packConfig, Commands.CommandSelection.INTEGRATED,
+                Boolean.getBoolean("horizon.functionAdmissionFixture") ? LevelBasedPermissionSet.GAMEMASTER : LevelBasedPermissionSet.OWNER);
             boolean flat = Boolean.getBoolean("horizon.parity.flat");
             WorldOptions options = new WorldOptions(seed, !flat, false);
             WorldStem stem = Util.<WorldStem>blockUntilDone(executor -> WorldLoader.load(init, context -> {
@@ -565,7 +566,7 @@ public final class VanillaCommandExecOracle {
                     messages.add(spans(chatType.decorate(message.content())));
                 }
             };
-            if(Boolean.getBoolean("horizon.merchantCraftedFixture")) this.tickRateManager().setFrozen(true);
+            if(Boolean.getBoolean("horizon.merchantFixture")||Boolean.getBoolean("horizon.merchantCraftedFixture")) this.tickRateManager().setFrozen(true);
             Connection connection = new Connection(PacketFlow.SERVERBOUND);
             EmbeddedChannel channel = Boolean.getBoolean("horizon.merchantCraftedFixture") ? new EmbeddedChannel(
                 new io.netty.channel.ChannelInitializer<io.netty.channel.Channel>() {
@@ -619,7 +620,12 @@ public final class VanillaCommandExecOracle {
                         String command = op.get("cmd").getAsString();
                         messages.clear();
                         List<JsonArray> results = new ArrayList<>();
-                        var source = player.createCommandSourceStack().withCallback((success, value) -> {
+                        // Reuse the existing feedback receiver while retaining the actual
+                        // server stack's null entity, names, position and permissions.
+                        var baseSource = op.has("source") && op.get("source").getAsString().equals("console")
+                                ? this.createCommandSourceStack().withSource(player.commandSource())
+                                : player.createCommandSourceStack();
+                        var source = baseSource.withCallback((success, value) -> {
                             JsonArray r = new JsonArray();
                             r.add(success);
                             r.add(value);
