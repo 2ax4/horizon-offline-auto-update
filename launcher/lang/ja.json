@@ -1234,6 +1234,7 @@
   "Use a different Microsoft account": "別の Microsoft アカウントを使用",
   "Buy": "購入",
   "Gift": "ギフト",
+  "Found on this computer": "このコンピューターで見つかったもの",
   "Looks": "コーデ",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "未準備です。Horizon は自分のインストールから Minecraft {version} を準備できます。Mojang からダウンロードするにはサインインしてください。",
   "Couldn't load patch notes. {error}": "パッチノートを読み込めませんでした。{error}",
