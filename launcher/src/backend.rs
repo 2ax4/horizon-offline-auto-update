@@ -3167,6 +3167,12 @@ pub fn need_prepared(tag: &str) -> Result<(), String> {
     }
 }
 
+/// Says on stderr which step Play is at, one line each: a terminal run shows where it stops when
+/// it never gets to the game (#12179).
+pub fn play_step(step: &str) {
+    eprintln!("Horizon: Play: {step}…");
+}
+
 pub fn client(tag: &str) -> Result<Command, String> {
     client_as(tag, None)
 }
@@ -3179,15 +3185,23 @@ pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, St
     if let Some(error) = game_architecture_launch_error(tag) {
         return Err(error);
     }
+    play_step("reading the sign-in");
+    let hint = |refused: String| format!("{refused} {}", crate::i18n::tr(SIGN_IN_HINT));
     let session = match who {
-        None => account::session_for_game(&game_home()).map_err(|e| e.to_string()),
-        Some(who) => account::session_for_game_as(&game_home(), who),
-    }
-    .map_err(|refused| format!("{refused} {}", crate::i18n::tr(SIGN_IN_HINT)))?;
+        None => account::session_for_game(&game_home()).map_err(|refused| {
+            // A keyring that didn't answer isn't a missing sign-in (#12179).
+            match refused.keyring {
+                Some(why) => why,
+                None => hint(refused.to_string()),
+            }
+        }),
+        Some(who) => account::session_for_game_as(&game_home(), who).map_err(hint),
+    }?;
     if let Err(e) = need_prepared(tag) {
         account::discard_unread_sessions();
         return Err(e);
     }
+    play_step("checking the game's assets");
     complete_assets(tag);
     crate::browser::horizon::before_play(&game_home());
     let mut cmd = client_command(tag);
@@ -4796,7 +4810,7 @@ mod tests {
         let no_owner = || Ok(account::Launch::default());
         // No owner — nobody signed in, or the check failed: Mojang is asked all the same (and
         // the download fails here, without network).
-        for pass in [Err(account::NoOwner), no_owner()] {
+        for pass in [Err(account::NoOwner::default()), no_owner()] {
             asked.lock().unwrap().clear();
             assert!(download_for(&pins, &dir, pass, &fetch, &log).is_err());
             assert!(!asked.lock().unwrap().is_empty());

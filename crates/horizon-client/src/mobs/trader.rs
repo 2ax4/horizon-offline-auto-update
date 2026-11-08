@@ -152,6 +152,7 @@ impl Goal for DrinkItem {
             // LivingEntity.completeUsingItem: the potion or the milk takes effect.
             if self.dark {
                 m.extra.effects.retain(|e| e.0 != INVISIBILITY);
+                m.extra.effect_fallbacks.retain(|h| h.id != INVISIBILITY);
                 m.extra.effects.push((INVISIBILITY, 3600, 0));
                 cx.events.push(MobEvent::Sound(
                     "entity.wandering_trader.drink_potion",
@@ -160,7 +161,16 @@ impl Goal for DrinkItem {
                     1.0,
                 ));
             } else {
+                let had_absorption = m.has_effect("minecraft:absorption");
+                let had_boost = m.has_effect("minecraft:health_boost");
                 m.extra.effects.clear();
+                m.extra.effect_fallbacks.clear();
+                if had_absorption {
+                    m.absorption = m.absorption.min(super::armor::max_absorption(m));
+                }
+                if had_boost {
+                    super::finalize::health_boost_changed(m);
+                }
                 cx.events.push(MobEvent::Sound(
                     "entity.wandering_trader.drink_milk",
                     m.center(),
