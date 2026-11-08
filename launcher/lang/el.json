@@ -1240,6 +1240,8 @@
   "Can't read {name}'s sign-in: {why}": "Δεν είναι δυνατή η ανάγνωση της σύνδεσης του {name}: {why}",
   "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.": "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.",
   "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.": "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.",
+  "{mod}: using version {version}, made for the Horizon you play": "{mod}: χρησιμοποιείται η έκδοση {version}, φτιαγμένη για το Horizon που παίζεις",
+  "Recommended": "Προτείνεται",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
   "Couldn't load patch notes. {error}": "Δεν ήταν δυνατή η φόρτωση των σημειώσεων ενημέρωσης κώδικα. {error}",
   "Loading patch notes…": "Φόρτωση σημειώσεων ενημέρωσης κώδικα…",

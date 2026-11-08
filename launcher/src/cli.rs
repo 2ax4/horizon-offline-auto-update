@@ -1396,6 +1396,9 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                 Some(folder) => folder,
                 None => native_mods::installed_mods(&target.home)?,
             };
+            for line in horizon_launcher::browser::horizon::fit_versions(&target) {
+                println!("{line}");
+            }
             let built = native_mods::build(
                 &base,
                 &folder,
@@ -2693,7 +2696,7 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                 };
                 let newer = match &java {
                     Some(target) => java_instance::update_for(&*source, target, e)?,
-                    None => installed::update_for(&*source, e)?,
+                    None => installed::update_for(&*source, e, &home)?,
                 };
                 match newer {
                     None => println!("{} {}: up to date.", e.title, e.number),

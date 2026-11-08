@@ -1240,6 +1240,8 @@
   "Can't read {name}'s sign-in: {why}": "ʻAʻole hiki ke heluhelu i ke komo ʻana o {name}: {why}",
   "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.": "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.",
   "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.": "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.",
+  "{mod}: using version {version}, made for the Horizon you play": "{mod}: e hoʻohana ana i ka mana {version}, i hana ʻia no ka Horizon āu e pāʻani nei",
+  "Recommended": "Paipai ʻia",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
   "Couldn't load patch notes. {error}": "ʻAʻole hiki ke hoʻouka i nā memo paʻi. {error}",
   "Loading patch notes…": "Ke hoʻouka nei i nā memo paʻi…",

@@ -286,7 +286,7 @@ enum Job {
     Decorate(i32, i32, Box<[Proto; 9]>, Vec<(usize, Chunk)>),
     Finish(Proto),
     Light(i32, i32, Box<Region>, u64, bool),
-    Mesh(i32, i32, i32, Box<Region>, u64, MeshSettings),
+    Mesh(i32, i32, i32, Arc<Region>, u64, MeshSettings),
     /// Proto chunks checked out to be saved (`ChunkGenerator::save_protos`),
     /// off the main thread like vanilla's IOWorker.
     Save(Vec<((i32, i32), Proto)>),
@@ -1185,13 +1185,12 @@ impl Streaming {
     /// The resident sections `LevelExtractor.allChanged` queues again. An
     /// unlit column will queue itself when its light job completes.
     fn mark_loaded_sections_dirty(world: &mut World, lit: &FxHashSet<(i32, i32)>) {
+        let mask = SectionMask::below(world.layout().sections());
         for &(x, z) in world.chunks.keys() {
             if !lit.contains(&(x, z)) {
                 continue;
             }
-            for sy in 0..world.layout().sections() as i32 {
-                world.dirty_sections.insert((x, sy, z));
-            }
+            world.dirty_sections.insert_column_mask((x, z), mask);
         }
     }
     /// A column received from a server, with the light it sent
@@ -1204,10 +1203,12 @@ impl Streaming {
         world.chunks.insert(key, Arc::new(chunk));
         self.lit.insert(key);
         self.generated_total += 1;
+        let mask = SectionMask::below(world.layout().sections());
         for dz in -1..=1 {
             for dx in -1..=1 {
-                for sy in 0..world.layout().sections() as i32 {
-                    world.dirty_sections.insert((key.0 + dx, sy, key.1 + dz));
+                let n = (key.0 + dx, key.1 + dz);
+                if n == key || world.chunks.contains_key(&n) {
+                    world.dirty_sections.insert_column_mask(n, mask);
                 }
             }
         }
@@ -1525,7 +1526,7 @@ impl Streaming {
             z,
         )
     }
-    fn region(world: &World, x: i32, z: i32) -> Option<Box<Region>> {
+    fn region(world: &World, x: i32, z: i32) -> Option<Arc<Region>> {
         let mut region: Region = Default::default();
         for dz in 0..3 {
             for dx in 0..3 {
@@ -1537,7 +1538,7 @@ impl Streaming {
                 );
             }
         }
-        Some(Box::new(region))
+        Some(Arc::new(region))
     }
     pub fn is_lit(&self, x: i32, z: i32) -> bool {
         self.lit.contains(&(x, z))
@@ -1937,8 +1938,8 @@ impl Streaming {
                 }) {
                     continue;
                 }
-                let keys: Vec<(i32, i32)> =
-                    (0..9).map(|i| (x + (i % 3) - 1, z + (i / 3) - 1)).collect();
+                let keys: [(i32, i32); 9] =
+                    std::array::from_fn(|i| (x + (i as i32 % 3) - 1, z + (i as i32 / 3) - 1));
                 // A final neighbour cannot be generated again: a generator that
                 // can decorates beside it (a chunk of an older world), writing
                 // into it as vanilla's features do; the others skip decoration
@@ -1947,40 +1948,33 @@ impl Streaming {
                 if keys.iter().any(|k| self.decorating_finals.contains(k)) {
                     continue;
                 }
+                let has_final = keys.iter().any(|k| world.chunks.contains_key(k));
+                if has_final && !self.saves_beside_final {
+                    self.decorated.insert((x, z));
+                    waiting.borrow_mut().insert((x, z), false);
+                    continue;
+                }
+                if !keys.iter().all(|k| {
+                    world.chunks.contains_key(k) || matches!(self.protos.get(k), Some(Some(_)))
+                }) {
+                    continue;
+                }
                 let finals: Vec<(usize, Chunk)> = keys
                     .iter()
                     .enumerate()
                     .filter_map(|(i, k)| Some((i, (**world.chunks.get(k)?).clone())))
                     .collect();
-                if !finals.is_empty() && !self.saves_beside_final {
-                    self.decorated.insert((x, z));
-                    waiting.borrow_mut().insert((x, z), false);
-                    continue;
-                }
-                if !keys.iter().enumerate().all(|(i, k)| {
-                    finals.iter().any(|(f, _)| *f == i)
-                        || matches!(self.protos.get(k), Some(Some(_)))
-                }) {
-                    continue;
-                }
-                let region: Vec<Proto> = keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| {
-                        if finals.iter().any(|(f, _)| *f == i) {
-                            return Box::new(()) as Proto;
-                        }
-                        self.light_views.remove(k);
-                        self.protos
-                            .insert(*k, None)
-                            .flatten()
-                            .expect("present proto")
-                    })
-                    .collect();
-                let region: Box<[Proto; 9]> = match region.try_into() {
-                    Ok(r) => Box::new(r),
-                    Err(_) => continue,
-                };
+                let region: Box<[Proto; 9]> = Box::new(std::array::from_fn(|i| {
+                    let k = &keys[i];
+                    if finals.iter().any(|(f, _)| *f == i) {
+                        return Box::new(()) as Proto;
+                    }
+                    self.light_views.remove(k);
+                    self.protos
+                        .insert(*k, None)
+                        .flatten()
+                        .expect("present proto")
+                }));
                 self.decorating += 1;
                 self.decorating_finals
                     .extend(finals.iter().map(|(i, _)| keys[*i]));

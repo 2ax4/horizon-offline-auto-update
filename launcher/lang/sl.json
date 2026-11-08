@@ -1240,6 +1240,8 @@
   "Can't read {name}'s sign-in: {why}": "Prijave za {name} ni mogoče prebrati: {why}",
   "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.": "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.",
   "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.": "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.",
+  "{mod}: using version {version}, made for the Horizon you play": "{mod}: uporablja se različica {version}, narejena za Horizon, ki ga igraš",
+  "Recommended": "Priporočeno",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
   "Couldn't load patch notes. {error}": "Opomb popravkov ni bilo mogoče naložiti. {error}",
   "Loading patch notes…": "Nalaganje opomb o popravku ...",

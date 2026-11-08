@@ -134,6 +134,7 @@ pub(super) struct GuestPlay {
     /// (`LivingEntity.collectEquipmentChanges`).
     modifiers: Vec<(String, String)>,
     equipped: Option<Vec<Option<ItemStack>>>,
+    craft_grid: Vec<Option<ItemStack>>,
     /// The guest's cast fishing hook (`Player.fishing`).
     pub(super) hook: Option<super::fishing::Hook>,
     sculk: super::sculk::PlayerEvents,
@@ -164,6 +165,7 @@ pub(super) struct GuestSwap {
     i: usize,
     play: GuestPlay,
     player: Option<PlayerMotion>,
+    player_save_projection: (Option<i32>, Option<bool>),
     /// The guest's eye height and the game's.
     eye: (f32, f32),
     yaw: f32,
@@ -508,6 +510,10 @@ impl Game<'_> {
             &mut self.player_attachments,
             self.guest_attachments.entry(g.uuid).or_default(),
         );
+        let player_save_projection = (
+            self.level.player_impulse_grace.take(),
+            self.level.player_fall_particles.take(),
+        );
         self.sculk.swap_player(&mut play.sculk);
         // The guest's own CombatTracker: damage to them is not the host's.
         // A new body starts with no record of the last one.
@@ -581,7 +587,10 @@ impl Game<'_> {
         // opens shows as the 3x3 size.
         let craft_size = std::mem::replace(&mut self.craft_size, 2);
         let craft_table = self.craft_table.take();
-        let craft_grid = std::mem::replace(&mut self.craft_grid, vec![None; 9]);
+        play.craft_grid.clear();
+        play.craft_grid.resize(9, None);
+        let craft_grid =
+            std::mem::replace(&mut self.craft_grid, std::mem::take(&mut play.craft_grid));
         let container = self.container.take();
         let mining = std::mem::replace(&mut self.mining, play.mining.take());
         let destroy_delay = std::mem::replace(&mut self.destroy_delay, play.destroy_delay);
@@ -662,9 +671,15 @@ impl Game<'_> {
             std::mem::take(&mut play.modifiers),
         );
         // Its worn armour on its attributes, when it changed.
-        let mut equipped: Vec<Option<ItemStack>> = self.armor.to_vec();
-        equipped.push(self.inventory.get(self.selected).cloned().flatten());
-        if play.equipped.as_ref() != Some(&equipped) {
+        let selected_item = self.inventory.get(self.selected).and_then(Option::as_ref);
+        let unchanged = play.equipped.as_deref().is_some_and(|eq| {
+            eq.len() == self.armor.len() + 1
+                && eq[..self.armor.len()] == self.armor[..]
+                && eq[self.armor.len()].as_ref() == selected_item
+        });
+        if !unchanged {
+            let mut equipped: Vec<Option<ItemStack>> = self.armor.to_vec();
+            equipped.push(selected_item.cloned());
             self.apply_equipment();
             play.equipped = Some(equipped);
         }
@@ -683,6 +698,7 @@ impl Game<'_> {
             i,
             play,
             player,
+            player_save_projection,
             eye,
             yaw,
             pitch,
@@ -784,6 +800,7 @@ impl Game<'_> {
             i,
             mut play,
             mut player,
+            player_save_projection,
             eye,
             yaw,
             pitch,
@@ -952,7 +969,7 @@ impl Game<'_> {
         let opened_table = (std::mem::replace(&mut self.craft_size, craft_size) == 3)
             .then_some(guest_table)
             .flatten();
-        self.craft_grid = craft_grid;
+        play.craft_grid = std::mem::replace(&mut self.craft_grid, craft_grid);
         let opened_station = std::mem::replace(&mut self.station, host_station);
         let bed = std::mem::replace(&mut self.sleeping, sleeping);
         let guest_sleep_timer = std::mem::replace(&mut self.sleep_timer, sleep_timer);
@@ -1034,6 +1051,8 @@ impl Game<'_> {
         std::mem::swap(&mut self.adv.unlocked, &mut g.recipes_unlocked);
         std::mem::swap(&mut self.level.recipe_book, &mut g.recipe_book);
         std::mem::swap(&mut self.level.player_extra, &mut g.saved);
+        self.level.player_impulse_grace = player_save_projection.0;
+        self.level.player_fall_particles = player_save_projection.1;
         std::mem::swap(&mut self.stats, &mut play.stats);
         std::mem::swap(&mut self.hook, &mut play.hook);
         self.adv.loaded = adv_loaded;
@@ -3934,12 +3953,7 @@ impl Game<'_> {
             return;
         };
         // The guest's own bed, else the world spawn: never the host's bed.
-        let world = self
-            .level
-            .world_spawn
-            .map(|[x, y, z]| [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5])
-            .or(self.spawn.map(|s| [s.x, s.y, s.z]))
-            .unwrap_or([0.5, 80.0, 0.5]);
+        let world = self.world_spawn_position();
         let spawn = host.hub.guests[i].spawn.unwrap_or(world);
         if !host.hub.guests[i].dead {
             return;
@@ -4058,6 +4072,7 @@ impl Game<'_> {
             // PlayerList.respawn / sendLevelInfo send level respawn data,
             // independently of the personal destination passed to Hub::respawn.
             spawn: world,
+            spawn_angle: self.level.world_spawn_angle,
             difficulty: i32::from(self.ui.difficulty),
             difficulty_locked: self.level.difficulty_locked,
             clock_rate,
@@ -5780,14 +5795,20 @@ impl Game<'_> {
     }
 
     /// `Player.tick`'s takeXpDelay and `Player.aiStep`'s touch of the
-    /// experience orbs in the guest's box grown by 1, 0.5, 1: one of them at
+    /// experience orbs in the guest's pickup area (its box grown by 1, 0.5, 1,
+    /// or the union with its vehicle's, grown by 1, 0, 1): one of them at
     /// random, at most every 2 ticks (`ExperienceOrb.playerTouch`), repairs
     /// with Mending and gives the rest as points. Everyone near hears it.
     fn guest_orbs(&mut self, host: &mut LanHost, gi: usize) {
         let g = &host.hub.guests[gi];
-        let height = f64::from(g.dimensions().height);
-        let (conn, id, at, player, name) =
-            (g.conn, g.entity_id, g.position, g.uuid, g.name.clone());
+        let (conn, id, at, player, name, vehicle) = (
+            g.conn,
+            g.entity_id,
+            g.position,
+            g.uuid,
+            g.name.clone(),
+            g.vehicle,
+        );
         let unable = g.spectator() || g.dead || g.health <= 0.0;
         let play = host.play.entry(conn).or_default();
         if play.xp_delay > 0 {
@@ -5797,9 +5818,25 @@ impl Game<'_> {
         if unable || play.xp_delay > 0 {
             return;
         }
+        // Player.aiStep: standing, the pickup area is the guest's box
+        // inflated by (1, 0.5, 1); riding, the union with the vehicle's box
+        // inflated by (1, 0, 1), the vehicle resolved as any target entity is.
+        let own = host.hub.guests[gi].bounds();
+        let area = match vehicle.and_then(|v| self.guest_target_box(host, gi, v as i32)) {
+            Some(vehicle) => own.union_bounds(vehicle).inflate(Vec3::new(1.0, 0.0, 1.0)),
+            None => own.inflate(Vec3::new(1.0, 0.5, 1.0)),
+        };
         let (min, max) = (
-            [at[0] - 1.3, at[1] - 0.5, at[2] - 1.3],
-            [at[0] + 1.3, at[1] + height + 0.5, at[2] + 1.3],
+            [
+                area.min_position().x,
+                area.min_position().y,
+                area.min_position().z,
+            ],
+            [
+                area.max_position().x,
+                area.max_position().y,
+                area.max_position().z,
+            ],
         );
         let touching: Vec<usize> = self
             .orbs
