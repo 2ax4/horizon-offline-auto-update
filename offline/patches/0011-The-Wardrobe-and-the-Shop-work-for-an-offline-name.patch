@@ -1,10 +1,7 @@
-From 825a1cdb561ce7c595e3de4a21e230a2a3f0f18a Mon Sep 17 00:00:00 2001
+From 94787422bab6248adfe8b54fed706d4040813bb2 Mon Sep 17 00:00:00 2001
 From: Z User <z@container>
 Date: Thu, 5 Nov 2026 23:23:54 +0000
-Subject: [PATCH 9/9] The Wardrobe and the Shop work for an offline name
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] The Wardrobe and the Shop work for an offline name
 
 The pages signed every offline name in with Microsoft: wardrobe_account
 took only a selected Microsoft account, so both pages answered with the
@@ -14,18 +11,20 @@ The offline name now has an account of its own there (the name and the
 vanilla offline UUID the game plays with), its outfit kept on this disk
 as any account's is. Its refresh asks the service for the catalogue and
 the item files when it answers, keeps the last ones when it doesn't, and
-owns everything the catalogue lists — nothing is asked of Mojang, whose
+owns everything the catalogue lists - nothing is asked of Mojang, whose
 session an offline name cannot prove. Equipping shows at once, waits on
 this disk alone, and the game is told what it wears and whether it owns
 cosmetics all the same. The preview wears the skin the player picked for
-the name (skins/<name>.png), 64×64.
+the name (skins/<name>.png), 64x64.
+
+(Rebased onto launcher@0.2.56: skin() now takes the game resources too.)
 ---
  launcher/src/account.rs       |   3 +-
  launcher/src/wardrobe_page.rs | 125 ++++++++++++++++++++++++++++++++--
  2 files changed, 121 insertions(+), 7 deletions(-)
 
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index bc45e8dc7..3e078aa15 100644
+index bc45e8d..3e078aa 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -2580,7 +2580,8 @@ fn java_player_with(
@@ -39,7 +38,7 @@ index bc45e8dc7..3e078aa15 100644
      // horizon-client writes it).
      let made_up = || {
 diff --git a/launcher/src/wardrobe_page.rs b/launcher/src/wardrobe_page.rs
-index 589a103de..ba9c920b7 100644
+index 7aef14e..a369a72 100644
 --- a/launcher/src/wardrobe_page.rs
 +++ b/launcher/src/wardrobe_page.rs
 @@ -18,7 +18,9 @@ use crate::glass_ui as ui;
@@ -63,7 +62,7 @@ index 589a103de..ba9c920b7 100644
      result: Result<(), Error>,
  }
  
-@@ -306,6 +311,25 @@ fn fetch_items(service: &Service, catalogue: &Catalogue) -> HashMap<String, Arc<
+@@ -321,6 +326,25 @@ fn fetch_items(service: &Service, catalogue: &Catalogue) -> HashMap<String, Arc<
          .collect()
  }
  
@@ -89,7 +88,7 @@ index 589a103de..ba9c920b7 100644
  /// The catalogue (the kept one's items if the service isn't reached), a session proved with
  /// Mojang, what waits sent, then the account's own answer with anything still waiting on top.
  fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Result<(), Error> {
-@@ -329,6 +353,71 @@ fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Re
+@@ -344,6 +368,71 @@ fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Re
      )
  }
  
@@ -161,7 +160,7 @@ index 589a103de..ba9c920b7 100644
  /// `founder_visor` → "Founder Visor", for the preview's made-up names.
  fn title_case(id: &str) -> String {
      id.split('_')
-@@ -408,12 +497,19 @@ impl Launcher {
+@@ -424,12 +513,19 @@ impl Launcher {
          let session = keep.as_ref().and_then(|w| w.session.clone());
          // The view keeps its camera from the last visit.
          let viewer = keep.as_ref().and_then(|w| w.viewer.clone());
@@ -170,19 +169,19 @@ index 589a103de..ba9c920b7 100644
 +            let model = self.accounts.look(&account.name).model;
 +            offline_skin(&account.name, model == horizon_launcher::skins::Model::Slim)
 +        } else {
-+            skin(&account)
++            skin(&account, &resources)
 +        };
          self.wardrobe = Some(Wardrobe {
              uuid: account.uuid.clone(),
              saved: saved.clone(),
              items: keep.map(|w| w.items).unwrap_or_default(),
              session: session.clone(),
--            skin: skin(&account),
+-            skin: skin(&account, &resources),
 +            skin: look,
              status: Status::Loading,
              busy: true,
              slot,
-@@ -429,9 +525,14 @@ impl Launcher {
+@@ -445,9 +541,14 @@ impl Launcher {
                  saved,
                  items: HashMap::new(),
                  session,
@@ -198,7 +197,7 @@ index 589a103de..ba9c920b7 100644
              if let Err(e) = trip.saved.save(&dir(), &account.uuid) {
                  eprintln!("Horizon: the outfit is not saved: {e}");
              }
-@@ -502,11 +603,21 @@ impl Launcher {
+@@ -525,11 +626,21 @@ impl Launcher {
          .detach();
      }
  
@@ -222,7 +221,7 @@ index 589a103de..ba9c920b7 100644
          }
      }
  
-@@ -521,7 +632,7 @@ impl Launcher {
+@@ -544,7 +655,7 @@ impl Launcher {
          }
          w.session = trip.session;
          w.saved = trip.saved;
@@ -231,7 +230,7 @@ index 589a103de..ba9c920b7 100644
              tell_the_game(&w.uuid, &w.saved);
          }
          w.status = match trip.result {
-@@ -615,6 +726,7 @@ impl Launcher {
+@@ -638,6 +749,7 @@ impl Launcher {
                  saved,
                  items: HashMap::new(),
                  session: None,
@@ -239,7 +238,7 @@ index 589a103de..ba9c920b7 100644
                  result,
              }
          });
-@@ -660,6 +772,7 @@ impl Launcher {
+@@ -683,6 +795,7 @@ impl Launcher {
                  saved,
                  items: HashMap::new(),
                  session: None,
