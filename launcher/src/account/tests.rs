@@ -2438,17 +2438,20 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
         skin: None,
         cape: None,
     });
-    // This launch plays as Alex: it is Alex who is told to sign in again (Notch owning the game
-    // doesn't let Alex play), and Notch is still the one `account select` picked.
-    let refused = launch_as(
+    // This launch plays as Alex: Notch's ownership opens the gate, and it is Alex who is told
+    // to sign in again, so Alex played. Notch is still the one `account select` picked.
+    let played = launch_as(
         &offline(),
         Some("test-client"),
         &store,
         &mut accounts,
         &Player::Microsoft(alex.to_owned()),
-    );
-    assert!(refused
-        .unwrap_err()
+    )
+    .unwrap();
+    assert!(played.session.is_none());
+    assert!(played
+        .offline
+        .unwrap()
         .starts_with("Alex is no longer signed in"));
     assert_eq!(accounts.selected.as_deref(), Some(UUID));
     // Notch plays with the last answer while the services can't be reached.
