@@ -152,7 +152,7 @@ pub fn armor_tint(undyed: Option<u32>, stack: Option<&crate::items::ItemStack>) 
         .unwrap_or(undyed);
     abgr(dyed)
 }
-pub use crate::pack_dyes::{diffuse as dye, sheep_wool as sheep_wool_rgb};
+pub use crate::pack_palette::{diffuse as dye, sheep_wool as sheep_wool_rgb};
 /// `ColorLerper.getLerpedColor(ColorLerper.Type.SHEEP, ageInTicks)`: the 16
 /// wool colours in DyeColor order, one per 25 ticks, lerped in between. The
 /// colour a `jeb_` sheep's wool takes.
@@ -1857,8 +1857,8 @@ fn cem_key(model_key: &str) -> &str {
 /// choose a variant for each.
 pub fn drawn_textures(m: &Mob, data: &MobData) -> Vec<String> {
     fn push(names: &mut Vec<String>, custom: Option<&super::cem::CemLayer>, vanilla: String) {
-        if let Some(texture) = custom.and_then(|c| c.texture.clone()) {
-            names.push(texture);
+        if let Some(texture) = custom.and_then(|c| c.texture_for(&vanilla)) {
+            names.push(texture.to_owned());
         }
         names.push(vanilla);
     }
@@ -1899,7 +1899,7 @@ fn cem_texture<'a>(
     atlas: Atlas<'_>,
 ) -> &'a str {
     custom
-        .and_then(|c| c.texture.as_deref())
+        .and_then(|c| c.texture_for(vanilla))
         .filter(|t| atlas(t).is_some())
         .unwrap_or(vanilla)
 }

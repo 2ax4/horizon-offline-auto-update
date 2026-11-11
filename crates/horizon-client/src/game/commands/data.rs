@@ -421,6 +421,16 @@ impl Game<'_> {
                     // random (Entity.random) goes on, as a spawn egg's entity
                     // data finds it.
                     slot.random = old.random.clone();
+                    // Entity.load keeps the unsaved Allay.jukeboxPos and
+                    // DATA_DANCING of the entity it loads into.
+                    if slot.species() == horizon_client::mobs::Species::Allay {
+                        slot.extra.flag = old.extra.flag;
+                        if let (Some(st), Some(was)) =
+                            (slot.extra.allay.as_mut(), old.extra.allay.as_ref())
+                        {
+                            st.jukebox = was.jukebox;
+                        }
+                    }
                     if keep_liked_player {
                         slot.extra.tame = old.extra.tame;
                         slot.extra.owner = old.extra.owner;
@@ -461,19 +471,20 @@ impl Game<'_> {
                     // Wolf.readAdditionalSaveData initializes persistent anger at
                     // the live level clock, just as load_mob does on admission.
                     if slot.species() == horizon_client::mobs::Species::Wolf {
-                        slot.extra.anger = horizon_client::mobs::anger_left(
-                            slot.extra.anger_end,
-                            self.world.game_time,
-                        );
+                        horizon_client::mobs::adopt_anger_end(slot, self.world.game_time);
+                    } else {
+                        // `readPersistentAngerSaveData` set the end time as written.
+                        slot.extra.anger_stamp = Some((slot.extra.anger, slot.age));
                     }
                 }
             }
             Target::Item(id) => {
                 let new = entity_nbt::item_entity_from_nbt(&tag, id, 0.0).ok_or_else(stale)?;
                 if let Some(slot) = self.dropped.iter_mut().find(|e| e.id == id) {
-                    let bob = slot.bob_offset;
-                    *slot = new;
-                    slot.bob_offset = bob;
+                    // `/data` loads into the same entity: its bobOffs and own random stay.
+                    let kept = std::mem::replace(slot, new);
+                    slot.bob_offset = kept.bob_offset;
+                    slot.random = kept.random;
                 }
             }
             Target::Fangs(id) => {

@@ -1175,7 +1175,7 @@ pub fn run() -> Option<i32> {
     let cli = Cli::from_arg_matches(&definition.get_matches()).unwrap_or_else(|e| e.exit());
     let command = cli.command?;
     let result = match command {
-        Cmd::Mcp | Cmd::AgentConfig { .. } if no_ai => Err(horizon_core::no_ai::REFUSAL.into()),
+        Cmd::Mcp | Cmd::AgentConfig { .. } if no_ai => Err(horizon_platform::no_ai::REFUSAL.into()),
         Cmd::Mcp => crate::mcp::serve(),
         command => {
             let result = execute(command, cli.json);
@@ -3260,11 +3260,14 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
                     ))
                 }
             };
-            let made = other_launchers::import(
-                f,
-                new_name.as_deref().unwrap_or(&f.name),
-                minecraft.as_deref(),
-            )?;
+            let target = new_name.as_deref().unwrap_or(&f.name);
+            let made = other_launchers::import(f, target, minecraft.as_deref()).map_err(|e| {
+                if e == instances::name_taken(target.trim()) {
+                    instances::name_taken_with_flag(target.trim())
+                } else {
+                    e
+                }
+            })?;
             let unsupported = other_launchers::loader(f).is_none();
             if let Some(l) = f.loader.as_ref().filter(|_| unsupported && !as_json) {
                 println!(

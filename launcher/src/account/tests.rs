@@ -680,7 +680,7 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
         .unwrap()
         .starts_with("Alex is no longer signed in"));
     assert_eq!(pass.owner.unwrap().0.name, "Notch");
-    // An offline name plays: Notch is asked, and no session goes to the game.
+    // Nobody selected (a download's gate): Notch is asked, and no session comes back.
     accounts.selected = None;
     m.lock().unwrap().log.clear();
     let pass = launch(&ep, Some("test-client"), &store, &mut accounts).unwrap();
@@ -1126,67 +1126,6 @@ fn client_id_is_configuration() {
         Some("00000000-1111-2222-3333-444444444444")
     );
     std::env::remove_var("HORIZON_MSA_CLIENT_ID");
-}
-
-#[test]
-fn offline_names_switch_with_accounts() {
-    let store = MemoryStore::default();
-    store
-        .set("abc", &serde_json::to_string(&secrets("t", true)).unwrap())
-        .unwrap();
-    let mut a = Accounts {
-        accounts: vec![Account {
-            uuid: "abc".into(),
-            name: "Ludo".into(),
-            skin: None,
-            cape: None,
-        }],
-        selected: Some("abc".into()),
-        ..Accounts::default()
-    };
-    assert_eq!(a.player(), Player::Microsoft("abc".into()));
-    assert_eq!(a.name_arg(), None);
-    a.play_as(Player::Offline("Builder_1".into())).unwrap();
-    assert_eq!(a.player(), Player::Offline("Builder_1".into()));
-    assert_eq!(a.name_arg(), Some("Builder_1"));
-    // Kept once, as first written, whatever the case.
-    a.play_as(Player::Offline("builder_1".into())).unwrap();
-    assert_eq!(a.offline, ["Builder_1"]);
-    assert_eq!(a.name_arg(), Some("Builder_1"));
-    assert!(a.add_offline("no spaces").is_err());
-    assert!(a.add_offline("ab").is_err());
-    assert!(a.add_offline("seventeen_letters").is_err());
-    a.play_as(Player::Microsoft("abc".into())).unwrap();
-    assert_eq!(a.name_arg(), None, "an account plays with its own name");
-    assert!(a.play_as(Player::Microsoft("zzz".into())).is_err());
-    a.play_as(Player::Offline("Builder_1".into())).unwrap();
-    // Forgetting drops the look and the name's skin and cape files too.
-    let dir = std::env::temp_dir().join(format!("horizon-accounts-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let (skin, cape) = crate::skins::files(&dir, "builder_1");
-    std::fs::write(&skin, b"skin").unwrap();
-    std::fs::write(&cape, b"cape").unwrap();
-    a.looks.insert(
-        "builder_1".into(),
-        crate::skins::Look {
-            skin: true,
-            cape: true,
-            ..crate::skins::Look::default()
-        },
-    );
-    a.remove_offline("BUILDER_1", &dir).unwrap();
-    assert_eq!(a.player(), Player::GameName);
-    assert!(a.looks.is_empty() && !skin.exists() && !cape.exists());
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(a.remove_offline("Builder_1", &dir).is_err());
-    // An accounts.json from before offline names reads as it was, and writes nothing new.
-    let old: Accounts = serde_json::from_str(r#"{"accounts":[],"selected":null}"#).unwrap();
-    assert_eq!(old.player(), Player::GameName);
-    assert_eq!(
-        serde_json::to_string(&old).unwrap(),
-        r#"{"accounts":[],"selected":null}"#
-    );
 }
 
 #[test]
@@ -2275,6 +2214,90 @@ fn targeted_sign_in_rejects_another_identity_without_writing_or_selecting_it() {
 }
 
 #[test]
+fn targeted_sign_in_preserves_the_selected_account() {
+    let store = MemoryStore::default();
+    let mut accounts = signed_in(&store, &secrets("old", true));
+    let mut other = notch();
+    other.uuid = "11111111111111111111111111111111".into();
+    accounts
+        .add(&store, other.clone(), &secrets("other", true))
+        .unwrap();
+    accept_sign_in(
+        &mut accounts,
+        &store,
+        Some(&notch()),
+        notch(),
+        &secrets("renewed", true),
+        &|| false,
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(accounts.selected.as_deref(), Some(other.uuid.as_str()));
+    assert_eq!(kept(&store).minecraft_token, "renewed");
+}
+
+#[test]
+fn offline_names_switch_with_accounts() {
+    let store = MemoryStore::default();
+    store
+        .set("abc", &serde_json::to_string(&secrets("t", true)).unwrap())
+        .unwrap();
+    let mut a = Accounts {
+        accounts: vec![Account {
+            uuid: "abc".into(),
+            name: "Ludo".into(),
+            skin: None,
+            cape: None,
+        }],
+        selected: Some("abc".into()),
+        ..Accounts::default()
+    };
+    assert_eq!(a.player(), Player::Microsoft("abc".into()));
+    assert_eq!(a.name_arg(), None);
+    a.play_as(Player::Offline("Builder_1".into())).unwrap();
+    assert_eq!(a.player(), Player::Offline("Builder_1".into()));
+    assert_eq!(a.name_arg(), Some("Builder_1"));
+    // Kept once, as first written, whatever the case.
+    a.play_as(Player::Offline("builder_1".into())).unwrap();
+    assert_eq!(a.offline, ["Builder_1"]);
+    assert_eq!(a.name_arg(), Some("Builder_1"));
+    assert!(a.add_offline("no spaces").is_err());
+    assert!(a.add_offline("ab").is_err());
+    assert!(a.add_offline("seventeen_letters").is_err());
+    a.play_as(Player::Microsoft("abc".into())).unwrap();
+    assert_eq!(a.name_arg(), None, "an account plays with its own name");
+    assert!(a.play_as(Player::Microsoft("zzz".into())).is_err());
+    a.play_as(Player::Offline("Builder_1".into())).unwrap();
+    // Forgetting drops the look and the name's skin and cape files too.
+    let dir = std::env::temp_dir().join(format!("horizon-accounts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (skin, cape) = crate::skins::files(&dir, "builder_1");
+    std::fs::write(&skin, b"skin").unwrap();
+    std::fs::write(&cape, b"cape").unwrap();
+    a.looks.insert(
+        "builder_1".into(),
+        crate::skins::Look {
+            skin: true,
+            cape: true,
+            ..crate::skins::Look::default()
+        },
+    );
+    a.remove_offline("BUILDER_1", &dir).unwrap();
+    assert_eq!(a.player(), Player::GameName);
+    assert!(a.looks.is_empty() && !skin.exists() && !cape.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(a.remove_offline("Builder_1", &dir).is_err());
+    // An accounts.json from before offline names reads as it was, and writes nothing new.
+    let old: Accounts = serde_json::from_str(r#"{"accounts":[],"selected":null}"#).unwrap();
+    assert_eq!(old.player(), Player::GameName);
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        r#"{"accounts":[],"selected":null}"#
+    );
+}
+
+#[test]
 fn targeted_sign_in_preserves_the_selected_account_or_offline_name() {
     let store = MemoryStore::default();
     let mut accounts = signed_in(&store, &secrets("old", true));
@@ -2415,22 +2438,29 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
         skin: None,
         cape: None,
     });
-    // This launch plays as Alex: Notch's ownership opens the gate, and it is Alex who is told
-    // to sign in again, so Alex played. Notch is still the one `account select` picked.
+    // This launch plays as Alex: it is Alex who is told to sign in again (Notch owning the game
+    // doesn't let Alex play), and Notch is still the one `account select` picked.
+    let refused = launch_as(
+        &offline(),
+        Some("test-client"),
+        &store,
+        &mut accounts,
+        &Player::Microsoft(alex.to_owned()),
+    );
+    assert!(refused
+        .unwrap_err()
+        .starts_with("Alex is no longer signed in"));
+    assert_eq!(accounts.selected.as_deref(), Some(UUID));
+    // Notch plays with the last answer while the services can't be reached.
     let pass = launch_as(
         &offline(),
         Some("test-client"),
         &store,
         &mut accounts,
-        &Player::Microsoft(alex.into()),
+        &Player::Microsoft(UUID.to_owned()),
     )
     .unwrap();
-    assert!(pass.session.is_none());
-    assert!(pass
-        .offline
-        .unwrap()
-        .starts_with("Alex is no longer signed in"));
-    assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
+    assert!(pass.session.is_none() && pass.offline.is_some());
     // An account that isn't in the launcher is refused, and changes nothing either.
     let gone = launch_as(
         &offline(),
@@ -2440,7 +2470,7 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
         &Player::Microsoft("not-signed-in".into()),
     );
     assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
-    assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
+    assert_eq!(accounts.selected.as_deref(), Some(UUID));
 }
 
 #[test]

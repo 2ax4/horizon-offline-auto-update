@@ -1691,7 +1691,7 @@ pub fn in_secrets_file() -> bool {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Accounts {
     pub accounts: Vec<Account>,
-    /// The UUID of the account the game starts with; none plays offline.
+    /// The UUID of the account the game starts with; none: the first one.
     pub selected: Option<String>,
     /// Offline names the player keeps, to switch between (`--name`): no account, no skin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1850,6 +1850,8 @@ impl Accounts {
 
     /// Forgets an offline name: its look and its skin and cape files (`skins`) go with it; if
     /// it was playing, the game's own name plays.
+    /// Forgets an offline name: its look and its skin and cape files (`skins`) go with it; if
+    /// it was playing, the game's own name plays.
     pub fn remove_offline(&mut self, name: &str, skins_dir: &Path) -> Result<(), String> {
         let before = self.offline.len();
         self.offline.retain(|n| !n.eq_ignore_ascii_case(name));
@@ -1913,8 +1915,9 @@ impl Accounts {
 /// No account in the launcher owns Minecraft: Java Edition: the game must not start.
 #[derive(Debug, Default, PartialEq)]
 pub struct NoOwner {
-    /// Why a sign-in couldn't be read, when the keyring didn't give it (#12179): what is said
-    /// instead of the refusal, which would tell a signed-in player to sign in.
+    /// Why a sign-in couldn't be read, when the keyring didn't give it (#12179), or why the
+    /// account that plays can't: what is said instead of the refusal, which would tell a
+    /// signed-in player to sign in.
     pub keyring: Option<String>,
 }
 impl std::fmt::Display for NoOwner {
@@ -1944,8 +1947,8 @@ impl NoOwner {
 /// The owner gate's pass for one launch.
 #[derive(Debug, Default)]
 pub struct Launch {
-    /// The selected account and its renewed session; none when an offline name plays, or when
-    /// its sign-in couldn't be renewed now (`offline` says why).
+    /// The selected account and its renewed session; none when its sign-in couldn't be renewed
+    /// now (`offline` says why).
     pub session: Option<(Account, Secrets)>,
     /// Why the selected account plays without its session this time.
     pub offline: Option<String>,
@@ -2392,7 +2395,7 @@ fn split_sessions(
     playing: Option<&str>,
 ) -> Vec<(&'static str, String)> {
     if splitscreen_on(game_home) {
-        // The launch may override the saved player, or play with an offline name.
+        // The launch may override the saved player.
         let selected = std::mem::replace(&mut accounts.selected, playing.map(str::to_owned));
         let env = account_sessions(
             &Endpoints::live(),

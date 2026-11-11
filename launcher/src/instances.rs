@@ -704,13 +704,13 @@ fn follow_player(game_home: &Path, home: &Path) {
         let _ = fs::create_dir_all(to.parent().unwrap());
         let _ = fs::copy(consent, to);
     }
-    let no_ai = horizon_core::no_ai::is_on(game_home);
-    if horizon_core::no_ai::is_on(home) != no_ai {
-        let _ = horizon_core::no_ai::set(home, no_ai);
+    let no_ai = horizon_platform::no_ai::is_on(game_home);
+    if horizon_platform::no_ai::is_on(home) != no_ai {
+        let _ = horizon_platform::no_ai::set(home, no_ai);
     }
 }
 
-/// A fresh made-up name everywhere the game keeps one: `horizon-player.txt` is per game
+// A fresh made-up name everywhere the game keeps one: `horizon-player.txt` is per game
 /// folder (`PLAYER_FILES`), so the same new name goes to the default home and every
 /// instance's — the player stays one player in its worlds. The file's `name:` line and the
 /// `Player` + five digits scheme are horizon-client's (`offline_name.rs`).
