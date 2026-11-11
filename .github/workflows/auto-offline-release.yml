@@ -180,7 +180,7 @@ jobs:
           pub=$(printf '%s' "$RELEASE_SIGNING_KEY" | base64 --decode \
             | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
           grep -qx "$pub" crates/horizon-release-sign/release-keys.txt || {
-            echo "::error::RELEASE_SIGNING_KEY does not match any key in crates/horizon-release-sign/release-keys.txt: update the secret or the key inside offline/patches/0003-Offline-updates-follow-the-fork-s-releases.patch"
+            echo "::error::RELEASE_SIGNING_KEY does not match any key in crates/horizon-release-sign/release-keys.txt: update the secret or the key inside offline/patches/0003-offline-update-notice.patch"
             exit 1
           }
           # Language tables are not patched: lang-sync rewrites them in upstream's layout.
@@ -251,8 +251,7 @@ jobs:
           SHA: ${{ needs.sync.outputs.sha }}
           TAG: ${{ needs.sync.outputs.tag }}
         run: |
-          # A job that never ran a step (GitHub capacity/infra) is not a real failure:
-          # leave it unmarked so the next cron run retries the same version.
+          # A job that never ran a step (runner/capacity) is an infra failure, not a real one: leave it unmarked.
           real_failure=false
           while IFS=$'\t' read -r job_name step_count; do
             if [ "${step_count:-0}" -gt 0 ]; then

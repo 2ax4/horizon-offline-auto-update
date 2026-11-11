@@ -1,33 +1,58 @@
-From 75bd032b27892f465a0dc162ef202b9b5b872e87 Mon Sep 17 00:00:00 2001
+From f75667dfdb5aadd004561926bde5308850eb5605 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
-Date: Thu, 5 Nov 2026 00:22:25 +0000
+Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-An offline name (a kept one, or the name the game made up) now plays a
-Java instance too: java_player returns the offline player past the owner
-gate — the name, vanilla's OfflinePlayer UUID for it, and no token — so
-Play no longer opens the Sign in to play screen.
-
-Mojang's game files are public, so the version download no longer stops
-at the owner gate either: an owner's name still leads the log, an offline
-player gets a plain line, and the error keeps naming the owner when there
-is one. The download-for-an-owner-only test now asks for the offline
-downloads too, and a new test pins the offline player's name, UUID and
-empty token.
 ---
- launcher/src/account.rs       |  38 +++++++++++-
- launcher/src/account/tests.rs |  79 ++++++++++++++++++++-----
- launcher/src/backend.rs       | 108 ++++++++++++++--------------------
- 3 files changed, 145 insertions(+), 80 deletions(-)
+---
+ launcher/Cargo.lock     |   1 +
+ launcher/Cargo.toml     |   1 +
+ launcher/src/account.rs |  44 ++++++++++++++-
+ launcher/src/backend.rs | 119 ++++++++++++++++------------------------
+ launcher/src/main.rs    |  32 +++++++----
+ 5 files changed, 112 insertions(+), 85 deletions(-)
 
+diff --git a/launcher/Cargo.lock b/launcher/Cargo.lock
+index 7f71f69..89a72ae 100644
+--- a/launcher/Cargo.lock
++++ b/launcher/Cargo.lock
+@@ -2717,6 +2717,7 @@ dependencies = [
+  "horizon-mods",
+  "horizon-platform",
+  "horizon-port-pack",
++ "horizon-protocol",
+  "horizon-release-sign",
+  "horizon-shader-api",
+  "horizon-telemetry",
+diff --git a/launcher/Cargo.toml b/launcher/Cargo.toml
+index 14e1964..aaed300 100644
+--- a/launcher/Cargo.toml
++++ b/launcher/Cargo.toml
+@@ -52,6 +52,7 @@ horizon-friends = { path = "../crates/horizon-friends" }
+ horizon-bench = { path = "../crates/horizon-bench" }
+ # Import modpack: the porting pipeline, run on the player's own files (docs/modpacks.md).
+ horizon-port-pack = { path = "../crates/horizon-port-pack" }
++horizon-protocol = { path = "../crates/horizon-protocol" }
+ # Horizon's mod registry: its index and the checks a download passes before install.
+ horizon-mods = { path = "../crates/horizon-mods", features = ["index"] }
+ # Use the game's manifest validation for native shader identities.
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 08993d2ac..c417bc76f 100644
+index 2a384d3..243de87 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
-@@ -2461,7 +2461,8 @@ fn account_sessions_until(
+@@ -2301,7 +2301,10 @@ pub struct GameSession {
+ /// for it, and the other accounts' for its splitscreen players.
+ pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
+     let mut accounts = Accounts::load();
+-    let pass = launch_for_game(
++    if accounts.selected.is_none() {
++        return Ok(GameSession::default());
++    }
++    let pass = launch(
+         &Endpoints::live(),
+         client_id().as_deref(),
+         store(),
+@@ -2528,7 +2531,8 @@ fn account_sessions_until(
  }
  
  /// Who plays the real Minecraft: Java Edition (a Java instance), past the owner gate itself
@@ -37,7 +62,7 @@ index 08993d2ac..c417bc76f 100644
  /// from the services, an account that owned it plays with its last token. Mojang's game takes the
  /// token on its command line, as Mojang's launcher gives it; that command is never logged.
  pub fn java_player() -> Result<crate::java_launch::Player, String> {
-@@ -2484,6 +2485,12 @@ fn java_player_with(
+@@ -2551,6 +2555,12 @@ fn java_player_with(
      store: &dyn SecretStore,
      accounts: &mut Accounts,
  ) -> Result<crate::java_launch::Player, String> {
@@ -50,13 +75,14 @@ index 08993d2ac..c417bc76f 100644
      let pass = launch(ep, client_id, store, accounts).map_err(|e| e.to_string())?;
      let kept = || {
          let order = accounts.selected().into_iter().chain(&accounts.accounts);
-@@ -2504,5 +2511,34 @@ fn java_player_with(
+@@ -2571,5 +2581,35 @@ fn java_player_with(
      })
  }
  
 +/// Java Edition's player for an offline name: the name, vanilla's UUID for it
 +/// (`OfflinePlayer:` + the name, as a server would make it) and no Microsoft token or xuid.
-+fn offline_java_player(accounts: &Accounts) -> crate::java_launch::Player {
++/// The Wardrobe's page takes the same name and UUID for an offline account of its own.
++pub fn offline_java_player(accounts: &Accounts) -> crate::java_launch::Player {
 +    // The name the game made up, once it has run (`horizon-player.txt`'s `name:` line, as
 +    // horizon-client writes it).
 +    let made_up = || {
@@ -85,156 +111,8 @@ index 08993d2ac..c417bc76f 100644
 +
  #[cfg(test)]
  mod tests;
-diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 3e91cc91d..19622ce4e 100644
---- a/launcher/src/account/tests.rs
-+++ b/launcher/src/account/tests.rs
-@@ -680,7 +680,7 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
-         .unwrap()
-         .starts_with("Alex is no longer signed in"));
-     assert_eq!(pass.owner.unwrap().0.name, "Notch");
--    // Nobody selected (a download's gate): Notch is asked, and no session comes back.
-+    // An offline name plays: Notch is asked, and no session goes to the game.
-     accounts.selected = None;
-     m.lock().unwrap().log.clear();
-     let pass = launch(&ep, Some("test-client"), &store, &mut accounts).unwrap();
-@@ -1129,7 +1129,11 @@ fn client_id_is_configuration() {
- }
- 
- #[test]
--fn play_as_picks_a_signed_in_account() {
-+fn offline_names_switch_with_accounts() {
-+    let store = MemoryStore::default();
-+    store
-+        .set("abc", &serde_json::to_string(&secrets("t", true)).unwrap())
-+        .unwrap();
-     let mut a = Accounts {
-         accounts: vec![Account {
-             uuid: "abc".into(),
-@@ -1137,6 +1141,7 @@ fn play_as_picks_a_signed_in_account() {
-             skin: None,
-             cape: None,
-         }],
-+        selected: Some("abc".into()),
-         ..Accounts::default()
-     };
-     assert_eq!(a.player(), Player::Microsoft("abc".into()));
-@@ -1179,7 +1184,7 @@ fn play_as_picks_a_signed_in_account() {
-     let old: Accounts = serde_json::from_str(r#"{"accounts":[],"selected":null}"#).unwrap();
-     assert_eq!(old.player(), Player::GameName);
-     assert_eq!(
--        serde_json::to_string(&Accounts::default()).unwrap(),
-+        serde_json::to_string(&old).unwrap(),
-         r#"{"accounts":[],"selected":null}"#
-     );
- }
-@@ -1209,6 +1214,30 @@ fn the_java_edition_plays_as_an_owner_even_offline() {
-     );
- }
- 
-+#[test]
-+fn the_java_edition_plays_offline_without_an_account() {
-+    // An offline name: no owner gate and no network is touched, the game starts offline with
-+    // vanilla's UUID for the name and no Microsoft token.
-+    let mut accounts = Accounts::default();
-+    accounts
-+        .play_as(Player::Offline("Builder_1".into()))
-+        .unwrap();
-+    let player = java_player_with(
-+        &offline(),
-+        Some("test-client"),
-+        &MemoryStore::default(),
-+        &mut accounts,
-+    )
-+    .unwrap();
-+    assert_eq!(player.name, "Builder_1");
-+    assert_eq!(
-+        player.uuid,
-+        horizon_protocol::crypto::uuid_string(horizon_protocol::crypto::offline_uuid("Builder_1"))
-+    );
-+    assert_eq!(player.token, "0");
-+    assert_eq!(player.xuid, "");
-+}
-+
- /// A secrets file of the test's own, gone first.
- fn secrets_file(name: &str) -> PathBuf {
-     let dir = std::env::temp_dir().join(format!("horizon-secrets-{name}-{}", std::process::id()));
-@@ -2246,7 +2275,7 @@ fn targeted_sign_in_rejects_another_identity_without_writing_or_selecting_it() {
- }
- 
- #[test]
--fn targeted_sign_in_preserves_the_selected_account() {
-+fn targeted_sign_in_preserves_the_selected_account_or_offline_name() {
-     let store = MemoryStore::default();
-     let mut accounts = signed_in(&store, &secrets("old", true));
-     let mut other = notch();
-@@ -2266,6 +2295,20 @@ fn targeted_sign_in_preserves_the_selected_account() {
-     .unwrap();
-     assert_eq!(accounts.selected.as_deref(), Some(other.uuid.as_str()));
-     assert_eq!(kept(&store).minecraft_token, "renewed");
-+    accounts.selected = None;
-+    accounts.offline_selected = Some("Builder".into());
-+    accept_sign_in(
-+        &mut accounts,
-+        &store,
-+        Some(&notch()),
-+        notch(),
-+        &secrets("renewed-again", true),
-+        &|| false,
-+        &|_| {},
-+    )
-+    .unwrap();
-+    assert!(accounts.selected.is_none());
-+    assert_eq!(accounts.offline_selected.as_deref(), Some("Builder"));
- }
- 
- #[test]
-@@ -2372,26 +2415,32 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
-         skin: None,
-         cape: None,
-     });
--    // This launch plays as Alex: it is Alex who is told to sign in again (Notch owning the game
--    // doesn't let Alex play), and Notch is still the one `account select` picked.
--    let refused = launch_as(&offline(), Some("test-client"), &store, &mut accounts, alex);
--    assert!(refused
--        .unwrap_err()
-+    // This launch plays as Alex: Notch's ownership opens the gate, and it is Alex who is told
-+    // to sign in again, so Alex played. Notch is still the one `account select` picked.
-+    let pass = launch_as(
-+        &offline(),
-+        Some("test-client"),
-+        &store,
-+        &mut accounts,
-+        &Player::Microsoft(alex.into()),
-+    )
-+    .unwrap();
-+    assert!(pass.session.is_none());
-+    assert!(pass
-+        .offline
-+        .unwrap()
-         .starts_with("Alex is no longer signed in"));
--    assert_eq!(accounts.selected.as_deref(), Some(UUID));
--    // Notch plays with the last answer while the services can't be reached.
--    let pass = launch_as(&offline(), Some("test-client"), &store, &mut accounts, UUID).unwrap();
--    assert!(pass.session.is_none() && pass.offline.is_some());
-+    assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
-     // An account that isn't in the launcher is refused, and changes nothing either.
-     let gone = launch_as(
-         &offline(),
-         Some("test-client"),
-         &store,
-         &mut accounts,
--        "not-signed-in",
-+        &Player::Microsoft("not-signed-in".into()),
-     );
-     assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
--    assert_eq!(accounts.selected.as_deref(), Some(UUID));
-+    assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
- }
- 
- #[test]
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index a663a5c9e..d9ecf191f 100644
+index 55d4b57..d9ecf19 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -2115,9 +2115,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
@@ -250,7 +128,15 @@ index a663a5c9e..d9ecf191f 100644
  fn download_for_owner(
      pins: &sources::Pins,
      dir: &Path,
-@@ -2134,12 +2134,12 @@ fn download_for_owner(
+@@ -2125,7 +2125,6 @@ fn download_for_owner(
+     log: &dyn Fn(String),
+ ) -> Result<(), String> {
+     let mut accounts = account::Accounts::load();
+-    // Any account that owns the game may download it (`launch`), not only the one that plays.
+     let pass = account::launch(
+         &account::Endpoints::live(),
+         account::client_id().as_deref(),
+@@ -2135,12 +2134,12 @@ fn download_for_owner(
      if let Err(e) = accounts.save() {
          log(format!("Horizon: the accounts are not saved: {e}"));
      }
@@ -266,7 +152,7 @@ index a663a5c9e..d9ecf191f 100644
  pub fn download_version_for_owner(
      id: &str,
      manifest_sha1: &str,
-@@ -2160,9 +2160,10 @@ pub fn download_version_for_owner(
+@@ -2161,9 +2160,10 @@ pub fn download_version_for_owner(
      Ok(dir)
  }
  
@@ -280,7 +166,7 @@ index a663a5c9e..d9ecf191f 100644
  /// instance's folder. The caller wraps it (`launch::wrap`) and never logs it: it holds the token.
  /// A Java instance's game, ready to start; `server` (`host[:port]`) is joined once it has.
  pub fn java_game(
-@@ -2255,50 +2256,42 @@ pub fn java_game(
+@@ -2256,50 +2256,42 @@ pub fn java_game(
      )
  }
  
@@ -350,7 +236,17 @@ index a663a5c9e..d9ecf191f 100644
  }
  
  /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
-@@ -3181,7 +3174,7 @@ pub fn client(tag: &str) -> Result<Command, String> {
+@@ -3174,9 +3166,6 @@ pub fn play_step(step: &str) {
+     eprintln!("Horizon: Play: {step}…");
+ }
+ 
+-/// The client's command, once the owner gate lets it start and its resources are prepared. Past
+-/// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
+-/// offline.
+ pub fn client(tag: &str) -> Result<Command, String> {
+     client_as(tag, None)
+ }
+@@ -3185,7 +3174,7 @@ pub fn client(tag: &str) -> Result<Command, String> {
  pub const SIGN_IN_HINT: &str = "Sign in with `horizon-launcher account sign-in`.";
  
  /// [`client`], playing as `who` for this launch only (`play --account`).
@@ -359,11 +255,13 @@ index a663a5c9e..d9ecf191f 100644
      if let Some(error) = game_architecture_launch_error(tag) {
          return Err(error);
      }
-@@ -4788,9 +4781,11 @@ mod tests {
+@@ -4792,11 +4781,11 @@ mod tests {
          fs::remove_dir_all(&dir).unwrap();
      }
  
 -    /// The launcher downloads Mojang's game files (client jar, libraries, assets) only for an
+-    /// account the services said owns the game: never without one, and never past the gate by
+-    /// the developer option (`Settings::dev_offline`), whose pass has no owner.
 +    /// The launcher downloads Mojang's game files (client jar, libraries, assets) for whoever
 +    /// plays: an owning account, and an offline player too — the files are public, only online
 +    /// play needs an account.
@@ -373,7 +271,7 @@ index a663a5c9e..d9ecf191f 100644
          let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
          let _ = fs::remove_dir_all(&dir);
          let pins = sources::Pins::read(&serde_json::json!({ "minecraft": {
-@@ -4806,17 +4801,15 @@ mod tests {
+@@ -4812,17 +4801,15 @@ mod tests {
          };
          let log = |_: String| {};
          let no_owner = || Ok(account::Launch::default());
@@ -399,7 +297,7 @@ index a663a5c9e..d9ecf191f 100644
          let owner = account::Account {
              uuid: "069a79f444e94726a5befca90e38aaf5".into(),
              name: "Notch".into(),
-@@ -4831,22 +4824,9 @@ mod tests {
+@@ -4837,22 +4824,9 @@ mod tests {
              owner: Some((owner, secrets)),
              ..Default::default()
          });
@@ -424,6 +322,83 @@ index a663a5c9e..d9ecf191f 100644
          let _ = fs::remove_dir_all(&dir);
  
          // In the sources: one call downloads the game, in `download_for`, and the only caller
+@@ -4889,7 +4863,10 @@ mod tests {
+         };
+         assert!(body("download_for").contains("mojang::download("));
+         assert!(body("download_for_owner").contains("account::launch("));
+-        assert!(!body("download_for_owner").contains("launch_for_game("));
++        assert!(
++            !body("download_for_owner").contains("session_for_game("),
++            "downloads never go through the play path"
++        );
+         // `download_for` is defined once and called once, by `download_for_owner`.
+         assert_eq!(backend.matches("download_for(").count(), 2);
+         assert!(body("download_for_owner").contains("download_for("));
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index 43337c5..b311cf8 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -2497,10 +2497,7 @@ fn segments<T: Copy + PartialEq + 'static>(
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ enum PlayPress {
+     Play,
+-    /// Not prepared, for an account that owns the game: prepare it (from the player's install,
+-    /// else downloaded from Mojang for that account), then play, as the official launcher does.
+     PrepareThenPlay,
+-    /// Not prepared and no owner (signing in comes first), or busy preparing or playing.
+     Nothing,
+ }
+ 
+@@ -3370,8 +3367,6 @@ impl Launcher {
+         let left = self.download_left();
+         let steps = self.preparing.then(|| self.steps(&version, left));
+ 
+-        // Not prepared: an owner can have Horizon download Minecraft from Mojang; without an
+-        // owner there is nothing to play, so signing in comes first.
+         let first = (!prepared && !self.preparing)
+             .then_some(self.owner)
+             .flatten();
+@@ -3388,7 +3383,7 @@ impl Launcher {
+                 &[("version", &version)],
+             ),
+             Some(false) => trf(
+-                "Not prepared. Sign in with the Microsoft account that owns Minecraft {version} first.",
++                "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+                 &[("version", &version)],
+             ),
+             None => backend::resources_summary(prepared, !silent, &version),
+@@ -3447,12 +3442,25 @@ impl Launcher {
+                         cx.notify();
+                     })),
+                 ),
+-            Some(false) => div().child(microsoft::sign_in_button("prepare-sign-in", &t).on_click(
+-                cx.listener(|this, _: &ClickEvent, _, cx| {
+-                    this.sign_in_to_play();
+-                    cx.notify();
+-                }),
+-            )),
++            Some(false) => div()
++                .flex()
++                .gap(px(8.))
++                .child(
++                    button("prepare-install", "From my install", Kind::Secondary, &t).on_click(
++                        cx.listener(|this, _: &ClickEvent, _, cx| {
++                            this.prepare(backend::MinecraftFrom::Install);
++                            cx.notify();
++                        }),
++                    ),
++                )
++                .child(
++                    button("prepare-sign-in", "Sign in", Kind::Ghost, &t).on_click(cx.listener(
++                        |this, _: &ClickEvent, _, cx| {
++                            this.sign_in_to_play();
++                            cx.notify();
++                        },
++                    )),
++                ),
+             None => div().child(prepare),
+         };
+         let owner = self.owner == Some(true);
 -- 
 2.47.3
 

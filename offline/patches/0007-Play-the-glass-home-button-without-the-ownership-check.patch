@@ -1,22 +1,19 @@
-From 522f768afc3940d87f17dd7816d0b8c949f865c3 Mon Sep 17 00:00:00 2001
+From f20c0d4352df73000364df5d7f5c3d471cd6f58f Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 22:45:00 +0000
+Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 5/9] Play the glass home button without the ownership check
 
-The offline accounts patch reduced play_press to (prepared, busy), but the
-glass home's play group still passed self.owner (Option<bool>) to it, so
-the binary and its tests could not compile at all (E0061). This call site
-appeared in upstream 0.2.39 and was never covered by the patch set; it is
-what kept every offline release assetless since 0.2.38.
 ---
- launcher/src/glass_home.rs | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
+---
+ launcher/src/glass_home.rs |  2 +-
+ launcher/src/main.rs       | 29 +++++++++--------------------
+ 2 files changed, 10 insertions(+), 21 deletions(-)
 
 diff --git a/launcher/src/glass_home.rs b/launcher/src/glass_home.rs
-index 2926e149e..25b2ae322 100644
+index 6bb8d5b..f008603 100644
 --- a/launcher/src/glass_home.rs
 +++ b/launcher/src/glass_home.rs
-@@ -417,7 +417,7 @@ impl Launcher {
+@@ -446,7 +446,7 @@ impl Launcher {
                      Some(_) => (tr("Update"), "download-04"),
                      None => (tr("Play"), "play"),
                  };
@@ -25,6 +22,64 @@ index 2926e149e..25b2ae322 100644
                  let main = body(label.into(), icon).id("play").cursor_pointer();
                  let main = match (&update, press) {
                      (Some(_), _) => main.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index 09fb744..8d14706 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -2547,13 +2547,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
+     Some(next)
+ }
+ 
+-/// `owner`: whether an account here owns the game, by the keychain (`Launcher::owner`).
+-fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+-    match (prepared, owner) {
++fn play_press(prepared: bool, busy: bool) -> PlayPress {
++    match (prepared, busy) {
+         _ if busy => PlayPress::Nothing,
+         (true, _) => PlayPress::Play,
+-        (false, Some(true)) => PlayPress::PrepareThenPlay,
+-        (false, _) => PlayPress::Nothing,
++        (false, _) => PlayPress::PrepareThenPlay,
+     }
+ }
+ 
+@@ -2561,7 +2559,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+ /// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
+ /// the game would open on half-written files.
+ fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
+-    play_press(prepared, None, preparing || running) == PlayPress::Play
++    play_press(prepared, preparing || running) == PlayPress::Play
+ }
+ 
+ /// Whether `tag` can start being deleted now: it is installed, no install is writing it, and it
+@@ -5884,22 +5882,13 @@ mod tests {
+         );
+     }
+ 
+-    /// An owner's Play works on a version not prepared yet: it prepares it (downloading
+-    /// Minecraft from Mojang when this computer has no install), then plays. Without an owner
+-    /// it stays off: signing in comes first.
+     #[test]
+-    fn play_prepares_first_for_an_owner() {
++    fn play_prepares_first() {
+         use super::{play_press, PlayPress};
+-        assert_eq!(play_press(true, Some(true), false), PlayPress::Play);
+-        assert_eq!(play_press(true, None, false), PlayPress::Play);
+-        assert_eq!(
+-            play_press(false, Some(true), false),
+-            PlayPress::PrepareThenPlay
+-        );
+-        assert_eq!(play_press(false, Some(false), false), PlayPress::Nothing);
+-        assert_eq!(play_press(false, None, false), PlayPress::Nothing);
+-        assert_eq!(play_press(false, Some(true), true), PlayPress::Nothing);
+-        assert_eq!(play_press(true, Some(true), true), PlayPress::Nothing);
++        assert_eq!(play_press(true, false), PlayPress::Play);
++        assert_eq!(play_press(false, false), PlayPress::PrepareThenPlay);
++        assert_eq!(play_press(true, true), PlayPress::Nothing);
++        assert_eq!(play_press(false, true), PlayPress::Nothing);
+     }
+ 
+     /// A server's Join (and every other shortcut) waits like Play: not while the version's
 -- 
 2.47.3
 

@@ -1,17 +1,18 @@
-From 8ee57e09140b92fd12f3add7e7e2d91382edbdc3 Mon Sep 17 00:00:00 2001
+From 611405ed7f8cd40c0c71c498d37a5331ecb4a93a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 13:35:56 +0000
+Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 2/9] Offline updates follow the fork's releases
 
 ---
+---
  crates/horizon-release-sign/release-keys.txt  |   1 +
- launcher/src/backend.rs                       |   2 +-
+ launcher/src/backend.rs                       |  29 ++++-
  launcher/src/backend/release_loading_tests.rs |  90 +++++++++++---
  launcher/src/signed.rs                        | 117 +++++++++++++++---
- 4 files changed, 170 insertions(+), 40 deletions(-)
+ 4 files changed, 195 insertions(+), 42 deletions(-)
 
 diff --git a/crates/horizon-release-sign/release-keys.txt b/crates/horizon-release-sign/release-keys.txt
-index c39be4435..c51015423 100644
+index c39be44..c510154 100644
 --- a/crates/horizon-release-sign/release-keys.txt
 +++ b/crates/horizon-release-sign/release-keys.txt
 @@ -3,3 +3,4 @@
@@ -20,10 +21,75 @@ index c39be4435..c51015423 100644
  MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
 +DfcWSiaD14ScBMxU0btrJMPDSspw+flKz43XoXHSsh4=
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 9b3abafb2..7f3fc2465 100644
+index 56bb785..d586d51 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -3967,7 +3967,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
+@@ -1105,7 +1105,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
+ 
+ /// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
+ fn signed_digest(tag: &str, asset: &str) -> Result<String, String> {
++    digest_on(REPO, tag, asset)
++}
++
++fn launcher_digest(tag: &str, asset: &str) -> Result<String, String> {
++    digest_on(LAUNCHER_REPO, tag, asset)
++}
++
++fn digest_on(repo: &str, tag: &str, asset: &str) -> Result<String, String> {
+     crate::signed::digest(
++        repo,
+         tag,
+         asset,
+         &horizon_release_sign::trusted_keys(),
+@@ -1230,6 +1239,7 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String>
+                     )
+                 })?;
+             crate::signed::nightly_digest(
++                REPO,
+                 github_tag,
+                 &version,
+                 asset,
+@@ -3361,13 +3371,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
+ pub fn releases_and_updates(
+     on_releases: impl FnOnce(Result<Vec<Release>, String>),
+ ) -> Result<Updates, String> {
+-    releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)
++    releases_and_updates_with(
++        release_list,
++        installed,
++        launcher_releases_in,
++        launcher_release_list,
++        on_releases,
++    )
++}
++
++fn launcher_release_list() -> Result<serde_json::Value, String> {
++    let url = format!("https://api.github.com/repos/{LAUNCHER_REPO}/releases?per_page=100");
++    get(&url)?.into_json().map_err(|e| e.to_string())
+ }
+ 
+ fn releases_and_updates_with(
+     load: impl FnOnce() -> Result<serde_json::Value, String>,
+     installed: impl FnOnce() -> Vec<String>,
+     launchers: impl FnOnce(&serde_json::Value) -> Vec<Release>,
++    fork_load: impl FnOnce() -> Result<serde_json::Value, String>,
+     on_releases: impl FnOnce(Result<Vec<Release>, String>),
+ ) -> Result<Updates, String> {
+     let list = match load() {
+@@ -3381,10 +3403,11 @@ fn releases_and_updates_with(
+     let installed_versions = installed();
+     let horizon = horizon_update(&installable_updates(&releases), &installed_versions)
+         .or_else(|| architecture_update(&releases, &installed_versions));
++    let fork = fork_load().unwrap_or(serde_json::Value::Null);
+     on_releases(Ok(releases));
+     Ok(Updates {
+         horizon,
+-        launcher: launcher_update(&launchers(&list)),
++        launcher: launcher_update(&launchers(&fork)),
+     })
+ }
+ 
+@@ -3959,7 +3982,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
      {
          return Ok(None);
      }
@@ -33,7 +99,7 @@ index 9b3abafb2..7f3fc2465 100644
      remove_abandoned_stages(&work, std::time::SystemTime::now(), process_alive);
      let stage = new_stage_folder(&work)?;
 diff --git a/launcher/src/backend/release_loading_tests.rs b/launcher/src/backend/release_loading_tests.rs
-index d7f839bde..d64487c02 100644
+index d7f839b..d64487c 100644
 --- a/launcher/src/backend/release_loading_tests.rs
 +++ b/launcher/src/backend/release_loading_tests.rs
 @@ -42,33 +42,74 @@ fn baseline(load: impl Fn() -> Result<serde_json::Value, String>) -> (Vec<Releas
@@ -216,7 +282,7 @@ index d7f839bde..d64487c02 100644
              "{label}: before={} after={} ratio={:.3}x requests={}->{}",
              before.0,
 diff --git a/launcher/src/signed.rs b/launcher/src/signed.rs
-index 74e96b69b..1f2311274 100644
+index 74e96b6..1f23112 100644
 --- a/launcher/src/signed.rs
 +++ b/launcher/src/signed.rs
 @@ -4,18 +4,18 @@

@@ -31,15 +31,12 @@ jobs:
             asset: horizon-launcher-linux-x86_64.tar.gz
             binary: horizon-launcher
           - name: macos
-            # macOS 26 arm64 instead of macos-15: the 15 arm64 pool is chronically congested
-            # ("The job was not acquired by Runner of type hosted"); 26 is a separate pool.
+            # macos-26 arm64: the macos-15 arm64 hosted pool is chronically congested
             os: macos-26
             asset: horizon-launcher-macos-arm64.zip
             binary: horizon-launcher
           - name: macos-x64
-            # Build x64 natively on the Intel hosted runner instead of cross-compiling
-            # on an arm64 host: the macOS arm64 pool is congested and Intel runners
-            # queue much faster.
+            # Build x64 natively on the Intel hosted runner: it queues far faster
             os: macos-15-intel
             asset: horizon-launcher-macos-x64.zip
             binary: horizon-launcher
@@ -95,8 +92,7 @@ jobs:
       - name: Tests
         if: runner.os != 'macOS'
         env:
-          # The offline fork cannot regenerate docs/launcher-commands.md locally (no Rust
-          # toolchain), so let the test rewrite the file itself before checking it.
+          # The test rewrites docs/launcher-commands.md itself; the fork cannot regenerate it here
           HORIZON_WRITE_DOCS: "1"
         run: |
           set +e
@@ -128,9 +124,7 @@ jobs:
               echo '```'
               echo '</details>'
             } >> "$GITHUB_STEP_SUMMARY"
-            # `|| true` keeps the step alive when grep finds nothing (GitHub runs bash with
-            # -eo pipefail: a no-match grep would otherwise abort before `exit "$status"`,
-            # reporting exit 1 and swallowing the real diagnostics).
+            # || true: a no-match grep must not abort under pipefail before exit "$status"
             grep -E '^test .* FAILED$|^error(\[E[0-9]+\])?: ' test.log | sort -u | head -10 \
               | while IFS= read -r line; do echo "::error title=cargo test (${{ matrix.name }})::${line}"; done || true
             grep -A 3 'panicked at ' test.log | grep -v '^--$' | sort -u | head -20 \
@@ -189,9 +183,7 @@ jobs:
 
       - name: Smoke the offline account flow (add, list, forget)
         env:
-          # A data folder of the smoke's own: the flow is judged on a fresh directory,
-          # never on whatever the runner's real data dir holds (no leftovers from the
-          # Tests step, no location.json pointer, no runner state can reach it).
+          # A data folder of the smoke's own: judged on a fresh directory, never on runner state
           HORIZON_LAUNCHER_HOME: ${{ runner.temp }}/offline-smoke
         run: |
           set -e
@@ -201,9 +193,7 @@ jobs:
           rm -rf "$home"
           mkdir -p "$home"
           export HORIZON_LAUNCHER_HOME="$home"
-          # The launcher's own data folder is `$HORIZON_LAUNCHER_HOME` here, so its
-          # accounts.json sits directly in it. On failure the folder and the JSON land
-          # in the run summary, which reads without signing in (job logs do not).
+          # accounts.json sits directly in $home; on failure the folder lands in the run summary
           dump() {
             {
               echo "### offline smoke failed"
@@ -233,9 +223,7 @@ jobs:
               exit 1
             fi
           }
-          # The JSON assertions are plain `grep -F` on the launcher's own pretty JSON:
-          # no python, whose `python3` on Windows runners can be the Store alias that
-          # prints a hint and exits non-zero.
+          # Plain grep -F on the launcher's pretty JSON: python3 on Windows can be the Store alias
           list() { "$bin" --json account list; }
           expect() {
             local pattern=$1 label=$2 out
@@ -390,13 +378,7 @@ jobs:
           up_body="$(gh release view "launcher@${ver}" -R horizon-rust/horizon --json body -q .body 2>/dev/null \
             || gh release view "launcher-v${ver}" -R horizon-rust/horizon --json body -q .body 2>/dev/null \
             || true)"
-          # The patch-set hash this build carries, computed exactly like
-          # auto-offline-release.yml does: this checkout (the release's CI commit) holds
-          # the same offline/patches, the same offline lang data and this very workflow
-          # file. auto-offline-release.yml compares it against the release body, so a
-          # changed patch set (new patch, changed lang data or a changed
-          # launcher-release.yml) rebuilds the same version instead of being skipped as
-          # "already released".
+          # Same inputs as auto-offline-release.yml's phash: a changed patch set rebuilds instead of skipping
           phash=$(cat offline/patches/*.patch offline/lang-sync.py offline/lang-overrides.json .github/workflows/launcher-release.yml | sha256sum | cut -c1-8)
           {
             echo "Includes offline account support that does not need a Microsoft account. Based on ${ver}"

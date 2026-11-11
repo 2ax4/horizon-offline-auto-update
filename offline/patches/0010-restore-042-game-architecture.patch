@@ -1,77 +1,50 @@
-From 940c7fa6e3bfdfae265c3f5133e5d432dab5a3b4 Mon Sep 17 00:00:00 2001
+From 0c490db4370cd944ab5a4c289c4fa571a8be9b3a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
-Date: Thu, 5 Nov 2026 15:10:01 +0000
+Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
  prune orphaned translations
 
-The 0.2.42 rebase resolved the cli.rs conflicts with the 0.2.41 side, which
-dropped the game-architecture setting upstream added: the CLI key, its match
-arm, the --json settings field and the help line. The Settings page kept its
-row, so restore the CLI half exactly as upstream 0.2.42 has it.
-
-While here, remove the translation keys the offline patches orphaned: the
-i18n test fails on strings no source line asks for anymore (the Microsoft
-sign-in, partner banner, dev options and the 0.2.41-era offline texts).
 ---
- launcher/src/cli.rs | 17 ++++++++++++++++-
- 1 file changed, 16 insertions(+), 1 deletion(-)
+---
+ launcher/src/cli.rs  | 4 ++--
+ launcher/src/main.rs | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
 
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index 591f7726b..be487a663 100644
+index 20abb06..e9929bf 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
-@@ -848,6 +848,7 @@ enum Cmd {
-         action: Option<AccountCmd>,
-     },
-     /// Show the launcher's settings, or set one (the Settings page): selected-version TAG,
-+    /// game-architecture auto|x64|arm64,
-     /// minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions
-     /// on|off, prune-old-versions on|off (delete old versions after an install, keeping the
-     /// selected one, the ones instances use and the newest few), keep-versions N (how many of the
-@@ -1007,7 +1008,7 @@ pub fn command() -> clap::Command {
- pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
- 
- /// The keys `settings` sets.
--const SETTING_KEYS: [&str; 14] = [
-+const SETTING_KEYS: [&str; 15] = [
-     "selected-version",
-     "minecraft-dir",
-     "server-dir",
-@@ -1015,6 +1016,7 @@ const SETTING_KEYS: [&str; 14] = [
-     "prune-old-versions",
-     "keep-versions",
-     "opening-animation",
-+    "game-architecture",
-     "proxy",
-     "while-playing",
-     "language",
-@@ -1052,6 +1054,18 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
-             }
-         }
-         "opening-animation" => s.skip_opening = !on_off(value)?,
-+        "game-architecture" => {
-+            let choice = backend::GameArchitecture::parse(value).ok_or_else(|| {
-+                tr("Say auto, x64 or arm64 for the game architecture.").to_string()
-+            })?;
-+            if choice != backend::GameArchitecture::Auto && !backend::can_choose_game_architecture()
-+            {
-+                return Err(
-+                    tr("Manual game architectures are available on Windows ARM only.").into(),
-+                );
-+            }
-+            s.game_architecture = choice;
-+        }
-         "while-playing" => {
-             s.while_playing = backend::WhilePlaying::parse(value)
-                 .ok_or_else(|| format!("{value}: say stay, minimize or hide"))?
-@@ -1127,6 +1141,7 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
- fn settings_json(s: &backend::Settings) -> serde_json::Value {
-     serde_json::json!({
-         "selected_version": backend::resolve_version(None).ok(),
-+        "game_architecture": s.game_architecture.name(),
-         "minecraft_dir": s.minecraft_dir,
-         "server_dir": backend::server_dir(None),
-         "install_new_versions": s.install_new_versions.unwrap_or(true),
+@@ -1347,7 +1347,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+                     // The instance's version is never looked at here: the newest installed
+                     // release or Nightly, or that one with `--update` (never a native build).
+                     None => native_mods::base_for(None, &backend::installed(), update)
+-                        .ok_or_else(backend::no_version_installed)?,
++                        .ok_or_else(|| tr("No version is installed yet."))?,
+                 };
+                 let built = native_mods::build_server(
+                     &base,
+@@ -1389,7 +1389,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+                 None => {
+                     let plays = target.resolve_version(None).ok();
+                     native_mods::base_for(plays.as_deref(), &backend::installed(), update)
+-                        .ok_or_else(backend::no_version_installed)?
++                        .ok_or("No version is installed yet.")?
+                 }
+             };
+             let folder = match folder {
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index b311cf8..8a64f94 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -3152,7 +3152,7 @@ impl Launcher {
+                 .id("launcher-version")
+                 .px(px(8.))
+                 .pt(px(6.))
+-                .child(trf("Launcher {version}", &[("version", backend::VERSION)])),
++                .child(format!("Launcher {}", backend::VERSION)),
+         );
+         // Custom title bars carry the mark and name already.
+         let brand = (!titlebar::draws_brand(window)).then(|| {
 -- 
 2.47.3
 

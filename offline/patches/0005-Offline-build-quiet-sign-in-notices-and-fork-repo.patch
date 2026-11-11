@@ -1,14 +1,15 @@
-From 8c7bdfd5c83f1e6bed72793349b6a2dd146d1015 Mon Sep 17 00:00:00 2001
+From 51114927aa903fe5436fbe6d1523eddbd3538d97 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 13:35:56 +0000
+Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 4/9] Offline build: quiet sign-in notices and fork repo
 
 ---
- launcher/src/backend.rs | 46 +++++++++++++++++++++++++++--------------
- 1 file changed, 30 insertions(+), 16 deletions(-)
+---
+ launcher/src/backend.rs | 1 +
+ 1 file changed, 1 insertion(+)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index fcd8f9e21..a663a5c9e 100644
+index 2077e27..55d4b57 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -11,6 +11,7 @@ use std::sync::mpsc::Sender;
@@ -19,124 +20,6 @@ index fcd8f9e21..a663a5c9e 100644
  pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
  /// The players' page on connecting an AI agent (the website's docs/agents.md).
  pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
-@@ -1105,7 +1106,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
- 
- /// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
- fn signed_digest(tag: &str, asset: &str) -> Result<String, String> {
-+    digest_on(REPO, tag, asset)
-+}
-+
-+fn launcher_digest(tag: &str, asset: &str) -> Result<String, String> {
-+    digest_on(LAUNCHER_REPO, tag, asset)
-+}
-+
-+fn digest_on(repo: &str, tag: &str, asset: &str) -> Result<String, String> {
-     crate::signed::digest(
-+        repo,
-         tag,
-         asset,
-         &horizon_release_sign::trusted_keys(),
-@@ -1230,6 +1240,7 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String>
-                     )
-                 })?;
-             crate::signed::nightly_digest(
-+                REPO,
-                 github_tag,
-                 &version,
-                 asset,
-@@ -2114,7 +2125,6 @@ fn download_for_owner(
-     log: &dyn Fn(String),
- ) -> Result<(), String> {
-     let mut accounts = account::Accounts::load();
--    // Any account that owns the game may download it (`launch`), not only the one that plays.
-     let pass = account::launch(
-         &account::Endpoints::live(),
-         account::client_id().as_deref(),
-@@ -3163,9 +3173,6 @@ pub fn play_step(step: &str) {
-     eprintln!("Horizon: Play: {step}…");
- }
- 
--/// The client's command, once the owner gate lets it start and its resources are prepared. Past
--/// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
--/// offline.
- pub fn client(tag: &str) -> Result<Command, String> {
-     client_as(tag, None)
- }
-@@ -3361,13 +3368,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
- pub fn releases_and_updates(
-     on_releases: impl FnOnce(Result<Vec<Release>, String>),
- ) -> Result<Updates, String> {
--    releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)
-+    releases_and_updates_with(
-+        release_list,
-+        installed,
-+        launcher_releases_in,
-+        launcher_release_list,
-+        on_releases,
-+    )
-+}
-+
-+fn launcher_release_list() -> Result<serde_json::Value, String> {
-+    let url = format!("https://api.github.com/repos/{LAUNCHER_REPO}/releases?per_page=100");
-+    get(&url)?.into_json().map_err(|e| e.to_string())
- }
- 
- fn releases_and_updates_with(
-     load: impl FnOnce() -> Result<serde_json::Value, String>,
-     installed: impl FnOnce() -> Vec<String>,
-     launchers: impl FnOnce(&serde_json::Value) -> Vec<Release>,
-+    fork_load: impl FnOnce() -> Result<serde_json::Value, String>,
-     on_releases: impl FnOnce(Result<Vec<Release>, String>),
- ) -> Result<Updates, String> {
-     let list = match load() {
-@@ -3381,10 +3400,11 @@ fn releases_and_updates_with(
-     let installed_versions = installed();
-     let horizon = horizon_update(&installable_updates(&releases), &installed_versions)
-         .or_else(|| architecture_update(&releases, &installed_versions));
-+    let fork = fork_load().unwrap_or(serde_json::Value::Null);
-     on_releases(Ok(releases));
-     Ok(Updates {
-         horizon,
--        launcher: launcher_update(&launchers(&list)),
-+        launcher: launcher_update(&launchers(&fork)),
-     })
- }
- 
-@@ -4456,13 +4476,6 @@ pub struct Settings {
-     /// one now (the owner gate's screen).
-     #[serde(default)]
-     pub owner_notice_seen: bool,
--    /// Seconds a partner banner (the sidebar's card or the Servers page's banner) has been on
--    /// screen, over every start, up to `partner::SEEN_BEFORE_HIDE`: only then can the player hide it.
--    #[serde(default)]
--    pub partner_seen_secs: u64,
--    /// The player hid a partner banner: the sidebar's card and the Servers page's banner are both gone for good.
--    #[serde(default)]
--    pub partner_hidden: bool,
-     /// What the window does while the game runs. Stays by default.
-     #[serde(default)]
-     pub while_playing: WhilePlaying,
-@@ -4776,8 +4789,6 @@ mod tests {
-     }
- 
-     /// The launcher downloads Mojang's game files (client jar, libraries, assets) only for an
--    /// account the services said owns the game: never without one, and never past the gate by
--    /// the developer option (`Settings::dev_offline`), whose pass has no owner.
-     #[test]
-     fn mojang_downloads_only_for_an_owner() {
-         let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
-@@ -4872,7 +4883,10 @@ mod tests {
-         };
-         assert!(body("download_for").contains("mojang::download("));
-         assert!(body("download_for_owner").contains("account::launch("));
--        assert!(!body("download_for_owner").contains("launch_for_game("));
-+        assert!(
-+            !body("download_for_owner").contains("session_for_game("),
-+            "downloads never go through the play path"
-+        );
-         // `download_for` is defined once and called once, by `download_for_owner`.
-         assert_eq!(backend.matches("download_for(").count(), 2);
-         assert!(body("download_for_owner").contains("download_for("));
 -- 
 2.47.3
 

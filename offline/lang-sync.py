@@ -1,34 +1,13 @@
 #!/usr/bin/env python3
 """Keep every launcher language table in parity with the offline build's UI.
 
-This replaces the language-file hunks the offline patches used to carry.
-Upstream re-translates `launcher/lang/*.json` constantly, so a static patch
-against those files failed on almost every re-translation. The patches in
-`offline/patches/` now touch Rust only; right after `git am`, the release
-workflow runs this script, which applies the key operations stored as data in
-`lang-overrides.json` (next to this script):
-
-- drop every key listed under "delete", whenever a table has it;
-- add every missing key under "add", using that language's entry from the
-  data. A language the data does not know (a new upstream language) falls
-  back to the "en" entry, which is the English key itself; the launcher's
-  lookup also falls back to English, so the fallback still renders right.
-
-Then the auto-add pass keeps a brand-new upstream release from failing the
-launcher's own i18n parity test (`launcher/src/i18n/tests.rs`): every key the
-patched code asks for with `tr("…")` / `trf("…")` must exist in every table.
-This script re-scans the Rust sources the same way that test does, and any
-key the data does not cover yet is added to every table with its English text
-(the key itself) so the build goes green and the UI falls back to English
-until a real translation lands in `lang-overrides.json`. Auto-added keys are
-per-build: they live in the release commit's tables, never in the data file,
-so a string upstream later drops disappears by itself instead of becoming an
-orphan the test rejects.
-
-The key sets of all tables stay identical, the invariant upstream's own files
-keep. Idempotent: a second run rewrites nothing. Tables are rewritten with
-`json.dumps(..., ensure_ascii=False, indent=2)` plus a trailing newline, which
-round-trips upstream's own layout byte for byte.
+Upstream re-translates launcher/lang/*.json constantly, so the patches touch Rust
+only. Right after git am the release workflow runs this script: it applies the key
+operations in lang-overrides.json (drop every "delete" key, add every "add" key,
+English fallback for languages the data does not know), then auto-adds every
+tr()/trf() key the patched code asks for but a table lacks, as English, mirroring
+the launcher's own i18n parity test. Auto-added keys live in the release commit's
+tables only, never in the data file. Idempotent; round-trips upstream's layout.
 
 Usage: python3 offline/lang-sync.py [--lang-dir launcher/lang] [--overrides FILE]
                                     [--no-auto-add]
@@ -41,11 +20,8 @@ import sys
 from pathlib import Path
 
 
-# --------------------------------------------------------------------------
-# The tr()/trf() key scan, mirroring launcher/src/i18n/tests.rs: token-level
-# (comments, raw/byte/char literals and escapes cannot hide or fake a call),
-# recursing into macro bodies, taking the first literal argument only.
-# --------------------------------------------------------------------------
+# The tr()/trf() key scan, mirroring launcher/src/i18n/tests.rs: token-level,
+# macro-recursing, first literal argument only.
 
 def _unescape(s: str) -> str:
     out = []
