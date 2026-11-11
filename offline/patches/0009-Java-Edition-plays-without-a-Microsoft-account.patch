@@ -1,4 +1,4 @@
-From 9725bfed69a8c05e174411b0ba5ee0b8ca060c2b Mon Sep 17 00:00:00 2001
+From 75bd032b27892f465a0dc162ef202b9b5b872e87 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:22:25 +0000
 Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
@@ -19,15 +19,15 @@ downloads too, and a new test pins the offline player's name, UUID and
 empty token.
 ---
  launcher/src/account.rs       |  38 +++++++++++-
- launcher/src/account/tests.rs |  24 ++++++++
- launcher/src/backend.rs       | 106 ++++++++++++++--------------------
- 3 files changed, 104 insertions(+), 64 deletions(-)
+ launcher/src/account/tests.rs |  79 ++++++++++++++++++++-----
+ launcher/src/backend.rs       | 108 ++++++++++++++--------------------
+ 3 files changed, 145 insertions(+), 80 deletions(-)
 
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 6ffe417a8..bc45e8dc7 100644
+index 08993d2ac..c417bc76f 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
-@@ -2528,7 +2528,8 @@ fn account_sessions_until(
+@@ -2461,7 +2461,8 @@ fn account_sessions_until(
  }
  
  /// Who plays the real Minecraft: Java Edition (a Java instance), past the owner gate itself
@@ -37,7 +37,7 @@ index 6ffe417a8..bc45e8dc7 100644
  /// from the services, an account that owned it plays with its last token. Mojang's game takes the
  /// token on its command line, as Mojang's launcher gives it; that command is never logged.
  pub fn java_player() -> Result<crate::java_launch::Player, String> {
-@@ -2551,6 +2552,12 @@ fn java_player_with(
+@@ -2484,6 +2485,12 @@ fn java_player_with(
      store: &dyn SecretStore,
      accounts: &mut Accounts,
  ) -> Result<crate::java_launch::Player, String> {
@@ -50,7 +50,7 @@ index 6ffe417a8..bc45e8dc7 100644
      let pass = launch(ep, client_id, store, accounts).map_err(|e| e.to_string())?;
      let kept = || {
          let order = accounts.selected().into_iter().chain(&accounts.accounts);
-@@ -2571,5 +2578,34 @@ fn java_player_with(
+@@ -2504,5 +2511,34 @@ fn java_player_with(
      })
  }
  
@@ -86,10 +86,49 @@ index 6ffe417a8..bc45e8dc7 100644
  #[cfg(test)]
  mod tests;
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 465a0818d..19622ce4e 100644
+index 3e91cc91d..19622ce4e 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
-@@ -1214,6 +1214,30 @@ fn the_java_edition_plays_as_an_owner_even_offline() {
+@@ -680,7 +680,7 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
+         .unwrap()
+         .starts_with("Alex is no longer signed in"));
+     assert_eq!(pass.owner.unwrap().0.name, "Notch");
+-    // Nobody selected (a download's gate): Notch is asked, and no session comes back.
++    // An offline name plays: Notch is asked, and no session goes to the game.
+     accounts.selected = None;
+     m.lock().unwrap().log.clear();
+     let pass = launch(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+@@ -1129,7 +1129,11 @@ fn client_id_is_configuration() {
+ }
+ 
+ #[test]
+-fn play_as_picks_a_signed_in_account() {
++fn offline_names_switch_with_accounts() {
++    let store = MemoryStore::default();
++    store
++        .set("abc", &serde_json::to_string(&secrets("t", true)).unwrap())
++        .unwrap();
+     let mut a = Accounts {
+         accounts: vec![Account {
+             uuid: "abc".into(),
+@@ -1137,6 +1141,7 @@ fn play_as_picks_a_signed_in_account() {
+             skin: None,
+             cape: None,
+         }],
++        selected: Some("abc".into()),
+         ..Accounts::default()
+     };
+     assert_eq!(a.player(), Player::Microsoft("abc".into()));
+@@ -1179,7 +1184,7 @@ fn play_as_picks_a_signed_in_account() {
+     let old: Accounts = serde_json::from_str(r#"{"accounts":[],"selected":null}"#).unwrap();
+     assert_eq!(old.player(), Player::GameName);
+     assert_eq!(
+-        serde_json::to_string(&Accounts::default()).unwrap(),
++        serde_json::to_string(&old).unwrap(),
+         r#"{"accounts":[],"selected":null}"#
+     );
+ }
+@@ -1209,6 +1214,30 @@ fn the_java_edition_plays_as_an_owner_even_offline() {
      );
  }
  
@@ -120,11 +159,85 @@ index 465a0818d..19622ce4e 100644
  /// A secrets file of the test's own, gone first.
  fn secrets_file(name: &str) -> PathBuf {
      let dir = std::env::temp_dir().join(format!("horizon-secrets-{name}-{}", std::process::id()));
+@@ -2246,7 +2275,7 @@ fn targeted_sign_in_rejects_another_identity_without_writing_or_selecting_it() {
+ }
+ 
+ #[test]
+-fn targeted_sign_in_preserves_the_selected_account() {
++fn targeted_sign_in_preserves_the_selected_account_or_offline_name() {
+     let store = MemoryStore::default();
+     let mut accounts = signed_in(&store, &secrets("old", true));
+     let mut other = notch();
+@@ -2266,6 +2295,20 @@ fn targeted_sign_in_preserves_the_selected_account() {
+     .unwrap();
+     assert_eq!(accounts.selected.as_deref(), Some(other.uuid.as_str()));
+     assert_eq!(kept(&store).minecraft_token, "renewed");
++    accounts.selected = None;
++    accounts.offline_selected = Some("Builder".into());
++    accept_sign_in(
++        &mut accounts,
++        &store,
++        Some(&notch()),
++        notch(),
++        &secrets("renewed-again", true),
++        &|| false,
++        &|_| {},
++    )
++    .unwrap();
++    assert!(accounts.selected.is_none());
++    assert_eq!(accounts.offline_selected.as_deref(), Some("Builder"));
+ }
+ 
+ #[test]
+@@ -2372,26 +2415,32 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
+         skin: None,
+         cape: None,
+     });
+-    // This launch plays as Alex: it is Alex who is told to sign in again (Notch owning the game
+-    // doesn't let Alex play), and Notch is still the one `account select` picked.
+-    let refused = launch_as(&offline(), Some("test-client"), &store, &mut accounts, alex);
+-    assert!(refused
+-        .unwrap_err()
++    // This launch plays as Alex: Notch's ownership opens the gate, and it is Alex who is told
++    // to sign in again, so Alex played. Notch is still the one `account select` picked.
++    let pass = launch_as(
++        &offline(),
++        Some("test-client"),
++        &store,
++        &mut accounts,
++        &Player::Microsoft(alex.into()),
++    )
++    .unwrap();
++    assert!(pass.session.is_none());
++    assert!(pass
++        .offline
++        .unwrap()
+         .starts_with("Alex is no longer signed in"));
+-    assert_eq!(accounts.selected.as_deref(), Some(UUID));
+-    // Notch plays with the last answer while the services can't be reached.
+-    let pass = launch_as(&offline(), Some("test-client"), &store, &mut accounts, UUID).unwrap();
+-    assert!(pass.session.is_none() && pass.offline.is_some());
++    assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
+     // An account that isn't in the launcher is refused, and changes nothing either.
+     let gone = launch_as(
+         &offline(),
+         Some("test-client"),
+         &store,
+         &mut accounts,
+-        "not-signed-in",
++        &Player::Microsoft("not-signed-in".into()),
+     );
+     assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
+-    assert_eq!(accounts.selected.as_deref(), Some(UUID));
++    assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
+ }
+ 
+ #[test]
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 18cd54cd4..5b0646203 100644
+index a663a5c9e..d9ecf191f 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -2119,9 +2119,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
+@@ -2115,9 +2115,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
      binary.is_file().then_some(binary)
  }
  
@@ -137,7 +250,7 @@ index 18cd54cd4..5b0646203 100644
  fn download_for_owner(
      pins: &sources::Pins,
      dir: &Path,
-@@ -2138,12 +2138,12 @@ fn download_for_owner(
+@@ -2134,12 +2134,12 @@ fn download_for_owner(
      if let Err(e) = accounts.save() {
          log(format!("Horizon: the accounts are not saved: {e}"));
      }
@@ -153,7 +266,7 @@ index 18cd54cd4..5b0646203 100644
  pub fn download_version_for_owner(
      id: &str,
      manifest_sha1: &str,
-@@ -2164,9 +2164,10 @@ pub fn download_version_for_owner(
+@@ -2160,9 +2160,10 @@ pub fn download_version_for_owner(
      Ok(dir)
  }
  
@@ -167,7 +280,7 @@ index 18cd54cd4..5b0646203 100644
  /// instance's folder. The caller wraps it (`launch::wrap`) and never logs it: it holds the token.
  /// A Java instance's game, ready to start; `server` (`host[:port]`) is joined once it has.
  pub fn java_game(
-@@ -2259,50 +2260,42 @@ pub fn java_game(
+@@ -2255,50 +2256,42 @@ pub fn java_game(
      )
  }
  
@@ -237,7 +350,16 @@ index 18cd54cd4..5b0646203 100644
  }
  
  /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
-@@ -4795,9 +4788,11 @@ mod tests {
+@@ -3181,7 +3174,7 @@ pub fn client(tag: &str) -> Result<Command, String> {
+ pub const SIGN_IN_HINT: &str = "Sign in with `horizon-launcher account sign-in`.";
+ 
+ /// [`client`], playing as `who` for this launch only (`play --account`).
+-pub fn client_as(tag: &str, who: Option<&str>) -> Result<Command, String> {
++pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, String> {
+     if let Some(error) = game_architecture_launch_error(tag) {
+         return Err(error);
+     }
+@@ -4788,9 +4781,11 @@ mod tests {
          fs::remove_dir_all(&dir).unwrap();
      }
  
@@ -251,7 +373,7 @@ index 18cd54cd4..5b0646203 100644
          let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
          let _ = fs::remove_dir_all(&dir);
          let pins = sources::Pins::read(&serde_json::json!({ "minecraft": {
-@@ -4813,17 +4808,15 @@ mod tests {
+@@ -4806,17 +4801,15 @@ mod tests {
          };
          let log = |_: String| {};
          let no_owner = || Ok(account::Launch::default());
@@ -277,7 +399,7 @@ index 18cd54cd4..5b0646203 100644
          let owner = account::Account {
              uuid: "069a79f444e94726a5befca90e38aaf5".into(),
              name: "Notch".into(),
-@@ -4838,22 +4831,9 @@ mod tests {
+@@ -4831,22 +4824,9 @@ mod tests {
              owner: Some((owner, secrets)),
              ..Default::default()
          });

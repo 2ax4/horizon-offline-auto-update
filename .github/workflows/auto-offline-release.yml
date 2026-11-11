@@ -1,8 +1,7 @@
 name: auto-offline-release
 on:
   schedule:
-    # upstream check every ten minutes, off the crowded :00/:30 minutes; GitHub drops
-    # scheduled ticks under load, so more ticks mean the next release is picked up sooner
+    # upstream check every ten minutes, off the crowded :00/:30 minutes
     - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
     inputs:
@@ -75,10 +74,7 @@ jobs:
               echo "already released: ${target} with this exact patch set (offline-phash:${phash}); every older upstream version is covered by it"
               break
             fi
-            # A release published from an older patch set (its body carries no matching
-            # offline-phash) does not cover the current patches: fall through and rebuild
-            # the same version. The publish step replaces the release, so the new assets
-            # take the old ones' place under the same tag.
+            # A release from an older patch set does not cover these patches: rebuild it.
             if [ "${RETRY:-}" != true ] && git ls-remote --exit-code --tags origin "refs/tags/${marker}" >/dev/null 2>&1; then
               echo "skipping ${version}: the marker tag ${marker} says it already failed with these patches and workflows; change them, or run this workflow with retry"
               continue
@@ -93,9 +89,7 @@ jobs:
             git am --abort >/dev/null 2>&1 || true
             git reset --hard >/dev/null 2>&1 || true
             git clean -fdq >/dev/null 2>&1 || true
-            # Blobs, not just commits and trees: git am --3way rebuilds the patch's base
-            # from them ("sha1 information is lacking or useless" otherwise). --depth=1
-            # keeps it light while still carrying the tip tree's blobs.
+            # Blobs, not just commits and trees: git am --3way rebuilds the patch's base from them.
             git fetch --depth=1 upstream "$refname" --no-tags
             sha=$(git rev-parse "FETCH_HEAD^{commit}")
             git checkout -B attempt "$sha"
@@ -104,9 +98,7 @@ jobs:
             for p in /tmp/patches/*.patch; do
               echo "git am $(basename "$p")"
               if ! git am "$p" 2>/tmp/am-fallback.log; then
-                # A plain apply fails when the context drifted. --3way can still merge it,
-                # but only when the patch's base blobs are in this checkout (they are
-                # missing for intermediate patch states), so fall back before giving up.
+                # Context drift: --3way can still merge it when the patch's base blobs are here.
                 git am --abort >/dev/null 2>&1 || true
                 if ! git am --3way "$p" 2>>/tmp/am-fallback.log; then
                   failed_patch="$(basename "$p")"
@@ -179,11 +171,7 @@ jobs:
           git show origin/main:.github/workflows/launcher-release.yml > .github/workflows/launcher-release.yml
           git show origin/main:.github/workflows/auto-offline-release.yml > .github/workflows/auto-offline-release.yml
           git checkout origin/main -- offline/patches
-          # The fork's own files must survive this CI commit: main's README replaces
-          # upstream's, and every file main has but the patched upstream tree does not
-          # (fork screenshots like docs/media/offline-*.png, offline/verify-release.py,
-          # extra workflow files) comes back from main. Without this, each release
-          # commit resets the README to upstream's and drops fork-only files.
+          # Fork-only files (README, offline/, screenshots, extra workflows) come back from main.
           git checkout origin/main -- README.md || true
           comm -23 \
             <(git ls-tree -r --name-only origin/main | sort) \
@@ -192,12 +180,10 @@ jobs:
           pub=$(printf '%s' "$RELEASE_SIGNING_KEY" | base64 --decode \
             | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
           grep -qx "$pub" crates/horizon-release-sign/release-keys.txt || {
-            echo "::error::RELEASE_SIGNING_KEY does not match any key in crates/horizon-release-sign/release-keys.txt: update the secret or the key inside offline/patches/0003-offline-update-notice.patch"
+            echo "::error::RELEASE_SIGNING_KEY does not match any key in crates/horizon-release-sign/release-keys.txt: update the secret or the key inside offline/patches/0003-Offline-updates-follow-the-fork-s-releases.patch"
             exit 1
           }
-          # The language tables are not patched: lang-sync drops the removed
-          # strings' keys and adds the offline card's key to every table, in
-          # upstream's own JSON layout (see offline/lang-sync.py).
+          # Language tables are not patched: lang-sync rewrites them in upstream's layout.
           python3 offline/lang-sync.py
           git add -A .
           tree=$(git write-tree)
@@ -265,12 +251,8 @@ jobs:
           SHA: ${{ needs.sync.outputs.sha }}
           TAG: ${{ needs.sync.outputs.tag }}
         run: |
-          # Only mark the version as failed when the build itself failed. A job that
-          # GitHub could not even place on a hosted runner ("The job was not acquired
-          # by Runner of type hosted") never runs a single step, and the run can also
-          # die on a GitHub "Internal server error". Those are GitHub capacity/infra
-          # failures, not ours: do not record the marker, so the next cron run retries
-          # the same version automatically.
+          # A job that never ran a step (GitHub capacity/infra) is not a real failure:
+          # leave it unmarked so the next cron run retries the same version.
           real_failure=false
           while IFS=$'\t' read -r job_name step_count; do
             if [ "${step_count:-0}" -gt 0 ]; then
@@ -287,9 +269,7 @@ jobs:
             exit 0
           fi
           gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f "ref=refs/tags/${MARKER}" -f "sha=${SHA}" >/dev/null || true
-          # The failed steps' logs can still be empty right after the job ends (GitHub
-          # finalizes them a moment later); retry a few times before giving up, so the
-          # issue actually carries the error instead of a log-less shell.
+          # Logs can lag the job's end a moment: retry before giving up.
           failed_log=""
           for attempt in 1 2 3 4; do
             failed_log="$(gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --log-failed 2>/dev/null | tail -120 || true)"

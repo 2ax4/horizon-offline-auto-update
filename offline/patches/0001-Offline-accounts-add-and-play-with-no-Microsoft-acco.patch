@@ -1,0 +1,2324 @@
+From 67647e77304cc01b411ebafc64bd3e05efca7d76 Mon Sep 17 00:00:00 2001
+From: 2ax4 <2ax4@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 13:35:56 +0000
+Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
+
+---
+ docs/launcher-commands.md     |  33 +++++
+ launcher/src/account.rs       | 119 +++++++--------
+ launcher/src/account/tests.rs | 142 +++++++++---------
+ launcher/src/cli.rs           | 182 +++++++++++++++++------
+ launcher/src/frame.rs         |  30 ----
+ launcher/src/home.rs          |   2 +-
+ launcher/src/instances.rs     |  28 ++++
+ launcher/src/lib.rs           |   1 +
+ launcher/src/main.rs          | 193 ++++++++++++-------------
+ launcher/src/mcp.rs           |   3 +-
+ launcher/src/owner_page.rs    |  49 +++++--
+ launcher/src/skin_page.rs     | 264 ++++++++++++++++++++++++++++++++++
+ launcher/src/skins.rs         | 183 +++++++++++++++++++++++
+ launcher/src/skins/tests.rs   | 124 ++++++++++++++++
+ launcher/src/switch_page.rs   | 219 +++++++++++++++++++++++++---
+ launcher/tests/owner_gate.rs  |  53 ++++---
+ 16 files changed, 1272 insertions(+), 353 deletions(-)
+ create mode 100644 launcher/src/skin_page.rs
+ create mode 100644 launcher/src/skins.rs
+ create mode 100644 launcher/src/skins/tests.rs
+
+diff --git a/docs/launcher-commands.md b/docs/launcher-commands.md
+index e528b8967..3771eec0d 100644
+--- a/docs/launcher-commands.md
++++ b/docs/launcher-commands.md
+@@ -196,6 +196,39 @@ Play as this account.
+ 
+ MCP: `account_select`.
+ 
++## `horizon-launcher account offline`
++
++    horizon-launcher account offline [NAME]
++
++- `NAME`
++
++MCP: `account_offline`.
++
++## `horizon-launcher account forget-offline`
++
++Forget one of your offline names; its skin and cape go with it.
++
++    horizon-launcher account forget-offline <NAME>
++
++- `NAME`
++
++MCP: `account_forget_offline`.
++
++## `horizon-launcher account skin`
++
++Show or set an offline name's skin and cape: a 64x64 (or 64x32) skin PNG, a 64x32 cape PNG, the model. Kept by the launcher and given to the game when that name plays.
++
++    horizon-launcher account skin <NAME> [FILE]
++
++- `NAME`
++- `FILE`: The skin's PNG
++- `--model`: classic or slim arms
++- `--cape`: The cape's PNG
++- `--no-skin`: Back to the default skin
++- `--no-cape`: Take the cape off
++
++MCP: `account_skin`.
++
+ ## `horizon-launcher settings`
+ 
+ Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), native-cache-gib N (combined native compilation cache limit in GiB, default 30; 0 disables automatic cleanup), native-profile performance|dev|release (the profile native mods build with: performance is incremental, dev rebuilds a mod quickest for a slow game, release is slowest to build and slightly faster to play).
+diff --git a/launcher/src/account.rs b/launcher/src/account.rs
+index 5c62885de..08993d2ac 100644
+--- a/launcher/src/account.rs
++++ b/launcher/src/account.rs
+@@ -6,8 +6,6 @@
+ //! reads once (`--session-file`), never on its command line. Tokens never reach logs, errors or
+ //! output.
+ //!
+-//! The owner gate ([`launch`]): the launcher starts the game only while an account in it owns
+-//! Minecraft: Java Edition, as other launchers do, and the game plays as the selected account.
+ //! The game binary itself, its harnesses and the servers don't go through the launcher's gate.
+ //!
+ //! The Azure app (client ID) is Horizon's own and is configuration: `HORIZON_MSA_CLIENT_ID` at
+@@ -23,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+ /// The keychain service name every secret is stored under.
+ pub const SERVICE: &str = "dev.playhorizon.launcher";
+ const SCOPE: &str = "XboxLive.signin offline_access";
+-pub const NOT_CONFIGURED: &str = "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.";
++pub const NOT_CONFIGURED: &str = "Microsoft sign-in is not available in this build.";
+ /// What every Play says while no account in the launcher owns the game.
+ pub const NEEDS_OWNER: &str =
+     "Sign in with a Microsoft account that owns Minecraft: Java Edition to play";
+@@ -1695,11 +1693,27 @@ pub struct Accounts {
+     pub accounts: Vec<Account>,
+     /// The UUID of the account the game starts with; none: the first one.
+     pub selected: Option<String>,
+-    /// Offline names an older launcher kept (`offline`), read only so that the next save also
+-    /// deletes their skins and capes (`skins/<name>.png`, `skins/<name>.cape.png`). Its
+-    /// `offline_selected` and `looks` are dropped on read.
+-    #[serde(default, rename = "offline", skip_serializing)]
+-    old_offline: Vec<String>,
++    /// Offline names the player keeps, to switch between (`--name`): no account, no skin.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub offline: Vec<String>,
++    /// The offline name that plays when no account is selected; none: the name the game made up
++    /// (`horizon-player.txt`).
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub offline_selected: Option<String>,
++    /// Each offline name's skin and cape (`skins`), by the name in lowercase.
++    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
++    pub looks: std::collections::BTreeMap<String, crate::skins::Look>,
++}
++
++/// Who plays, as the quick switch lists them.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum Player {
++    /// A Microsoft account, by UUID.
++    Microsoft(String),
++    /// An offline name.
++    Offline(String),
++    /// Offline as the name the game made up.
++    GameName,
+ }
+ 
+ /// The secrets an account keeps in `store`, if it still has them there.
+@@ -1732,18 +1746,7 @@ impl Accounts {
+             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+         }
+         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+-        std::fs::write(path, text + "\n").map_err(|e| e.to_string())?;
+-        // An older launcher's offline names: their skins and capes go too, missing files are fine.
+-        if let Some(skins) = path.parent().map(|dir| dir.join("skins")) {
+-            for name in &self.old_offline {
+-                let key = name.to_ascii_lowercase();
+-                for file in [format!("{key}.png"), format!("{key}.cape.png")] {
+-                    let _ = std::fs::remove_file(skins.join(file));
+-                }
+-            }
+-            let _ = std::fs::remove_dir(&skins);
+-        }
+-        Ok(())
++        std::fs::write(path, text + "\n").map_err(|e| e.to_string())
+     }
+     pub fn selected(&self) -> Option<&Account> {
+         let uuid = self.selected.as_ref()?;
+@@ -1784,8 +1787,7 @@ impl Accounts {
+         }
+         Ok(())
+     }
+-    /// Whether an account here owned the game at its last check (the keychain's answer, no
+-    /// request): what Play needs.
++    /// Whether an account here owned the game at its last check (the keychain's answer, no request).
+     pub fn has_owner(&self, store: &dyn SecretStore) -> bool {
+         // The selected account first: it owning the game ends the search after one account's
+         // item — every account's item read can ask for the keychain (macOS, #4912).
+@@ -1795,10 +1797,32 @@ impl Accounts {
+             .any(|a| secrets_in(store, &a.uuid).is_some_and(|s| s.owns))
+     }
+ 
+-    /// Plays as the signed-in account `uuid`.
+-    pub fn play_as(&mut self, uuid: &str) -> Result<(), String> {
+-        if !self.accounts.iter().any(|a| a.uuid == uuid) {
+-            return Err("That account isn't signed in.".into());
++    /// Who plays now.
++    pub fn player(&self) -> Player {
++        match (self.selected(), &self.offline_selected) {
++            (Some(a), _) => Player::Microsoft(a.uuid.clone()),
++            (None, Some(name)) => Player::Offline(name.clone()),
++            (None, None) => Player::GameName,
++        }
++    }
++
++    pub fn play_as(&mut self, who: Player) -> Result<(), String> {
++        match who {
++            Player::Microsoft(uuid) => {
++                if !self.accounts.iter().any(|a| a.uuid == uuid) {
++                    return Err("That account isn't signed in.".into());
++                }
++                self.selected = Some(uuid);
++            }
++            Player::Offline(name) => {
++                let name = self.add_offline(&name)?;
++                self.selected = None;
++                self.offline_selected = Some(name);
++            }
++            Player::GameName => {
++                self.selected = None;
++                self.offline_selected = None;
++            }
+         }
+         self.selected = Some(uuid.to_string());
+         Ok(())
+@@ -1811,7 +1835,6 @@ impl Accounts {
+         }
+     }
+ 
+-    /// Sign out: the secrets leave the keychain, the account the list.
+     pub fn remove(&mut self, store: &dyn SecretStore, uuid: &str) -> Result<(), String> {
+         let _operation = session::lock(store)?;
+         store.delete(uuid)?;
+@@ -1976,33 +1999,6 @@ pub fn launch(
+     }
+ }
+ 
+-/// The owner gate before the game starts: [`launch`], where the account that plays (the selected
+-/// one, else the first) must own the game itself, by the services' answer or, when they can't be
+-/// asked, its last one. Never another account's ownership for a name of its own.
+-pub fn launch_for_game(
+-    ep: &Endpoints,
+-    client_id: Option<&str>,
+-    store: &dyn SecretStore,
+-    accounts: &mut Accounts,
+-) -> Result<Launch, NoOwner> {
+-    if accounts.selected().is_none() {
+-        accounts.selected = accounts.accounts.first().map(|a| a.uuid.clone());
+-    }
+-    let pass = launch(ep, client_id, store, accounts)?;
+-    let owns = accounts
+-        .selected()
+-        .and_then(|a| secrets_in(store, &a.uuid))
+-        .is_some_and(|s| s.owns);
+-    if owns {
+-        Ok(pass)
+-    } else {
+-        // Why that account can't play (it doesn't own the game, signed out, an unread keyring).
+-        Err(NoOwner {
+-            keyring: pass.offline,
+-        })
+-    }
+-}
+-
+ /// Write the session for the game, readable by this user only, in a fresh file it deletes
+ /// when it reads it.
+ pub fn write_session_file(
+@@ -2239,7 +2235,10 @@ pub struct GameSession {
+ /// for it, and the other accounts' for its splitscreen players.
+ pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
+     let mut accounts = Accounts::load();
+-    let pass = launch_for_game(
++    if accounts.selected.is_none() {
++        return Ok(GameSession::default());
++    }
++    let pass = launch(
+         &Endpoints::live(),
+         client_id().as_deref(),
+         store(),
+@@ -2294,9 +2293,13 @@ fn launch_as(
+ ) -> Result<Launch, String> {
+     let chosen = accounts.selected.clone();
+     let pass = accounts
+-        .play_as(who)
+-        .and_then(|()| launch_for_game(ep, client_id, store, accounts).map_err(|e| e.to_string()));
+-    accounts.selected = chosen;
++        .play_as(who.clone())
++        .and_then(|()| launch(ep, client_id, store, accounts).map_err(|e| e.to_string()));
++    (
++        accounts.selected,
++        accounts.offline_selected,
++        accounts.offline,
++    ) = chosen;
+     pass
+ }
+ 
+diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
+index eb27706ea..3e91cc91d 100644
+--- a/launcher/src/account/tests.rs
++++ b/launcher/src/account/tests.rs
+@@ -686,80 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
+     let pass = launch(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+     assert!(pass.session.is_none() && pass.offline.is_none());
+     assert_eq!(m.lock().unwrap().log.len(), 2);
+-    // No account at all.
+     assert!(launch(&ep, Some("test-client"), &store, &mut Accounts::default()).is_err());
+ }
+ 
+ #[test]
+-fn the_game_plays_only_as_an_account_that_owns_it() {
++fn offline_accounts_play_without_an_owner() {
+     let store = MemoryStore::default();
+-    let (_, ep) = mock(|_| {});
+-    // No account: no game.
+-    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut Accounts::default());
+-    assert_eq!(refused.unwrap_err(), NoOwner::default());
+-    // An owner, none selected: it plays, with its session.
+-    let mut accounts = signed_in(&store, &secrets("mc-token", true));
+-    accounts.selected = None;
+-    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+-    assert_eq!(pass.session.unwrap().0.name, "Notch");
+-    assert_eq!(accounts.selected.as_deref(), Some(UUID));
+-    // Another account plays: Notch owning the game doesn't let it play under a name of its own.
+-    accounts.accounts.push(Account {
+-        uuid: "other".into(),
+-        name: "Alex".into(),
+-        skin: None,
+-        cape: None,
+-    });
+-    accounts.play_as("other").unwrap();
+-    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap_err();
+-    assert!(refused
+-        .to_string()
+-        .starts_with("Alex is no longer signed in"));
+-    // The services say the account that plays doesn't own the game.
+-    let (_, ep) = mock(|m| m.owns_game = false);
+-    let mut accounts = signed_in(&store, &secrets("mc-token", true));
+-    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts);
+-    assert_eq!(refused.unwrap_err(), NoOwner::default());
++    let mut accounts = Accounts::default();
++    accounts
++        .play_as(Player::Offline("Builder_1".into()))
++        .unwrap();
++    assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
++    assert_eq!(accounts.name_arg(), Some("Builder_1"));
++    assert!(!accounts.has_owner(&store));
++    let (m, ep) = mock(|m| m.owns_game = false);
++    assert!(launch(&ep, Some("test-client"), &store, &mut accounts).is_err());
++    assert!(
++        m.lock().unwrap().log.is_empty(),
++        "no request for an offline player"
++    );
++    accounts
++        .play_as(Player::Offline("builder_2".into()))
++        .unwrap();
++    assert_eq!(accounts.offline, ["Builder_1", "builder_2"]);
++    accounts.play_as(Player::GameName).unwrap();
++    assert_eq!(accounts.player(), Player::GameName);
+ }
+ 
+ #[test]
+-fn files_from_launchers_with_offline_names_load_and_lose_them_on_save() {
+-    let dir = std::env::temp_dir().join(format!("horizon-old-offline-{}", std::process::id()));
+-    let _ = std::fs::remove_dir_all(&dir);
+-    std::fs::create_dir_all(dir.join("skins")).unwrap();
++fn signing_the_last_owner_out_leaves_offline_accounts_playing() {
+     let store = MemoryStore::default();
+-    let mut old = serde_json::to_value(signed_in(&store, &secrets("mc-token", true))).unwrap();
+-    old["selected"] = serde_json::Value::Null;
+-    old["offline"] = serde_json::json!(["Builder_1"]);
+-    old["offline_selected"] = serde_json::json!("Builder_1");
+-    old["looks"] =
+-        serde_json::json!({ "builder_1": { "skin": true, "cape": true, "model": "slim" } });
+-    let path = dir.join("accounts.json");
+-    std::fs::write(&path, old.to_string()).unwrap();
+-    for file in ["builder_1.png", "builder_1.cape.png"] {
+-        std::fs::write(dir.join("skins").join(file), b"png").unwrap();
+-    }
+-    let mut accounts = Accounts::load_from(&path);
+-    assert_eq!(accounts.accounts, vec![notch()]);
+-    assert!(accounts.selected().is_none());
+-    // The account plays, and the save drops the names, their looks and their files.
+-    let (_, ep) = mock(|_| {});
+-    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts).unwrap();
+-    assert_eq!(pass.session.unwrap().0.uuid, UUID);
+-    accounts.save_to(&path).unwrap();
+-    let saved: serde_json::Value =
+-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+-    assert_eq!(
+-        saved,
+-        serde_json::json!({ "accounts": accounts.accounts, "selected": UUID })
+-    );
+-    assert!(!dir.join("skins").exists());
+-    // The developer option of 0.2.58 reads as nothing and is not written back.
+-    let settings = crate::backend::Settings::parse(r#"{"dev_offline": true, "keep_versions": 3}"#);
+-    let saved = serde_json::to_value(&settings).unwrap();
+-    assert!(saved.get("dev_offline").is_none(), "{saved}");
+-    assert_eq!(saved["keep_versions"], 3);
+-    let _ = std::fs::remove_dir_all(&dir);
++    let mut accounts = signed_in(&store, &secrets("mc-token", true));
++    accounts
++        .play_as(Player::Offline("Builder_1".into()))
++        .unwrap();
++    accounts.remove(&store, UUID).unwrap();
++    assert_eq!(accounts.offline, ["Builder_1"]);
++    assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
++    assert!(!accounts.has_owner(&store));
++    accounts
++        .play_as(Player::Offline("Builder_2".into()))
++        .unwrap();
++    assert_eq!(accounts.offline, ["Builder_1", "Builder_2"]);
+ }
+ 
+ #[test]
+@@ -1171,11 +1139,45 @@ fn play_as_picks_a_signed_in_account() {
+         }],
+         ..Accounts::default()
+     };
+-    a.play_as("abc").unwrap();
+-    assert_eq!(a.selected().unwrap().name, "Ludo");
+-    assert!(a.play_as("zzz").is_err());
+-    assert_eq!(a.selected.as_deref(), Some("abc"));
+-    // An accounts.json written now has nothing but the accounts and who plays.
++    assert_eq!(a.player(), Player::Microsoft("abc".into()));
++    assert_eq!(a.name_arg(), None);
++    a.play_as(Player::Offline("Builder_1".into())).unwrap();
++    assert_eq!(a.player(), Player::Offline("Builder_1".into()));
++    assert_eq!(a.name_arg(), Some("Builder_1"));
++    // Kept once, as first written, whatever the case.
++    a.play_as(Player::Offline("builder_1".into())).unwrap();
++    assert_eq!(a.offline, ["Builder_1"]);
++    assert_eq!(a.name_arg(), Some("Builder_1"));
++    assert!(a.add_offline("no spaces").is_err());
++    assert!(a.add_offline("ab").is_err());
++    assert!(a.add_offline("seventeen_letters").is_err());
++    a.play_as(Player::Microsoft("abc".into())).unwrap();
++    assert_eq!(a.name_arg(), None, "an account plays with its own name");
++    assert!(a.play_as(Player::Microsoft("zzz".into())).is_err());
++    a.play_as(Player::Offline("Builder_1".into())).unwrap();
++    // Forgetting drops the look and the name's skin and cape files too.
++    let dir = std::env::temp_dir().join(format!("horizon-accounts-{}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&dir);
++    std::fs::create_dir_all(&dir).unwrap();
++    let (skin, cape) = crate::skins::files(&dir, "builder_1");
++    std::fs::write(&skin, b"skin").unwrap();
++    std::fs::write(&cape, b"cape").unwrap();
++    a.looks.insert(
++        "builder_1".into(),
++        crate::skins::Look {
++            skin: true,
++            cape: true,
++            ..crate::skins::Look::default()
++        },
++    );
++    a.remove_offline("BUILDER_1", &dir).unwrap();
++    assert_eq!(a.player(), Player::GameName);
++    assert!(a.looks.is_empty() && !skin.exists() && !cape.exists());
++    let _ = std::fs::remove_dir_all(&dir);
++    assert!(a.remove_offline("Builder_1", &dir).is_err());
++    // An accounts.json from before offline names reads as it was, and writes nothing new.
++    let old: Accounts = serde_json::from_str(r#"{"accounts":[],"selected":null}"#).unwrap();
++    assert_eq!(old.player(), Player::GameName);
+     assert_eq!(
+         serde_json::to_string(&Accounts::default()).unwrap(),
+         r#"{"accounts":[],"selected":null}"#
+diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
+index a02b24bc5..426e81d06 100644
+--- a/launcher/src/cli.rs
++++ b/launcher/src/cli.rs
+@@ -126,8 +126,35 @@ enum AccountCmd {
+         /// Its name or UUID
+         who: String,
+     },
+-    /// Play as this account
+-    Select { who: String },
++    Select {
++        who: String,
++    },
++    Offline {
++        name: Option<String>,
++    },
++    /// Forget one of your offline names; its skin and cape go with it
++    ForgetOffline {
++        name: String,
++    },
++    /// Show or set an offline name's skin and cape: a 64x64 (or 64x32) skin PNG, a 64x32 cape
++    /// PNG, the model. Kept by the launcher and given to the game when that name plays
++    Skin {
++        name: String,
++        /// The skin's PNG
++        file: Option<PathBuf>,
++        /// classic or slim arms
++        #[arg(long)]
++        model: Option<String>,
++        /// The cape's PNG
++        #[arg(long)]
++        cape: Option<PathBuf>,
++        /// Back to the default skin
++        #[arg(long)]
++        no_skin: bool,
++        /// Take the cape off
++        #[arg(long)]
++        no_cape: bool,
++    },
+ }
+ 
+ #[derive(Subcommand)]
+@@ -821,7 +848,6 @@ enum Cmd {
+         action: Option<AccountCmd>,
+     },
+     /// Show the launcher's settings, or set one (the Settings page): selected-version TAG,
+-    /// game-architecture auto|x64|arm64,
+     /// minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions
+     /// on|off, prune-old-versions on|off (delete old versions after an install, keeping the
+     /// selected one, the ones instances use and the newest few), keep-versions N (how many of the
+@@ -981,7 +1007,7 @@ pub fn command() -> clap::Command {
+ pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
+ 
+ /// The keys `settings` sets.
+-const SETTING_KEYS: [&str; 15] = [
++const SETTING_KEYS: [&str; 14] = [
+     "selected-version",
+     "minecraft-dir",
+     "server-dir",
+@@ -989,7 +1015,6 @@ const SETTING_KEYS: [&str; 15] = [
+     "prune-old-versions",
+     "keep-versions",
+     "opening-animation",
+-    "game-architecture",
+     "proxy",
+     "while-playing",
+     "language",
+@@ -1027,18 +1052,6 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
+             }
+         }
+         "opening-animation" => s.skip_opening = !on_off(value)?,
+-        "game-architecture" => {
+-            let choice = backend::GameArchitecture::parse(value).ok_or_else(|| {
+-                tr("Say auto, x64 or arm64 for the game architecture.").to_string()
+-            })?;
+-            if choice != backend::GameArchitecture::Auto && !backend::can_choose_game_architecture()
+-            {
+-                return Err(
+-                    tr("Manual game architectures are available on Windows ARM only.").into(),
+-                );
+-            }
+-            s.game_architecture = choice;
+-        }
+         "while-playing" => {
+             s.while_playing = backend::WhilePlaying::parse(value)
+                 .ok_or_else(|| format!("{value}: say stay, minimize or hide"))?
+@@ -1114,7 +1127,6 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(),
+ fn settings_json(s: &backend::Settings) -> serde_json::Value {
+     serde_json::json!({
+         "selected_version": backend::resolve_version(None).ok(),
+-        "game_architecture": s.game_architecture.name(),
+         "minecraft_dir": s.minecraft_dir,
+         "server_dir": backend::server_dir(None),
+         "install_new_versions": s.install_new_versions.unwrap_or(true),
+@@ -1320,7 +1332,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+                     // The instance's version is never looked at here: the newest installed
+                     // release or Nightly, or that one with `--update` (never a native build).
+                     None => native_mods::base_for(None, &backend::installed(), update)
+-                        .ok_or_else(backend::no_version_installed)?,
++                        .ok_or_else(|| tr("No version is installed yet."))?,
+                 };
+                 let built = native_mods::build_server(
+                     &base,
+@@ -1362,7 +1374,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+                 None => {
+                     let plays = target.resolve_version(None).ok();
+                     native_mods::base_for(plays.as_deref(), &backend::installed(), update)
+-                        .ok_or_else(backend::no_version_installed)?
++                        .ok_or("No version is installed yet.")?
+                 }
+             };
+             let folder = match folder {
+@@ -1499,23 +1511,26 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+                 after_exit(&instance, &vars);
+                 return played;
+             }
+-            // Who plays this launch only.
++            // Who plays this launch; the accounts below choose it in memory only, for its
++            // `--name` and look.
++            let mut accounts = Accounts::load();
+             let who = match account {
+-                Some(who) => Some(
+-                    Accounts::load()
++                Some(who) => Some(account::Player::Microsoft(
++                    accounts
+                         .find(&who)
+                         .ok_or_else(|| {
+                             format!("No signed-in account {who}. See `horizon-launcher account`.")
+                         })?
+                         .uuid
+                         .clone(),
+-                ),
++                )),
+                 None => None,
+             };
+-            let mut cmd = backend::client_as(
+-                &instance.resolve_version(version.as_deref())?,
+-                who.as_deref(),
+-            )?;
++            if let Some(who) = &who {
++                accounts.play_as(who.clone())?;
++            }
++            let mut cmd =
++                backend::client_as(&instance.resolve_version(version.as_deref())?, who.as_ref())?;
+             instances::apply(&mut cmd, &instance)?;
+             if let Some(code) = join {
+                 backend::join_friend(&mut cmd, &code)?;
+@@ -1914,8 +1929,9 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+                 }));
+             } else if accounts.accounts.is_empty() {
+                 println!(
+-                    "No Microsoft account signed in. Play needs one that owns Minecraft: Java \
+-                     Edition: horizon-launcher account sign-in"
++                    "No accounts yet. `horizon-launcher account offline NAME` adds an offline \
++                     account and plays as it. `account sign-in` signs in with Microsoft, for \
++                     online-mode servers and for downloading the game."
+                 );
+             } else {
+                 for a in &accounts.accounts {
+@@ -1934,9 +1950,8 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+                 }
+                 if !accounts.has_owner(account::store()) {
+                     println!(
+-                        "{} {}",
+-                        account::NoOwner::default(),
+-                        tr(backend::SIGN_IN_HINT)
++                        "A Microsoft account that owns Minecraft: Java Edition is only needed for \
++                         online-mode servers and for downloading the game (`account sign-in`)."
+                     );
+                 }
+             }
+@@ -2015,8 +2030,92 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+             println!("Signed out {}.", a.name);
+         }
+         AccountCmd::Select { who } => {
+-            let a = find(&accounts, &who)?;
+-            accounts.play_as(&a.uuid)?;
++            let offline = accounts
++                .offline
++                .iter()
++                .find(|n| n.eq_ignore_ascii_case(&who))
++                .cloned();
++            let (player, name) = match (accounts.find(&who).cloned(), offline) {
++                (Some(a), _) => (account::Player::Microsoft(a.uuid), a.name),
++                (None, Some(n)) => (
++                    account::Player::Offline(n.clone()),
++                    format!("{n} (offline)"),
++                ),
++                (None, None) => return Err(find(&accounts, &who).unwrap_err()),
++            };
++            accounts.play_as(player)?;
++            accounts.save()?;
++            println!("The game plays as {name}.");
++        }
++        AccountCmd::Offline { name } => {
++            let player = match name {
++                Some(n) => account::Player::Offline(n),
++                None => account::Player::GameName,
++            };
++            accounts.play_as(player)?;
++            accounts.save()?;
++            match accounts.name_arg() {
++                Some(n) => println!("The game plays offline as {n}."),
++                None => println!("The game plays offline, as the name it made up."),
++            }
++        }
++        AccountCmd::Skin {
++            name,
++            file,
++            model,
++            cape,
++            no_skin,
++            no_cape,
++        } => {
++            use horizon_launcher::skins::{self, Model};
++            let name = accounts
++                .offline
++                .iter()
++                .find(|n| n.eq_ignore_ascii_case(&name))
++                .cloned()
++                .ok_or_else(|| {
++                    format!("No offline name {name}: add it with `account offline {name}`.")
++                })?;
++            let model = match model.as_deref() {
++                None => None,
++                Some("classic") => Some(Model::Classic),
++                Some("slim") => Some(Model::Slim),
++                Some(m) => return Err(format!("{m}: say classic or slim")),
++            };
++            let mut look = accounts.look(&name);
++            if let Some(file) = &file {
++                skins::keep(&skins::dir(), &name, file, false)?;
++                look.skin = true;
++            }
++            if let Some(file) = &cape {
++                skins::keep(&skins::dir(), &name, file, true)?;
++                look.cape = true;
++            }
++            if let Some(m) = model {
++                look.model = m;
++            }
++            look.skin &= !no_skin;
++            look.cape &= !no_cape;
++            accounts
++                .looks
++                .insert(name.to_ascii_lowercase(), look.clone());
++            accounts.save()?;
++            if as_json {
++                json(serde_json::json!({
++                    "name": name, "skin": look.skin, "cape": look.cape, "model": look.model.name(),
++                }));
++            } else {
++                let say = |on: bool, what: &str| if on { what.to_string() } else { "none".into() };
++                println!(
++                    "{name}: skin {} ({} arms), cape {}",
++                    say(look.skin, "kept"),
++                    look.model.name(),
++                    say(look.cape, "kept")
++                );
++            }
++        }
++        AccountCmd::ForgetOffline { name } => {
++            accounts.remove_offline(&name, &horizon_launcher::skins::dir())?;
+             accounts.save()?;
+             println!("The game plays as {}.", a.name);
+         }
+@@ -3129,14 +3228,11 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
+                     ))
+                 }
+             };
+-            let target = new_name.as_deref().unwrap_or(&f.name);
+-            let made = other_launchers::import(f, target, minecraft.as_deref()).map_err(|e| {
+-                if e == instances::name_taken(target.trim()) {
+-                    instances::name_taken_with_flag(target.trim())
+-                } else {
+-                    e
+-                }
+-            })?;
++            let made = other_launchers::import(
++                f,
++                new_name.as_deref().unwrap_or(&f.name),
++                minecraft.as_deref(),
++            )?;
+             let unsupported = other_launchers::loader(f).is_none();
+             if let Some(l) = f.loader.as_ref().filter(|_| unsupported && !as_json) {
+                 println!(
+diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
+index 07cc6da4b..ccf01818e 100644
+--- a/launcher/src/frame.rs
++++ b/launcher/src/frame.rs
+@@ -475,36 +475,6 @@ impl Launcher {
+             _ => {}
+         }
+ 
+-        // Sculk's card (not in the mockup, kept: a sponsor), where the old sidebar had it: at
+-        // the sidebar's foot above the links, on every page (Servers shows the wide banner too).
+-        // Tall where the sidebar has the height for it besides its rows, compact otherwise.
+-        if !self.settings.partner_hidden {
+-            let rows = self.instances.list.len() + servers.len();
+-            let free = f32::from(window.viewport_size().height)
+-                - 2. * MARGIN
+-                - 52.
+-                - 56. * rows as f32
+-                - 190.;
+-            let mut side = div().relative().mt(px(12.)).child(partner::card(
+-                "partner-side",
+-                SIDEBAR - 20.,
+-                free < partner::TALL_HEIGHT,
+-                &t,
+-            ));
+-            if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
+-                side = side.child(
+-                    partner::hide_button("partner-hide", &t).on_click(cx.listener(
+-                        |this, _: &ClickEvent, _, cx| {
+-                            this.settings.partner_hidden = true;
+-                            this.save_settings();
+-                            cx.notify();
+-                        },
+-                    )),
+-                );
+-            }
+-            foot = foot.child(side);
+-        }
+-
+         if !self.links.discord.is_empty() {
+             let url = self.links.discord.clone();
+             foot = foot.child(keyboard(
+diff --git a/launcher/src/home.rs b/launcher/src/home.rs
+index e670d9b02..71719ee44 100644
+--- a/launcher/src/home.rs
++++ b/launcher/src/home.rs
+@@ -243,7 +243,7 @@ impl Launcher {
+             .child(label(
+                 tr(if running { "Running" } else { "Play" }).to_string(),
+             ));
+-        match play_press(ready, self.owner, self.preparing || running) {
++        match play_press(ready, self.preparing || running) {
+             PlayPress::Nothing => play = disabled(play),
+             PlayPress::Play => {
+                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+diff --git a/launcher/src/instances.rs b/launcher/src/instances.rs
+index 2dd022b3a..32dea09b2 100644
+--- a/launcher/src/instances.rs
++++ b/launcher/src/instances.rs
+@@ -710,6 +710,34 @@ fn follow_player(game_home: &Path, home: &Path) {
+     }
+ }
+ 
++/// A fresh made-up name everywhere the game keeps one: `horizon-player.txt` is per game
++/// folder (`PLAYER_FILES`), so the same new name goes to the default home and every
++/// instance's — the player stays one player in its worlds. The file's `name:` line and the
++/// `Player` + five digits scheme are horizon-client's (`offline_name.rs`).
++pub fn new_player_name() -> Result<String, String> {
++    new_player_name_in(&backend::game_home(), &backend::data_dir())
++}
++
++fn new_player_name_in(game_home: &Path, data: &Path) -> Result<String, String> {
++    let nanos = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_or(0, |d| d.as_nanos() as u64);
++    let name = format!(
++        "Player{:05}",
++        (nanos ^ u64::from(std::process::id()).rotate_left(32)) % 100_000
++    );
++    for instance in list_in(game_home, data) {
++        if instance.home.is_dir() {
++            fs::write(
++                instance.home.join("horizon-player.txt"),
++                format!("name:{name}\n"),
++            )
++            .map_err(|e| format!("{}: {e}", instance.home.display()))?;
++        }
++    }
++    Ok(name)
++}
++
+ #[path = "instances/switch.rs"]
+ mod switch;
+ pub use switch::{switch, unkept, Plays, Unkept};
+diff --git a/launcher/src/lib.rs b/launcher/src/lib.rs
+index 0eb15c6af..883dbf871 100644
+--- a/launcher/src/lib.rs
++++ b/launcher/src/lib.rs
+@@ -50,6 +50,7 @@ pub mod setup_args;
+ pub mod shop;
+ pub mod shortcut;
+ pub mod signed;
++pub mod skins;
+ pub mod sources;
+ pub mod tailscale;
+ pub mod telemetry;
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index 08618b126..905a72777 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -55,7 +55,6 @@ mod native_log_page;
+ mod new_instance;
+ mod owner_page;
+ mod packs_page;
+-mod partner;
+ mod perf;
+ mod picture_cache;
+ mod plate;
+@@ -64,6 +63,7 @@ mod scene;
+ mod screenshots_page;
+ mod scrollbar;
+ mod servers_page;
++mod skin_page;
+ #[cfg(windows)]
+ mod setup_page;
+ mod shell;
+@@ -293,6 +293,8 @@ struct Launcher {
+     /// The releases whose patch notes the Versions page shows open.
+     notes_open: std::collections::HashSet<String>,
+     picker: glass_home::PickerState,
++    /// Settings > Account's skin panel for an offline name (`skin_page.rs`).
++    skin: Option<skin_page::SkinPanel>,
+     /// Settings' any-colour swatch shows the hue strip (the glass look).
+     accent_strip: bool,
+     /// Settings' Glass and Blur sliders (the glass look).
+@@ -493,6 +495,8 @@ struct Launcher {
+     aside: while_playing::Aside,
+     /// The selected instance's desktop shortcut (`shortcut_page.rs`).
+     shortcuts: shortcut_page::Shortcuts,
++    /// The name the game made up for an offline player (`horizon-player.txt`), for the top bar.
++    offline_name: Option<String>,
+     /// The player's servers, for the sidebar until the Servers page has read them.
+     side_servers: Vec<horizon_launcher::servers::Entry>,
+     /// The pixel art made for this window (`art.rs`), and pictures downloaded by URL.
+@@ -522,30 +526,6 @@ impl Launcher {
+             }
+         })
+         .detach();
+-        // Counts the time a partner banner is on screen, until it may be hidden.
+-        cx.spawn(async move |this, cx| loop {
+-            cx.background_executor()
+-                .timer(Duration::from_secs(10))
+-                .await;
+-            let counting = this.update(cx, |this, cx| {
+-                let s = &mut this.settings;
+-                if s.partner_hidden || s.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
+-                    return false;
+-                }
+-                // On screen on every page: the card in the sidebar, the banner on Servers.
+-                s.partner_seen_secs += 10;
+-                if s.partner_seen_secs % 60 == 0 || s.partner_seen_secs >= partner::SEEN_BEFORE_HIDE
+-                {
+-                    this.save_settings();
+-                    cx.notify();
+-                }
+-                true
+-            });
+-            if !matches!(counting, Ok(true)) {
+-                break;
+-            }
+-        })
+-        .detach();
+         let mut settings = Settings::load();
+         i18n::set(settings.language());
+         if settings.minecraft_dir.is_none() {
+@@ -627,6 +607,7 @@ impl Launcher {
+             confirm_remove: None,
+             notes_open: Default::default(),
+             picker: glass_home::PickerState::default(),
++            skin: None,
+             accent_strip: false,
+             look_sliders: Default::default(),
+             hue_area: std::rc::Rc::new(std::cell::Cell::new(None)),
+@@ -750,6 +731,7 @@ impl Launcher {
+             console: Default::default(),
+             aside: while_playing::Aside::new(window.window_handle()),
+             shortcuts: Default::default(),
++            offline_name: offline_name(),
+             side_servers: horizon_launcher::servers::list(),
+             sky: sky::Sky::default(),
+             scene: cx.new(|_| scene::Scene::new()),
+@@ -866,9 +848,10 @@ impl Launcher {
+     }
+ 
+     fn go(&mut self, page: Page) {
+-        // The CLI or another window may have changed the accounts: read them again (a small
+-        // file, once a switch).
++        // The game may have made up a name since, and the CLI or another window may have
++        // changed the accounts: read them again (small files, once a switch).
+         self.accounts = Accounts::load();
++        self.offline_name = offline_name();
+         // Each check reads the keychain (a prompt on macOS): page switches check every account
+         // at most once a minute, and an account added meanwhile at once.
+         if self
+@@ -1247,7 +1230,9 @@ impl Launcher {
+                                 continue;
+                             }
+                         };
+-                        self.owner = Some(true);
++                        if file.is_some() {
++                            self.owner = Some(true);
++                        }
+                         if let Some(file) = file {
+                             cmd.arg("--session-file").arg(file);
+                         }
+@@ -1259,6 +1244,11 @@ impl Launcher {
+                             self.client_error = Some(e);
+                         }
+                         self.accounts = Accounts::load();
++                        // An offline name the player picked (the quick switch).
++                        if let Some(name) = self.accounts.name_arg() {
++                            cmd.arg("--name").arg(name);
++                        }
++                        cmd.envs(self.accounts.look_env());
+                         // A pack's Play button plays that pack; Play plays the selected instance.
+                         let (profile, run) = match self.starting_pack.take() {
+                             Some(work) => {
+@@ -1948,8 +1938,15 @@ impl Launcher {
+ 
+     fn load_profile_heads(&mut self) {
+         let resources = self.game_resources();
++        // Offline names wear their own skin's face, or the default skin of their offline UUID.
++        let offline: Vec<String> = self
++            .players()
++            .into_iter()
++            .filter(|(who, _, _)| !matches!(who, account::Player::Microsoft(_)))
++            .map(|(_, name, _)| name)
++            .collect();
+         self.profile_heads
+-            .request(&self.accounts.accounts, resources, &self.tx);
++            .request(&self.accounts.accounts, &offline, resources, &self.tx);
+     }
+ 
+     fn begin_auth_job(&mut self, uuid: &str) -> Option<u64> {
+@@ -2500,10 +2497,7 @@ fn segments<T: Copy + PartialEq + 'static>(
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ enum PlayPress {
+     Play,
+-    /// Not prepared, for an account that owns the game: prepare it (from the player's install,
+-    /// else downloaded from Mojang for that account), then play, as the official launcher does.
+     PrepareThenPlay,
+-    /// Not prepared and no owner (signing in comes first), or busy preparing or playing.
+     Nothing,
+ }
+ 
+@@ -2550,13 +2544,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
+     Some(next)
+ }
+ 
+-/// `owner`: whether an account here owns the game, by the keychain (`Launcher::owner`).
+-fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+-    match (prepared, owner) {
++fn play_press(prepared: bool, busy: bool) -> PlayPress {
++    match (prepared, busy) {
+         _ if busy => PlayPress::Nothing,
+         (true, _) => PlayPress::Play,
+-        (false, Some(true)) => PlayPress::PrepareThenPlay,
+-        (false, _) => PlayPress::Nothing,
++        (false, _) => PlayPress::PrepareThenPlay,
+     }
+ }
+ 
+@@ -2564,7 +2556,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+ /// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
+ /// the game would open on half-written files.
+ fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
+-    play_press(prepared, None, preparing || running) == PlayPress::Play
++    play_press(prepared, preparing || running) == PlayPress::Play
+ }
+ 
+ /// Whether `tag` can start being deleted now: it is installed, no install is writing it, and it
+@@ -2772,6 +2764,21 @@ fn centered(text_: &str, t: &Theme) -> Div {
+         .child(text(theme::UI).text_color(t.muted).child(text_.to_string()))
+ }
+ 
++/// The name the game made up for a player without an account, once it has run.
++fn offline_name() -> Option<String> {
++    player_name(&std::fs::read_to_string(backend::game_home().join("horizon-player.txt")).ok()?)
++}
++
++/// The name in `horizon-player.txt`: the game writes `name:Player12345` (horizon-client's
++/// offline_name.rs).
++fn player_name(text: &str) -> Option<String> {
++    text.lines()
++        .find_map(|line| line.trim().strip_prefix("name:"))
++        .map(str::trim)
++        .filter(|n| !n.is_empty())
++        .map(str::to_owned)
++}
++
+ /// `1234` as `1,234`.
+ fn thousands(n: u64) -> String {
+     let digits = n.to_string();
+@@ -2835,9 +2842,13 @@ impl Launcher {
+                 ),
+             );
+         }
+-        // A signed-in account shows its face (its skin, else its UUID's default).
++        // Only a signed-in account says "Microsoft account"; otherwise an offline name, or the
++        // one the game made up. A signed-in one shows its face (its skin, else its UUID's default).
+         let (name, how) = self.who_plays();
+-        let face = self.accounts.selected().map(|a| a.uuid.clone());
++        let face = match self.accounts.player() {
++            account::Player::Microsoft(_) => self.accounts.selected().map(|a| a.uuid.clone()),
++            _ => None,
++        };
+         let picture = match face {
+             Some(uuid) => (self.profile_heads)
+                 .draw(Some(&uuid), 28., self.scale, &t)
+@@ -2951,7 +2962,6 @@ impl Launcher {
+             },
+         ));
+         let items = self.instance_items(heading, cx);
+-        let mut rows = items.len();
+         let list = div()
+             .flex()
+             .flex_col()
+@@ -2967,8 +2977,6 @@ impl Launcher {
+         if !servers.is_empty() {
+             list = list.child(heading(tr("SERVERS").into()));
+         }
+-        rows += servers.len();
+-        let headings = 1 + usize::from(!servers.is_empty());
+         for e in servers {
+             let up = self.servers.is_up(&e.dir);
+             let open = self.page == Page::Servers && self.servers.open.as_ref() == Some(&e.dir);
+@@ -3115,34 +3123,6 @@ impl Launcher {
+             }
+             _ => {}
+         }
+-        // Sculk's card above the links: seen without scrolling, on every page but Servers, which shows
+-        // its wide banner. Tall where the sidebar has the height for it besides the wordmark, its rows
+-        // (52 high each, under headings of 40) and the links, compact otherwise. After a while on
+-        // screen a "Hide" beside its label puts it away for good.
+-        if self.page != Page::Servers && !self.settings.partner_hidden {
+-            let free = f32::from(window.viewport_size().height)
+-                - theme::TOPBAR
+-                - 40. * headings as f32
+-                - 52. * rows as f32
+-                - 110.;
+-            let mut side = div().relative().mb(px(8.)).child(partner::card(
+-                "partner-side",
+-                theme::SIDEBAR - 20.,
+-                free < partner::TALL_HEIGHT,
+-                &t,
+-            ));
+-            if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
+-                let hide = partner::hide_button("partner-hide", &t).on_click(cx.listener(
+-                    |this, _: &ClickEvent, _, cx| {
+-                        this.settings.partner_hidden = true;
+-                        this.save_settings();
+-                        cx.notify();
+-                    },
+-                ));
+-                side = side.child(hide);
+-            }
+-            foot = foot.child(side);
+-        }
+         if !self.links.sponsor.is_empty() {
+             foot = foot.child(link(
+                 "sponsor",
+@@ -3172,7 +3152,7 @@ impl Launcher {
+                 .id("launcher-version")
+                 .px(px(8.))
+                 .pt(px(6.))
+-                .child(trf("Launcher {version}", &[("version", backend::VERSION)])),
++                .child(format!("Launcher {}", backend::VERSION)),
+         );
+         // Custom title bars carry the mark and name already.
+         let brand = (!titlebar::draws_brand(window)).then(|| {
+@@ -3387,8 +3367,6 @@ impl Launcher {
+         let left = self.download_left();
+         let steps = self.preparing.then(|| self.steps(&version, left));
+ 
+-        // Not prepared: an owner can have Horizon download Minecraft from Mojang; without an
+-        // owner there is nothing to play, so signing in comes first.
+         let first = (!prepared && !self.preparing)
+             .then_some(self.owner)
+             .flatten();
+@@ -3405,7 +3383,7 @@ impl Launcher {
+                 &[("version", &version)],
+             ),
+             Some(false) => trf(
+-                "Not prepared. Sign in with the Microsoft account that owns Minecraft {version} first.",
++                "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
+                 &[("version", &version)],
+             ),
+             None => backend::resources_summary(prepared, !silent, &version),
+@@ -3464,12 +3442,25 @@ impl Launcher {
+                         cx.notify();
+                     })),
+                 ),
+-            Some(false) => div().child(microsoft::sign_in_button("prepare-sign-in", &t).on_click(
+-                cx.listener(|this, _: &ClickEvent, _, cx| {
+-                    this.sign_in_to_play();
+-                    cx.notify();
+-                }),
+-            )),
++            Some(false) => div()
++                .flex()
++                .gap(px(8.))
++                .child(
++                    button("prepare-install", "From my install", Kind::Secondary, &t).on_click(
++                        cx.listener(|this, _: &ClickEvent, _, cx| {
++                            this.prepare(backend::MinecraftFrom::Install);
++                            cx.notify();
++                        }),
++                    ),
++                )
++                .child(
++                    button("prepare-sign-in", "Sign in", Kind::Ghost, &t).on_click(cx.listener(
++                        |this, _: &ClickEvent, _, cx| {
++                            this.sign_in_to_play();
++                            cx.notify();
++                        },
++                    )),
++                ),
+             None => div().child(prepare),
+         };
+         let owner = self.owner == Some(true);
+@@ -3537,9 +3528,8 @@ impl Launcher {
+                 &t,
+             )),
+         };
+-        // The top bar shows who plays; a row only when there is something to do about it: no
+-        // account that owns the game (Play needs one), or offline. The glass look's top bar has
+-        // Sign in with Microsoft and says Offline itself.
++        // The top bar shows who plays; a row only when there is something to do about it. The
++        // glass look's top bar has Sign in with Microsoft and says Offline itself.
+         if !t.glass {
+             if self.owner == Some(false) {
+                 rows = rows.child(index_row(
+@@ -3980,6 +3970,7 @@ impl Launcher {
+             );
+         }
+         let (accounts, n) = self.account_rows(cx);
++        let (offline, n) = self.offline_rows(n, cx);
+         let group = |label: &'static str, icon: &'static str| {
+             section_title(label, icon, &t).mt(px(20.)).mb(px(12.))
+         };
+@@ -3998,6 +3989,7 @@ impl Launcher {
+                     .flex_col()
+                     .child(group("Account", "user").mt_0())
+                     .child(accounts)
++                    .child(offline)
+                     .child(group("Updates", "reload"))
+                     .child(index_row(n + 1, "Horizon", Some(plain(&horizon)), horizon_action, &t))
+                     .child(index_row(
+@@ -4439,7 +4431,7 @@ impl Launcher {
+                 actions = actions.child(
+                     button(format!("select-{i}"), "Play as", Kind::Secondary, &t).on_click(
+                         cx.listener(move |this, _: &ClickEvent, _, cx| {
+-                            this.play_as(&uuid);
++                            this.play_as(account::Player::Microsoft(uuid.clone()));
+                             cx.notify();
+                         }),
+                     ),
+@@ -5897,22 +5889,13 @@ mod tests {
+         );
+     }
+ 
+-    /// An owner's Play works on a version not prepared yet: it prepares it (downloading
+-    /// Minecraft from Mojang when this computer has no install), then plays. Without an owner
+-    /// it stays off: signing in comes first.
+     #[test]
+-    fn play_prepares_first_for_an_owner() {
++    fn play_prepares_first() {
+         use super::{play_press, PlayPress};
+-        assert_eq!(play_press(true, Some(true), false), PlayPress::Play);
+-        assert_eq!(play_press(true, None, false), PlayPress::Play);
+-        assert_eq!(
+-            play_press(false, Some(true), false),
+-            PlayPress::PrepareThenPlay
+-        );
+-        assert_eq!(play_press(false, Some(false), false), PlayPress::Nothing);
+-        assert_eq!(play_press(false, None, false), PlayPress::Nothing);
+-        assert_eq!(play_press(false, Some(true), true), PlayPress::Nothing);
+-        assert_eq!(play_press(true, Some(true), true), PlayPress::Nothing);
++        assert_eq!(play_press(true, false), PlayPress::Play);
++        assert_eq!(play_press(false, false), PlayPress::PrepareThenPlay);
++        assert_eq!(play_press(true, true), PlayPress::Nothing);
++        assert_eq!(play_press(false, true), PlayPress::Nothing);
+     }
+ 
+     /// A server's Join (and every other shortcut) waits like Play: not while the version's
+@@ -5970,6 +5953,18 @@ mod tests {
+         ));
+     }
+ 
++    #[test]
++    fn the_offline_name_is_read_from_its_key() {
++        use super::player_name;
++        assert_eq!(
++            player_name("name:Player63010\n").as_deref(),
++            Some("Player63010")
++        );
++        assert_eq!(player_name("name:Steve\r\n").as_deref(), Some("Steve"));
++        assert_eq!(player_name("Player63010\n"), None);
++        assert_eq!(player_name(""), None);
++    }
++
+     #[test]
+     fn counts_get_thousands_separators() {
+         let shown: Vec<String> = [0, 7, 999, 1000, 12_300, 1_234_500]
+diff --git a/launcher/src/mcp.rs b/launcher/src/mcp.rs
+index 4867e439b..d8640d986 100644
+--- a/launcher/src/mcp.rs
++++ b/launcher/src/mcp.rs
+@@ -50,7 +50,7 @@ fn session_tools() -> Value {
+         { "name": "server_log", "description": "The most recent lines of the server's console.",
+           "inputSchema": { "type": "object", "properties": { "lines": { "type": "integer", "minimum": 1, "maximum": 2000, "description": "How many lines (default 50)." } } } },
+         { "name": "server_stop", "description": "Stop the server started with server cleanly (it saves the world), killing it if it does not stop within 30 seconds.", "inputSchema": none },
+-        { "name": "account_list", "description": "The Microsoft accounts signed in to the launcher (names and UUIDs, never tokens), which one the game plays as (none = the first), and how a sign-in started with account_sign_in is going. CLI: horizon-launcher account list", "inputSchema": none },
++        { "name": "account_list", "description": "The Microsoft accounts signed in to the launcher (names and UUIDs, never tokens), which one the game plays as (none = offline), and how a sign-in started with account_sign_in is going. CLI: horizon-launcher account list", "inputSchema": none },
+         { "name": "account_sign_in", "description": "Start signing in a Microsoft account: returns a link and a code the player enters in their browser. The sign-in finishes in the background; check it with account_list. Only when the player asks to sign in. CLI: horizon-launcher account sign-in", "inputSchema": none },
+     ])
+ }
+@@ -210,7 +210,6 @@ impl Session {
+                     // where it refused them (`secrets_file`: the file holds a sign-in).
+                     "keychain": account::store().persistent(),
+                     "secrets_file": account::in_secrets_file(),
+-                    // Play needs an account that owns the game (the owner gate).
+                     "owner": accounts.has_owner(account::store()),
+                     "sign_in": sign_in,
+                 }))
+diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
+index d274cd229..7430b2f0e 100644
+--- a/launcher/src/owner_page.rs
++++ b/launcher/src/owner_page.rs
+@@ -1,15 +1,10 @@
+ //! The owner gate in the window (`horizon_launcher::account::launch`): the screen that asks for a
+-//! Microsoft account that owns Minecraft: Java Edition. It covers the launcher once for players
+-//! without one (those who played offline before the gate), and again whenever Play is refused.
+-//! The sign-in runs on it, code and all.
+ use super::*;
+ 
+ impl Launcher {
+-    /// Whether the screen covers the window: no owner, and either Play was refused or the player
+-    /// hasn't read it yet. The data question comes first.
+     pub(crate) fn asking_owner(&self) -> bool {
+         (self.owner == Some(false) || sign_in_preview())
+-            && (self.owner_screen_open || !self.settings.owner_notice_seen || sign_in_preview())
++            && self.owner_screen_open
+             && !self.asking_consent()
+             && self.opening.is_none()
+     }
+@@ -24,10 +19,8 @@ impl Launcher {
+     fn close_owner_screen(&mut self) {
+         self.cancel_sign_in();
+         self.owner_screen_open = false;
+-        if !self.settings.owner_notice_seen {
+-            self.settings.owner_notice_seen = true;
+-            self.save_settings();
+-        }
++        self.settings.owner_notice_seen = true;
++        self.save_settings();
+     }
+ 
+     pub(crate) fn owner_screen(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
+@@ -37,7 +30,7 @@ impl Launcher {
+         // The screenshot preview shows a code without asking Microsoft for one.
+         let state = match &self.sign_in_state {
+             _ if sign_in_preview() => Shown::Code("https://www.microsoft.com/link", "K7Q-4MXR"),
+-            _ if !configured => Shown::Error(tr(account::NOT_CONFIGURED)),
++            _ if !configured => Shown::Idle,
+             Some(SignInState::Starting) => Shown::Starting("Asking Microsoft…"),
+             Some(SignInState::Working(phase)) => Shown::Starting(phase.label()),
+             Some(SignInState::Code(code)) => Shown::Code(&code.verification_uri, &code.user_code),
+@@ -74,6 +67,14 @@ impl Launcher {
+             .child(line(
+                 "No Minecraft install needed: Horizon downloads it from Mojang for your account.",
+                 n.ink_soft,
++            ))
++            .child(line(
++                "Or play offline: an offline account needs no sign-in. Only online-mode servers and the game's download from Mojang do.",
++                n.ink_soft,
++            ))
++            .child(line(
++                "Your worlds, offline names and settings stay where they are.",
++                n.muted,
+             ));
+         let raised = || {
+             div()
+@@ -196,7 +197,7 @@ impl Launcher {
+                 )
+             }
+             Shown::Starting(_) => None,
+-            Shown::Error(_) if !configured => None,
++            _ if !configured => None,
+             _ => Some(
+                 microsoft::sign_in_button("owner-sign-in", &t).on_click(cx.listener(
+                     |this, _: &ClickEvent, _, cx| {
+@@ -218,6 +219,25 @@ impl Launcher {
+             .gap(px(10.))
+             .mt(px(14.))
+             .children(main)
++            .child(
++                shell::action("owner-offline", shell::Action::Quiet, &t)
++                    .child(shell::label(tr("Play offline").to_string()))
++                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
++                        this.close_owner_screen();
++                        let who = this
++                            .accounts
++                            .offline
++                            .first()
++                            .cloned()
++                            .map(account::Player::Offline)
++                            .unwrap_or(account::Player::GameName);
++                        this.play_as(who);
++                        if this.can_start_selected() {
++                            this.play();
++                        }
++                        cx.notify();
++                    })),
++            )
+             .child(
+                 shell::action("owner-later", shell::Action::Quiet, &t)
+                     .child(shell::label(tr("Not now").to_string()))
+@@ -312,7 +332,10 @@ impl Launcher {
+                     )))
+                     .child(ui::text(14., FontWeight::NORMAL, ink::BODY).child(tr(
+                         "No Minecraft install needed: Horizon downloads it from Mojang for your account.",
+-))),
++                    )))
++                    .child(ui::text(14., FontWeight::NORMAL, ink::QUIET).child(tr(
++                        "Your worlds, offline names and settings stay where they are.",
++                    ))),
+             );
+         card = match state {
+             Shown::Code(uri, user_code) => {
+diff --git a/launcher/src/skin_page.rs b/launcher/src/skin_page.rs
+new file mode 100644
+index 000000000..d4bcb8a9e
+--- /dev/null
++++ b/launcher/src/skin_page.rs
+@@ -0,0 +1,264 @@
++//! Settings > Account's skin panel for an offline name (`horizon_launcher::skins`): the front
++//! of the skin and the cape, choosing either from a PNG, and the model.
++use super::*;
++use gpui::RenderImage;
++use horizon_launcher::skins::{self, Model};
++use std::path::PathBuf;
++use std::sync::Arc;
++
++/// A baked preview, or None without one.
++type Preview = Option<Arc<RenderImage>>;
++
++#[derive(Default)]
++pub(super) struct SkinPanel {
++    /// The offline name it is for.
++    pub(super) name: String,
++    /// The two previews, baked at the window's scale (skin, cape), or None without one.
++    seen: Option<(f32, Preview, Preview)>,
++    /// What the last choice did, or why not.
++    note: Option<Result<String, String>>,
++}
++
++/// Points per skin texel in the preview.
++const TEXEL: f32 = 6.;
++
++impl Launcher {
++    pub(super) fn open_skin(&mut self, name: String) {
++        self.skin = match self.skin.take() {
++            Some(p) if p.name == name => None,
++            _ => Some(SkinPanel {
++                name,
++                ..SkinPanel::default()
++            }),
++        };
++    }
++
++    fn save_look(&mut self, change: impl FnOnce(&mut skins::Look)) -> Result<(), String> {
++        let Some(name) = self.skin.as_ref().map(|p| p.name.clone()) else {
++            return Ok(());
++        };
++        let mut accounts = Accounts::load();
++        // The name may have been forgotten while a file dialog was open: keep nothing for it.
++        if !accounts
++            .offline
++            .iter()
++            .any(|n| n.eq_ignore_ascii_case(&name))
++        {
++            return Ok(());
++        }
++        let mut look = accounts.look(&name);
++        change(&mut look);
++        accounts.looks.insert(name.to_ascii_lowercase(), look);
++        accounts.save()?;
++        self.accounts = accounts;
++        if let Some(p) = &mut self.skin {
++            p.seen = None;
++        }
++        Ok(())
++    }
++
++    fn choose_look_file(&mut self, cape: bool, cx: &mut Context<Self>) {
++        let paths = cx.prompt_for_paths(PathPromptOptions {
++            files: true,
++            directories: false,
++            multiple: false,
++            prompt: Some(tr("Choose").into()),
++        });
++        cx.spawn(async move |this, cx| {
++            let Ok(Ok(Some(mut paths))) = paths.await else {
++                return;
++            };
++            let Some(path) = paths.pop() else {
++                return;
++            };
++            let _ = this.update(cx, |this, cx| {
++                this.take_look_file(path, cape);
++                cx.notify();
++            });
++        })
++        .detach();
++    }
++
++    pub(super) fn take_look_file(&mut self, path: PathBuf, cape: bool) {
++        let Some(name) = self.skin.as_ref().map(|p| p.name.clone()) else {
++            return;
++        };
++        // The name may have been forgotten while the file dialog was open.
++        if !Accounts::load()
++            .offline
++            .iter()
++            .any(|n| n.eq_ignore_ascii_case(&name))
++        {
++            return;
++        }
++        let done = skins::keep(&skins::dir(), &name, &path, cape).and_then(|()| {
++            self.save_look(|l| match cape {
++                false => l.skin = true,
++                true => l.cape = true,
++            })
++        });
++        if let Some(p) = &mut self.skin {
++            let said = match cape {
++                false => trf("{name}'s skin is kept.", &[("name", &name)]),
++                true => trf("{name}'s cape is kept.", &[("name", &name)]),
++            };
++            p.note = Some(done.map(|()| said));
++        }
++    }
++
++    fn previews(&mut self) -> (Preview, Preview) {
++        let scale = self.scale;
++        let Some(panel) = &mut self.skin else {
++            return (None, None);
++        };
++        if let Some((s, skin, cape)) = &panel.seen {
++            if *s == scale {
++                return (skin.clone(), cape.clone());
++            }
++        }
++        let look = self.accounts.look(&panel.name);
++        let (skin_file, cape_file) = skins::files(&skins::dir(), &panel.name);
++        let read = |f: &PathBuf| std::fs::read(f).ok();
++        let skin = read(&skin_file)
++            .filter(|_| look.skin)
++            .and_then(|b| skins::read_skin(&b).ok())
++            .map(|png| art::bake(&skins::front(&png, look.model), 16, 32, TEXEL, scale));
++        let cape = read(&cape_file)
++            .filter(|_| look.cape)
++            .and_then(|b| skins::read_cape(&b).ok())
++            .map(|png| art::bake(&skins::cape_front(&png), 10, 16, TEXEL, scale));
++        panel.seen = Some((scale, skin.clone(), cape.clone()));
++        (skin, cape)
++    }
++
++    /// The panel, under the offline names while open.
++    pub(super) fn skin_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
++        let t = self.theme;
++        let name = self.skin.as_ref()?.name.clone();
++        if !self.accounts.offline.iter().any(|n| n == &name) {
++            self.skin = None;
++            return None;
++        }
++        let look = self.accounts.look(&name);
++        let (skin, cape) = self.previews();
++        let frame = |w: f32, h: f32, image: Preview, empty: &'static str| {
++            div()
++                .flex()
++                .flex_none()
++                .items_center()
++                .justify_center()
++                .w(px(w + 24.))
++                .h(px(h + 24.))
++                .bg(t.well)
++                .border_2()
++                .border_color(t.outline)
++                .child(match image {
++                    Some(i) => gpui::img(i).w(px(w)).h(px(h)).into_any_element(),
++                    None => text(theme::CAPTION)
++                        .text_color(t.muted)
++                        .child(tr(empty))
++                        .into_any_element(),
++                })
++        };
++        let weak = cx.entity().downgrade();
++        let model = segments(
++            "skin-model",
++            &[(Model::Classic, "Classic arms"), (Model::Slim, "Slim arms")],
++            look.model,
++            &t,
++            move |m, _, cx| {
++                let _ = weak.update(cx, |this, cx| {
++                    let _ = this.save_look(|l| l.model = m);
++                    cx.notify();
++                });
++            },
++        );
++        let pick = |id: &'static str, label: &'static str, cape: bool, cx: &mut Context<Self>| {
++            button(id, label, Kind::Secondary, &t).on_click(cx.listener(
++                move |this, _: &ClickEvent, _, cx| {
++                    this.choose_look_file(cape, cx);
++                    cx.notify();
++                },
++            ))
++        };
++        let drop = |id: &'static str, label: &'static str, cape: bool, cx: &mut Context<Self>| {
++            button(id, label, Kind::Ghost, &t).on_click(cx.listener(
++                move |this, _: &ClickEvent, _, cx| {
++                    let _ = this.save_look(|l| match cape {
++                        false => l.skin = false,
++                        true => l.cape = false,
++                    });
++                    cx.notify();
++                },
++            ))
++        };
++        let mut skin_buttons = div().flex().flex_wrap().gap(px(6.)).child(pick(
++            "skin-choose",
++            "Choose a skin…",
++            false,
++            cx,
++        ));
++        if look.skin {
++            skin_buttons = skin_buttons.child(drop("skin-remove", "Default skin", false, cx));
++        }
++        let mut cape_buttons = div().flex().flex_wrap().gap(px(6.)).child(pick(
++            "cape-choose",
++            "Choose a cape…",
++            true,
++            cx,
++        ));
++        if look.cape {
++            cape_buttons = cape_buttons.child(drop("cape-remove", "No cape", true, cx));
++        }
++        let note = self.skin.as_ref().and_then(|p| p.note.clone());
++        Some(
++            plate(&t)
++                .flex()
++                .flex_col()
++                .gap(px(12.))
++                .px(px(16.))
++                .py(px(12.))
++                .when(!t.glass, |d| d.ml(px(40.)))
++                .child(
++                    div()
++                        .flex()
++                        .gap(px(16.))
++                        .child(frame(16. * TEXEL, 32. * TEXEL, skin, "Default"))
++                        .child(frame(10. * TEXEL, 16. * TEXEL, cape, "No cape"))
++                        .child(
++                            div()
++                                .flex()
++                                .flex_col()
++                                .items_start()
++                                .flex_1()
++                                .min_w_0()
++                                .gap(px(10.))
++                                .child(
++                                    caps(trf("{name}'s skin", &[("name", &name)]))
++                                        .text_color(t.muted),
++                                )
++                                .child(skin_buttons)
++                                .child(model)
++                                .child(cape_buttons)
++                                .children(note.map(|n| match n {
++                                    Ok(said) => {
++                                        text(theme::CAPTION).text_color(t.muted).child(said)
++                                    }
++                                    Err(e) => text(theme::CAPTION).text_color(t.danger).child(e),
++                                })),
++                        ),
++                )
++                .child(
++                    text(theme::CAPTION)
++                        .text_color(t.muted)
++                        .line_height(px(16.))
++                        .child(tr(
++                            "A 64×64 (or 64×32) skin PNG and a 64×32 cape PNG, kept by the \
++                     launcher and given to the game when this name plays. The game \
++                     draws the default skins for now; it uses these once it can. A \
++                     Microsoft account's skin and cape: coming soon.",
++                        )),
++                ),
++        )
++    }
++}
+diff --git a/launcher/src/skins.rs b/launcher/src/skins.rs
+new file mode 100644
+index 000000000..a70933aa8
+--- /dev/null
++++ b/launcher/src/skins.rs
+@@ -0,0 +1,183 @@
++//! Offline skins and capes: a PNG the player picks for an offline name, kept in the launcher's
++//! `skins/` folder, with its model (classic arms or slim). The game gets them in
++//! `HORIZON_OFFLINE_SKIN`, `HORIZON_OFFLINE_SKIN_MODEL` and `HORIZON_OFFLINE_CAPE` when that
++//! name plays, and draws them on the local player (`skins::offline_skin`, `skins::offline_cape`).
++//!
++//! Skins are the layout every Java Edition skin uses: 64×64, or the older 64×32 (whose left arm
++//! and leg are the right ones mirrored). Capes are 64×32 (or the older 22×17).
++use serde::{Deserialize, Serialize};
++use std::path::{Path, PathBuf};
++
++pub const SKIN_ENV: &str = "HORIZON_OFFLINE_SKIN";
++pub const MODEL_ENV: &str = "HORIZON_OFFLINE_SKIN_MODEL";
++pub const CAPE_ENV: &str = "HORIZON_OFFLINE_CAPE";
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "lowercase")]
++pub enum Model {
++    /// Four-pixel arms ("Steve").
++    #[default]
++    Classic,
++    /// Three-pixel arms ("Alex").
++    Slim,
++}
++
++impl Model {
++    pub fn name(self) -> &'static str {
++        match self {
++            Model::Classic => "classic",
++            Model::Slim => "slim",
++        }
++    }
++}
++
++/// What an offline name wears.
++#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++pub struct Look {
++    #[serde(default)]
++    pub model: Model,
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub skin: bool,
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub cape: bool,
++}
++
++/// Where an offline name's files are: `skins/<name>.png` and `skins/<name>.cape.png`, the name
++/// in lowercase (offline names are kept once in any case).
++pub fn files(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
++    let key = name.to_ascii_lowercase();
++    (
++        dir.join(format!("{key}.png")),
++        dir.join(format!("{key}.cape.png")),
++    )
++}
++
++pub fn dir() -> PathBuf {
++    crate::backend::data_dir().join("skins")
++}
++
++fn decode(bytes: &[u8]) -> Result<image::RgbaImage, String> {
++    image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
++        .map(|i| i.to_rgba8())
++        .map_err(|_| "That isn't a PNG picture.".to_string())
++}
++
++/// A skin's picture, if it is one: 64×64 or 64×32.
++pub fn read_skin(bytes: &[u8]) -> Result<image::RgbaImage, String> {
++    let png = decode(bytes)?;
++    match png.dimensions() {
++        (64, 64) | (64, 32) => Ok(png),
++        (w, h) => Err(format!(
++            "A skin is 64×64 (or the older 64×32) pixels; this one is {w}×{h}."
++        )),
++    }
++}
++
++/// A cape's picture, if it is one: 64×32 or 22×17.
++pub fn read_cape(bytes: &[u8]) -> Result<image::RgbaImage, String> {
++    let png = decode(bytes)?;
++    match png.dimensions() {
++        (64, 32) | (22, 17) => Ok(png),
++        (w, h) => Err(format!(
++            "A cape is 64×32 (or the older 22×17) pixels; this one is {w}×{h}."
++        )),
++    }
++}
++
++/// A part of the skin copied to the front view: from (x, y), its size, to (x, y), mirrored.
++type Part = (u32, u32, u32, u32, u32, u32, bool);
++
++/// The front of the player, 16×32 texels: head, body, arms and legs, each with its outer layer
++/// over it (64×64 skins have one for every part; 64×32 only for the head).
++pub fn front(skin: &image::RgbaImage, model: Model) -> Vec<[u8; 4]> {
++    let w = 16usize;
++    let mut out = vec![[0u8; 4]; w * 32];
++    let modern = skin.height() == 64;
++    let arm = if model == Model::Slim { 3 } else { 4 };
++    let mut base: Vec<Part> = vec![
++        (8, 8, 8, 8, 4, 0, false),            // head
++        (20, 20, 8, 12, 4, 8, false),         // body
++        (44, 20, arm, 12, 4 - arm, 8, false), // right arm, on the viewer's left
++        (4, 20, 4, 12, 4, 20, false),         // right leg
++    ];
++    let mut outer: Vec<Part> = vec![(40, 8, 8, 8, 4, 0, false)];
++    if modern {
++        base.extend([
++            (36, 52, arm, 12, 12, 8, false),
++            (20, 52, 4, 12, 8, 20, false),
++        ]);
++        outer.extend([
++            (20, 36, 8, 12, 4, 8, false),
++            (44, 36, arm, 12, 4 - arm, 8, false),
++            (52, 52, arm, 12, 12, 8, false),
++            (4, 36, 4, 12, 4, 20, false),
++            (4, 52, 4, 12, 8, 20, false),
++        ]);
++    } else {
++        base.extend([(44, 20, arm, 12, 12, 8, true), (4, 20, 4, 12, 8, 20, true)]);
++    }
++    for (layer, parts) in [base, outer].into_iter().enumerate() {
++        for (fx, fy, pw, ph, tx, ty, mirrored) in parts {
++            for dy in 0..ph {
++                for dx in 0..pw {
++                    let sx = if mirrored { fx + pw - 1 - dx } else { fx + dx };
++                    let c = skin.get_pixel(sx, fy + dy).0;
++                    // The base layer is opaque in game; the outer one shows where it is drawn.
++                    if layer == 0 || c[3] > 0 {
++                        out[(ty + dy) as usize * w + (tx + dx) as usize] = [c[0], c[1], c[2], 255];
++                    }
++                }
++            }
++        }
++    }
++    out
++}
++
++/// The cape's outside, 10×16 texels.
++pub fn cape_front(cape: &image::RgbaImage) -> Vec<[u8; 4]> {
++    let mut out = Vec::with_capacity(160);
++    for y in 1..17 {
++        for x in 1..11 {
++            out.push(cape.get_pixel(x, y).0);
++        }
++    }
++    out
++}
++
++/// Keeps `file` as `name`'s skin (or cape), checked first.
++pub fn keep(dir: &Path, name: &str, file: &Path, cape: bool) -> Result<(), String> {
++    let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
++    match cape {
++        false => read_skin(&bytes).map(|_| ())?,
++        true => read_cape(&bytes).map(|_| ())?,
++    }
++    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
++    let (skin, cape_file) = files(dir, name);
++    let to = if cape { cape_file } else { skin };
++    std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))
++}
++
++/// Drops a forgotten name's files (`Accounts::remove_offline`); missing files are fine.
++pub fn forget(dir: &Path, name: &str) {
++    let (skin, cape) = files(dir, name);
++    let _ = std::fs::remove_file(skin);
++    let _ = std::fs::remove_file(cape);
++}
++
++/// The variables the game gets for `name`'s look.
++pub fn env(dir: &Path, name: &str, look: &Look) -> Vec<(&'static str, String)> {
++    let (skin, cape) = files(dir, name);
++    let mut out = Vec::new();
++    if look.skin && skin.is_file() {
++        out.push((SKIN_ENV, skin.to_string_lossy().into_owned()));
++        out.push((MODEL_ENV, look.model.name().to_string()));
++    }
++    if look.cape && cape.is_file() {
++        out.push((CAPE_ENV, cape.to_string_lossy().into_owned()));
++    }
++    out
++}
++
++#[cfg(test)]
++#[path = "skins/tests.rs"]
++mod tests;
+diff --git a/launcher/src/skins/tests.rs b/launcher/src/skins/tests.rs
+new file mode 100644
+index 000000000..69f957b74
+--- /dev/null
++++ b/launcher/src/skins/tests.rs
+@@ -0,0 +1,124 @@
++use super::*;
++
++/// A skin whose every texel says where it is: red = x, green = y.
++fn mapped(height: u32) -> image::RgbaImage {
++    image::RgbaImage::from_fn(64, height, |x, y| image::Rgba([x as u8, y as u8, 0, 255]))
++}
++
++fn png(img: &image::RgbaImage) -> Vec<u8> {
++    let mut out = std::io::Cursor::new(Vec::new());
++    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
++    out.into_inner()
++}
++
++#[test]
++fn the_front_view_takes_each_part_from_its_place() {
++    let mut skin = mapped(64);
++    // No outer layer, except one hat texel.
++    for (x, y) in (0..64).flat_map(|x| (0..64).map(move |y| (x, y))) {
++        let outer = (40..48).contains(&x) && y < 16
++            || (16..56).contains(&x) && (32..48).contains(&y)
++            || (0..16).contains(&x) && (48..64).contains(&y)
++            || (48..64).contains(&x) && (48..64).contains(&y);
++        if outer {
++            skin.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
++        }
++    }
++    skin.put_pixel(41, 9, image::Rgba([200, 0, 9, 255]));
++    let f = front(&skin, Model::Classic);
++    let at = |x: usize, y: usize| f[y * 16 + x];
++    assert_eq!(at(4, 0), [8, 8, 0, 255], "head front starts at (8, 8)");
++    assert_eq!(at(5, 1), [200, 0, 9, 255], "the hat covers it");
++    assert_eq!(at(4, 8), [20, 20, 0, 255], "body");
++    assert_eq!(at(0, 8), [44, 20, 0, 255], "right arm");
++    assert_eq!(
++        at(12, 8),
++        [36, 52, 0, 255],
++        "left arm, its own on a 64×64 skin"
++    );
++    assert_eq!(at(8, 20), [20, 52, 0, 255], "left leg");
++    let slim = front(&skin, Model::Slim);
++    assert_eq!(slim[8 * 16], [0, 0, 0, 0], "slim arms leave a column");
++    assert_eq!(slim[8 * 16 + 1], [44, 20, 0, 255]);
++}
++
++#[test]
++fn an_old_skin_mirrors_its_right_limbs() {
++    let f = front(&mapped(32), Model::Classic);
++    let at = |x: usize, y: usize| f[y * 16 + x];
++    assert_eq!(
++        at(12, 8),
++        [47, 20, 0, 255],
++        "the left arm is the right one mirrored"
++    );
++    assert_eq!(at(15, 8), [44, 20, 0, 255]);
++    assert_eq!(at(8, 20), [7, 20, 0, 255]);
++}
++
++#[test]
++fn only_skin_and_cape_sizes_are_kept() {
++    assert!(read_skin(&png(&mapped(64))).is_ok());
++    assert!(read_skin(&png(&mapped(32))).is_ok());
++    let big = image::RgbaImage::new(128, 128);
++    assert_eq!(
++        read_skin(&png(&big)).unwrap_err(),
++        "A skin is 64×64 (or the older 64×32) pixels; this one is 128×128."
++    );
++    assert!(read_skin(b"not a png").unwrap_err().contains("isn't a PNG"));
++    assert!(read_cape(&png(&mapped(32))).is_ok());
++    assert!(read_cape(&png(&image::RgbaImage::new(22, 17))).is_ok());
++    assert!(read_cape(&png(&mapped(64))).is_err());
++    assert_eq!(cape_front(&mapped(32))[0], [1, 1, 0, 255]);
++}
++
++#[test]
++fn a_kept_look_reaches_the_game_only_with_its_files() {
++    let root = std::env::temp_dir().join(format!("horizon-skins-{}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&root);
++    std::fs::create_dir_all(&root).unwrap();
++    let (good, bad) = (root.join("alex.png"), root.join("big.png"));
++    std::fs::write(&good, png(&mapped(64))).unwrap();
++    std::fs::write(&bad, png(&image::RgbaImage::new(10, 10))).unwrap();
++    let dir = root.join("skins");
++    let look = Look {
++        model: Model::Slim,
++        skin: true,
++        cape: true,
++    };
++    assert!(env(&dir, "Alex", &look).is_empty(), "nothing kept yet");
++    keep(&dir, "Alex", &good, false).unwrap();
++    assert!(keep(&dir, "Alex", &bad, true).is_err());
++    let (skin, _) = files(&dir, "ALEX");
++    assert_eq!(
++        env(&dir, "alex", &look),
++        [
++            (SKIN_ENV, skin.to_string_lossy().into_owned()),
++            (MODEL_ENV, "slim".to_string())
++        ]
++    );
++    assert_eq!(
++        serde_json::to_string(&Look::default()).unwrap(),
++        r#"{"model":"classic"}"#
++    );
++    std::fs::remove_dir_all(&root).unwrap();
++}
++
++#[test]
++fn forgetting_a_name_drops_its_files() {
++    let root = std::env::temp_dir().join(format!("horizon-skins-forget-{}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&root);
++    std::fs::create_dir_all(&root).unwrap();
++    let (src, cape_src) = (root.join("alex.png"), root.join("cape.png"));
++    std::fs::write(&src, png(&mapped(64))).unwrap();
++    std::fs::write(&cape_src, png(&mapped(32))).unwrap();
++    let dir = root.join("skins");
++    keep(&dir, "Alex", &src, false).unwrap();
++    keep(&dir, "Alex", &cape_src, true).unwrap();
++    let (skin, cape) = files(&dir, "Alex");
++    assert!(skin.is_file() && cape.is_file());
++    forget(&dir, "ALEX");
++    assert!(!skin.exists() && !cape.exists());
++    // A name that never had files is forgotten all the same.
++    forget(&dir, "Alex");
++    std::fs::remove_dir_all(&root).unwrap();
++}
+diff --git a/launcher/src/switch_page.rs b/launcher/src/switch_page.rs
+index 4062a2e71..c8258dc1a 100644
+--- a/launcher/src/switch_page.rs
++++ b/launcher/src/switch_page.rs
+@@ -1,19 +1,30 @@
+-//! Who plays: the top bar's quick switch (a menu under the account chip) between the signed-in
+-//! Microsoft accounts.
++//! Who plays: the top bar's quick switch (a menu under the account chip) and Settings' offline
++//! names (`horizon_launcher::account::Accounts::offline`).
++use super::servers_page::Field;
+ use super::*;
++use horizon_launcher::account::Player;
+ 
+ impl Launcher {
+     /// The chip's two lines: the name that plays, and how.
+     pub(super) fn who_plays(&self) -> (String, &'static str) {
+-        match self.accounts.selected() {
+-            Some(a) => (a.name.clone(), tr("Microsoft account")),
+-            None => (String::new(), tr("Sign in with Microsoft")),
++        match self.accounts.player() {
++            Player::Microsoft(_) => (
++                self.accounts
++                    .selected()
++                    .map_or_else(String::new, |a| a.name.clone()),
++                tr("Microsoft account"),
++            ),
++            Player::Offline(name) => (name, tr("Offline")),
++            Player::GameName => (
++                self.offline_name.clone().unwrap_or_else(|| "Player".into()),
++                tr("Offline"),
++            ),
+         }
+     }
+ 
+-    pub(super) fn play_as(&mut self, uuid: &str) {
++    pub(super) fn play_as(&mut self, who: Player) {
+         let mut accounts = Accounts::load();
+-        let done = accounts.play_as(uuid).and_then(|()| accounts.save());
++        let done = accounts.play_as(who).and_then(|()| accounts.save());
+         match done {
+             Ok(()) => self.accounts = accounts,
+             Err(e) => self.sign_in_state = Some(SignInState::Done(Err(e))),
+@@ -21,13 +32,32 @@ impl Launcher {
+         self.account_menu = false;
+     }
+ 
+-    /// Everyone the player can play as (each account's UUID and name), with how each signs in.
+-    pub(super) fn players(&self) -> Vec<(String, String, &'static str)> {
+-        self.accounts
++    /// Everyone the player can play as, with how each signs in.
++    pub(super) fn players(&self) -> Vec<(Player, String, &'static str)> {
++        let mut out: Vec<_> = self
++            .accounts
+             .accounts
+             .iter()
+-            .map(|a| (a.uuid.clone(), a.name.clone(), tr("Microsoft")))
+-            .collect()
++            .map(|a| {
++                (
++                    Player::Microsoft(a.uuid.clone()),
++                    a.name.clone(),
++                    tr("Microsoft"),
++                )
++            })
++            .collect();
++        out.extend(
++            self.accounts
++                .offline
++                .iter()
++                .map(|n| (Player::Offline(n.clone()), n.clone(), tr("Offline"))),
++        );
++        out.push((
++            Player::GameName,
++            self.offline_name.clone().unwrap_or_else(|| "Player".into()),
++            tr("Offline, the game's name"),
++        ));
++        out
+     }
+ 
+     /// The menu under the account chip, while open.
+@@ -36,7 +66,7 @@ impl Launcher {
+             return None;
+         }
+         let t = self.theme;
+-        let now = self.accounts.selected().map(|a| a.uuid.clone());
++        let now = self.accounts.player();
+         let mut menu = div()
+             .id("account-menu")
+             .absolute()
+@@ -56,7 +86,7 @@ impl Launcher {
+                 cx.notify();
+             }));
+         for (i, (who, name, how)) in self.players().into_iter().enumerate() {
+-            let chosen = Some(&who) == now.as_ref();
++            let chosen = who == now;
+             menu = menu.child(
+                 div()
+                     .id(SharedString::from(format!("account-pick-{i}")))
+@@ -69,10 +99,15 @@ impl Launcher {
+                     .rounded(px(theme::RADIUS))
+                     .cursor_pointer()
+                     .hover(move |s| s.bg(t.plate_soft))
+-                    .child(
+-                        self.profile_heads
+-                            .draw(Some(who.as_str()), 24., self.scale, &t),
+-                    )
++                    .child(self.profile_heads.draw(
++                        match &who {
++                            Player::Microsoft(uuid) => Some(uuid),
++                            _ => None,
++                        },
++                        24.,
++                        self.scale,
++                        &t,
++                    ))
+                     .child(
+                         div()
+                             .flex()
+@@ -84,7 +119,7 @@ impl Launcher {
+                     )
+                     .when(chosen, |d| d.child(div().size(px(6.)).bg(t.accent)))
+                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+-                        this.play_as(&who);
++                        this.play_as(who.clone());
+                         cx.notify();
+                     })),
+             );
+@@ -110,4 +145,150 @@ impl Launcher {
+         );
+         Some(gpui::deferred(menu).with_priority(1))
+     }
++
++    fn add_offline_name(&mut self) {
++        let name = self.servers.value(Field::OfflineName).trim().to_string();
++        if name.is_empty() {
++            return;
++        }
++        self.play_as(Player::Offline(name));
++        if !matches!(self.sign_in_state, Some(SignInState::Done(Err(_)))) {
++            self.servers.text(Field::OfflineName).set(String::new());
++        }
++    }
++
++    /// Forgets an offline name and its skin.
++    pub(super) fn forget_offline(&mut self, name: &str) {
++        let mut accounts = Accounts::load();
++        if accounts
++            .remove_offline(name, &horizon_launcher::skins::dir())
++            .is_ok()
++            && accounts.save().is_ok()
++        {
++            self.accounts = accounts;
++        }
++    }
++
++    /// Enter in the offline name field.
++    pub(super) fn offline_name_enter(&mut self) {
++        self.add_offline_name();
++    }
++
++    /// Settings' rows for the offline names, after the Microsoft accounts: each with Play as
++    /// and Forget, then a field to add one.
++    pub(super) fn offline_rows(&mut self, mut n: usize, cx: &mut Context<Self>) -> (Div, usize) {
++        let t = self.theme;
++        let mut rows = div().flex().flex_col();
++        let now = self.accounts.player();
++        for (i, name) in self.accounts.offline.clone().into_iter().enumerate() {
++            let plays = now == Player::Offline(name.clone());
++            let mut actions = div().flex().gap(px(4.));
++            if !plays {
++                let who = Player::Offline(name.clone());
++                actions = actions.child(
++                    button(format!("offline-play-{i}"), "Play as", Kind::Secondary, &t).on_click(
++                        cx.listener(move |this, _: &ClickEvent, _, cx| {
++                            this.play_as(who.clone());
++                            cx.notify();
++                        }),
++                    ),
++                );
++            }
++            let dressed = name.clone();
++            actions = actions.child(
++                button(format!("offline-skin-{i}"), "Skin…", Kind::Ghost, &t).on_click(
++                    cx.listener(move |this, _: &ClickEvent, _, cx| {
++                        this.open_skin(dressed.clone());
++                        cx.notify();
++                    }),
++                ),
++            );
++            let forget = name.clone();
++            actions = actions.child(
++                button(format!("offline-forget-{i}"), "Forget", Kind::Ghost, &t).on_click(
++                    cx.listener(move |this, _: &ClickEvent, _, cx| {
++                        this.forget_offline(&forget);
++                        cx.notify();
++                    }),
++                ),
++            );
++            n += 1;
++            rows = rows.child(index_row(
++                n,
++                name,
++                Some(
++                    div()
++                        .child(tr(if plays {
++                            "Offline name · plays"
++                        } else {
++                            "Offline name"
++                        }))
++                        .into_any_element(),
++                ),
++                Some(actions.into_any_element()),
++                &t,
++            ));
++        }
++        rows = rows.children(self.skin_panel(cx));
++        // The name the game made up can't be forgotten — it's what an offline player is —
++        // only rolled for a new one.
++        if let Some(made_up) = self.offline_name.clone() {
++            let plays = now == Player::GameName;
++            n += 1;
++            rows = rows.child(index_row(
++                n,
++                made_up,
++                Some(
++                    div()
++                        .child(tr(if plays {
++                            "Offline name · the game's own · plays"
++                        } else {
++                            "Offline name · the game's own"
++                        }))
++                        .into_any_element(),
++                ),
++                Some(
++                    button("game-name-new", "New name", Kind::Ghost, &t)
++                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
++                            match instances::new_player_name() {
++                                Ok(name) => this.offline_name = Some(name),
++                                Err(e) => this.sign_in_state = Some(SignInState::Done(Err(e))),
++                            }
++                            cx.notify();
++                        }))
++                        .into_any_element(),
++                ),
++                &t,
++            ));
++        }
++        n += 1;
++        let add = div()
++            .flex()
++            .items_center()
++            .gap(px(8.))
++            .child(self.field(Field::OfflineName, tr("A name, 3 to 16 letters"), 220., cx))
++            .child(
++                button("offline-add", "Add", Kind::Secondary, &t).on_click(cx.listener(
++                    |this, _: &ClickEvent, _, cx| {
++                        this.add_offline_name();
++                        cx.notify();
++                    },
++                )),
++            );
++        rows = rows.child(index_row(
++            n,
++            tr("Offline name"),
++            Some(
++                div()
++                    .child(tr(
++                        "Play offline under another name, and switch from the top bar. Online \
++                         servers don't take offline names.",
++                    ))
++                    .into_any_element(),
++            ),
++            Some(add.into_any_element()),
++            &t,
++        ));
++        (rows, n)
++    }
+ }
+diff --git a/launcher/tests/owner_gate.rs b/launcher/tests/owner_gate.rs
+index 7c59068c3..8f263f93b 100644
+--- a/launcher/tests/owner_gate.rs
++++ b/launcher/tests/owner_gate.rs
+@@ -1,25 +1,18 @@
+-//! The owner gate from the outside: with no account that owns Minecraft: Java Edition in the
+-//! launcher, neither `horizon-launcher play` nor the MCP server's play starts the game.
+ use std::io::Write;
+ use std::path::{Path, PathBuf};
+ use std::process::{Command, Output, Stdio};
+ 
+ const REFUSED: &str = "Sign in with a Microsoft account that owns Minecraft: Java Edition to play.";
++const NOT_PREPARED: &str = "is not prepared yet";
+ 
+-/// Fresh homes with one installed (not prepared) version and an offline name from an older
+-/// launcher, as a player who played offline before the gate has.
+-fn home(name: &str) -> PathBuf {
++fn home(name: &str, accounts: &str) -> PathBuf {
+     let root =
+         std::env::temp_dir().join(format!("horizon-owner-gate-{name}-{}", std::process::id()));
+     let _ = std::fs::remove_dir_all(&root);
+     let version = root.join("launcher/versions/v2026.10.27.01");
+     std::fs::create_dir_all(&version).unwrap();
+     std::fs::write(version.join(".installed"), "").unwrap();
+-    std::fs::write(
+-        root.join("launcher/accounts.json"),
+-        r#"{"accounts":[],"selected":null,"offline":["Builder_1"],"offline_selected":"Builder_1"}"#,
+-    )
+-    .unwrap();
++    std::fs::write(root.join("launcher/accounts.json"), accounts).unwrap();
+     root
+ }
+ 
+@@ -44,14 +37,22 @@ fn text(out: &Output) -> String {
+ }
+ 
+ #[test]
+-fn the_cli_refuses_to_play_without_an_owner() {
+-    let root = home("cli");
++fn an_offline_account_is_added_and_played_without_any_account() {
++    let root = home("cli-offline", r#"{"accounts":[],"selected":null}"#);
++    let out = launcher(&root, &["account", "offline", "Builder_1"])
++        .output()
++        .unwrap();
++    let said = text(&out);
++    assert!(out.status.success(), "{said}");
++    assert!(said.contains("plays offline as Builder_1"), "{said}");
++    let accounts = std::fs::read_to_string(root.join("launcher/accounts.json")).unwrap();
++    assert!(accounts.contains("Builder_1"), "{accounts}");
+     let out = launcher(&root, &["play"]).output().unwrap();
+     let said = text(&out);
+     assert!(!out.status.success(), "{said}");
+-    assert!(said.contains(REFUSED), "{said}");
+-    assert!(said.contains("horizon-launcher account sign-in"), "{said}");
+-    // Nothing of the game ran, and a refusal doesn't rewrite the accounts.
++    assert!(said.contains(NOT_PREPARED), "{said}");
++    assert!(!said.contains(REFUSED), "{said}");
++    assert!(!said.contains("account sign-in"), "{said}");
+     assert!(!root.join("game/sessions").exists());
+     let accounts = std::fs::read_to_string(root.join("launcher/accounts.json")).unwrap();
+     assert!(accounts.contains("Builder_1"), "{accounts}");
+@@ -59,8 +60,23 @@ fn the_cli_refuses_to_play_without_an_owner() {
+ }
+ 
+ #[test]
+-fn the_mcp_server_refuses_to_play_without_an_owner() {
+-    let root = home("mcp");
++fn a_selected_microsoft_account_with_no_owner_still_meets_the_gate() {
++    let root = home(
++        "cli-gate",
++        r#"{"accounts":[{"uuid":"abc123","name":"Notch"}],"selected":"abc123"}"#,
++    );
++    let out = launcher(&root, &["play"]).output().unwrap();
++    let said = text(&out);
++    assert!(!out.status.success(), "{said}");
++    assert!(said.contains(REFUSED), "{said}");
++    assert!(said.contains("horizon-launcher account sign-in"), "{said}");
++    assert!(!root.join("game/sessions").exists());
++    let _ = std::fs::remove_dir_all(&root);
++}
++
++#[test]
++fn the_mcp_server_plays_an_offline_account_past_the_gate() {
++    let root = home("mcp", r#"{"accounts":[],"selected":null}"#);
+     let mut child = launcher(&root, &["mcp"])
+         .stdin(Stdio::piped())
+         .stdout(Stdio::piped())
+@@ -84,6 +100,7 @@ fn the_mcp_server_refuses_to_play_without_an_owner() {
+         .expect("a reply to play");
+     assert_eq!(reply["result"]["isError"], true, "{reply}");
+     let said = reply["result"]["content"][0]["text"].as_str().unwrap();
+-    assert!(said.contains(REFUSED), "{said}");
++    assert!(said.contains(NOT_PREPARED), "{said}");
++    assert!(!said.contains(REFUSED), "{said}");
+     let _ = std::fs::remove_dir_all(&root);
+ }
+-- 
+2.47.3
+
