@@ -1,10 +1,9 @@
-From 0c490db4370cd944ab5a4c289c4fa571a8be9b3a Mon Sep 17 00:00:00 2001
+From 77544af42818537f83bb807571eb14c3fa3160fa Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
  prune orphaned translations
 
----
 ---
  launcher/src/cli.rs  | 4 ++--
  launcher/src/main.rs | 2 +-

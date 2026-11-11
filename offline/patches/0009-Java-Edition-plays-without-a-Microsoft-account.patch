@@ -1,9 +1,8 @@
-From f75667dfdb5aadd004561926bde5308850eb5605 Mon Sep 17 00:00:00 2001
+From 4d2a7e4f2f4496046782be48f0025cda4623f0c2 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
 
----
 ---
  launcher/Cargo.lock     |   1 +
  launcher/Cargo.toml     |   1 +

@@ -1,9 +1,8 @@
-From f20c0d4352df73000364df5d7f5c3d471cd6f58f Mon Sep 17 00:00:00 2001
+From f64a1d18fa02b3b5c343fff1f0e08fa41a31c881 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 5/9] Play the glass home button without the ownership check
 
----
 ---
  launcher/src/glass_home.rs |  2 +-
  launcher/src/main.rs       | 29 +++++++++--------------------

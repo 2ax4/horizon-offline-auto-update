@@ -1,9 +1,8 @@
-From d0022f305e2f4f03add04c0315b773d46019228a Mon Sep 17 00:00:00 2001
+From f3b11d1ad1d3934c336a23eebc289044507a56af Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 3/9] Ad-free: remove the partner banners
 
----
 ---
  launcher/src/backend.rs       |  7 -----
  launcher/src/frame.rs         | 30 -------------------

@@ -1,9 +1,8 @@
-From 611405ed7f8cd40c0c71c498d37a5331ecb4a93a Mon Sep 17 00:00:00 2001
+From f3844eaa56795b08883c753246eeb9438acc954a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 2/9] Offline updates follow the fork's releases
 
----
 ---
  crates/horizon-release-sign/release-keys.txt  |   1 +
  launcher/src/backend.rs                       |  29 ++++-

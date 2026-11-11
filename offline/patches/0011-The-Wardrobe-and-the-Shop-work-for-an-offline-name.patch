@@ -1,9 +1,8 @@
-From 9e6d285c127f19caa3f7ecb09c39017925333b3e Mon Sep 17 00:00:00 2001
+From c21850c1e852ef0982fe4a3bb49cb2771a84bfb4 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 9/9] The Wardrobe and the Shop work for an offline name
 
----
 ---
  launcher/src/wardrobe_page.rs | 128 ++++++++++++++++++++++++++++++++--
  1 file changed, 122 insertions(+), 6 deletions(-)

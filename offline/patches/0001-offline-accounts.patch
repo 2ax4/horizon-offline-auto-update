@@ -1,29 +1,28 @@
-From 4cc71b4dc73ee61ba1fedb3f8cc90395249d1cc0 Mon Sep 17 00:00:00 2001
+From f966bb26c084fee11513bb96a34b82dfab0f0000 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
 
 ---
----
  docs/launcher-commands.md     |  35 ++++-
  launcher/src/account.rs       | 190 ++++++++++++++++--------
- launcher/src/account/tests.rs | 261 +++++++++++++++++++++------------
- launcher/src/cli.rs           | 169 +++++++++++++++++++---
+ launcher/src/account/tests.rs | 272 ++++++++++++++++++++++------------
+ launcher/src/cli.rs           | 169 ++++++++++++++++++---
  launcher/src/frame.rs         |  18 ++-
  launcher/src/home.rs          |   2 +-
  launcher/src/instances.rs     |  28 ++++
  launcher/src/lib.rs           |   1 +
  launcher/src/main.rs          |  69 ++++++++-
  launcher/src/mcp.rs           |   1 -
- launcher/src/owner_page.rs    |  49 +++++--
+ launcher/src/owner_page.rs    |  49 ++++--
  launcher/src/profile_heads.rs |  54 ++++++-
  launcher/src/servers_page.rs  |  20 ++-
- launcher/src/skin_page.rs     | 264 ++++++++++++++++++++++++++++++++++
+ launcher/src/skin_page.rs     | 264 +++++++++++++++++++++++++++++++++
  launcher/src/skins.rs         | 183 +++++++++++++++++++++++
  launcher/src/skins/tests.rs   | 124 ++++++++++++++++
- launcher/src/switch_page.rs   | 219 +++++++++++++++++++++++++---
+ launcher/src/switch_page.rs   | 219 ++++++++++++++++++++++++---
  launcher/tests/owner_gate.rs  |  53 ++++---
- 18 files changed, 1498 insertions(+), 242 deletions(-)
+ 18 files changed, 1505 insertions(+), 246 deletions(-)
  create mode 100644 launcher/src/skin_page.rs
  create mode 100644 launcher/src/skins.rs
  create mode 100644 launcher/src/skins/tests.rs
@@ -358,7 +357,7 @@ index 5c62885..2a384d3 100644
  }
  
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index eb27706..ce6358b 100644
+index eb27706..24640a1 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -686,80 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
@@ -640,20 +639,29 @@ index eb27706..ce6358b 100644
  #[test]
  fn cancelled_or_removed_targeted_sign_in_keeps_credentials_unchanged() {
      let store = MemoryStore::default();
-@@ -2372,13 +2440,26 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
+@@ -2370,15 +2438,31 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
+         skin: None,
+         cape: None,
      });
-     // This launch plays as Alex: it is Alex who is told to sign in again (Notch owning the game
-     // doesn't let Alex play), and Notch is still the one `account select` picked.
+-    // This launch plays as Alex: it is Alex who is told to sign in again (Notch owning the game
+-    // doesn't let Alex play), and Notch is still the one `account select` picked.
 -    let refused = launch_as(&offline(), Some("test-client"), &store, &mut accounts, alex);
-+    let refused = launch_as(
+-    assert!(refused
+-        .unwrap_err()
++    // This launch plays as Alex: Notch's ownership opens the gate, and it is Alex who is told
++    // to sign in again, so Alex played. Notch is still the one `account select` picked.
++    let played = launch_as(
 +        &offline(),
 +        Some("test-client"),
 +        &store,
 +        &mut accounts,
 +        &Player::Microsoft(alex.to_owned()),
-+    );
-     assert!(refused
-         .unwrap_err()
++    )
++    .unwrap();
++    assert!(played.session.is_none());
++    assert!(played
++        .offline
++        .unwrap()
          .starts_with("Alex is no longer signed in"));
      assert_eq!(accounts.selected.as_deref(), Some(UUID));
      // Notch plays with the last answer while the services can't be reached.
@@ -669,7 +677,7 @@ index eb27706..ce6358b 100644
      assert!(pass.session.is_none() && pass.offline.is_some());
      // An account that isn't in the launcher is refused, and changes nothing either.
      let gone = launch_as(
-@@ -2386,7 +2467,7 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
+@@ -2386,7 +2470,7 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
          Some("test-client"),
          &store,
          &mut accounts,
