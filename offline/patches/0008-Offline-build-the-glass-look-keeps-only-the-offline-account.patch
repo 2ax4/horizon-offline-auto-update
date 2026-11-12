@@ -1,4 +1,4 @@
-From 2387c95ab1290b47ed86aa902028f3cc70a69651 Mon Sep 17 00:00:00 2001
+From bbade21949f84cdb02e548ee902538fadb2e91b3 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH] Offline build: the glass look keeps only the offline account
@@ -10,7 +10,7 @@ Subject: [PATCH] Offline build: the glass look keeps only the offline account
  3 files changed, 198 insertions(+), 166 deletions(-)
 
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 75c9110082..37839753d7 100644
+index 75c9110..3783975 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -669,38 +669,13 @@ impl Launcher {
@@ -88,7 +88,7 @@ index 75c9110082..37839753d7 100644
                          .child(
                              div()
 diff --git a/launcher/src/glass_account.rs b/launcher/src/glass_account.rs
-index d00857fde1..40d799b544 100644
+index d00857f..40d799b 100644
 --- a/launcher/src/glass_account.rs
 +++ b/launcher/src/glass_account.rs
 @@ -1,48 +1,50 @@
@@ -435,7 +435,7 @@ index d00857fde1..40d799b544 100644
      }
  }
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 8d14706f05..43337c5e1f 100644
+index 8d14706..43337c5 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -3498,7 +3498,7 @@ impl Launcher {
@@ -459,3 +459,6 @@ index 8d14706f05..43337c5e1f 100644
          if !t.glass {
              if self.owner == Some(false) {
                  rows = rows.child(index_row(
+-- 
+2.47.3
+

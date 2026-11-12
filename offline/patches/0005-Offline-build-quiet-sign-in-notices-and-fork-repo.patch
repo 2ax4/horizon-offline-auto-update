@@ -1,4 +1,4 @@
-From 2d2fae8f99efcec5e0e56dd5a0da42fa806eb648 Mon Sep 17 00:00:00 2001
+From c9dc2d089cdf642c9283ea042aa99943d7540434 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH] Offline build: quiet sign-in notices and fork repo
@@ -8,7 +8,7 @@ Subject: [PATCH] Offline build: quiet sign-in notices and fork repo
  1 file changed, 1 insertion(+)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 19c5a4f9ff..590a4642bc 100644
+index 19c5a4f..590a464 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -11,6 +11,7 @@ use std::sync::mpsc::Sender;
@@ -19,3 +19,6 @@ index 19c5a4f9ff..590a4642bc 100644
  pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
  /// The players' page on connecting an AI agent (the website's docs/agents.md).
  pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
+-- 
+2.47.3
+

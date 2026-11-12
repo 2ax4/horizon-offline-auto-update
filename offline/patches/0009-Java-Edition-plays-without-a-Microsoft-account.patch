@@ -1,4 +1,4 @@
-From da8ec17667f987d115cd89bafec673f56190640e Mon Sep 17 00:00:00 2001
+From fcf97622dd1765137a4170f35ad8afe7e817fcc7 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH] Java Edition plays without a Microsoft account
@@ -12,10 +12,10 @@ Subject: [PATCH] Java Edition plays without a Microsoft account
  5 files changed, 112 insertions(+), 85 deletions(-)
 
 diff --git a/launcher/Cargo.lock b/launcher/Cargo.lock
-index 7f71f69fdd..89a72aee6d 100644
+index 3113f57..a268ba8 100644
 --- a/launcher/Cargo.lock
 +++ b/launcher/Cargo.lock
-@@ -2717,6 +2717,7 @@ dependencies = [
+@@ -2791,6 +2791,7 @@ dependencies = [
   "horizon-mods",
   "horizon-platform",
   "horizon-port-pack",
@@ -24,11 +24,11 @@ index 7f71f69fdd..89a72aee6d 100644
   "horizon-shader-api",
   "horizon-telemetry",
 diff --git a/launcher/Cargo.toml b/launcher/Cargo.toml
-index 14e1964939..aaed300429 100644
+index 8af6563..9aaaf13 100644
 --- a/launcher/Cargo.toml
 +++ b/launcher/Cargo.toml
-@@ -52,6 +52,7 @@ horizon-friends = { path = "../crates/horizon-friends" }
- horizon-bench = { path = "../crates/horizon-bench" }
+@@ -51,6 +51,7 @@ horizon-mcp = { path = "../crates/horizon-mcp" }
+ horizon-friends = { path = "../crates/horizon-friends" }
  # Import modpack: the porting pipeline, run on the player's own files (docs/modpacks.md).
  horizon-port-pack = { path = "../crates/horizon-port-pack" }
 +horizon-protocol = { path = "../crates/horizon-protocol" }
@@ -36,10 +36,10 @@ index 14e1964939..aaed300429 100644
  horizon-mods = { path = "../crates/horizon-mods", features = ["index"] }
  # Use the game's manifest validation for native shader identities.
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 16f3f87598..f4755939e2 100644
+index b1569ba..9192923 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
-@@ -2333,7 +2333,10 @@ pub struct GameSession {
+@@ -2382,7 +2382,10 @@ pub struct GameSession {
  /// for it, and the other accounts' for its splitscreen players.
  pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
      let mut accounts = Accounts::load();
@@ -51,7 +51,7 @@ index 16f3f87598..f4755939e2 100644
          &Endpoints::live(),
          client_id().as_deref(),
          store(),
-@@ -2560,7 +2563,8 @@ fn account_sessions_until(
+@@ -2609,7 +2612,8 @@ fn account_sessions_until(
  }
  
  /// Who plays the real Minecraft: Java Edition (a Java instance), past the owner gate itself
@@ -61,7 +61,7 @@ index 16f3f87598..f4755939e2 100644
  /// from the services, an account that owned it plays with its last token. Mojang's game takes the
  /// token on its command line, as Mojang's launcher gives it; that command is never logged.
  pub fn java_player() -> Result<crate::java_launch::Player, String> {
-@@ -2583,6 +2587,12 @@ fn java_player_with(
+@@ -2632,6 +2636,12 @@ fn java_player_with(
      store: &dyn SecretStore,
      accounts: &mut Accounts,
  ) -> Result<crate::java_launch::Player, String> {
@@ -74,7 +74,7 @@ index 16f3f87598..f4755939e2 100644
      let pass = launch(ep, client_id, store, accounts).map_err(|e| e.to_string())?;
      let kept = || {
          let order = accounts.selected().into_iter().chain(&accounts.accounts);
-@@ -2603,5 +2613,35 @@ fn java_player_with(
+@@ -2652,5 +2662,35 @@ fn java_player_with(
      })
  }
  
@@ -111,7 +111,7 @@ index 16f3f87598..f4755939e2 100644
  #[cfg(test)]
  mod tests;
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 590a4642bc..59e540b582 100644
+index 590a464..59e540b 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -2115,9 +2115,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
@@ -334,7 +334,7 @@ index 590a4642bc..59e540b582 100644
          assert_eq!(backend.matches("download_for(").count(), 2);
          assert!(body("download_for_owner").contains("download_for("));
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 43337c5e1f..b311cf8923 100644
+index 43337c5..b311cf8 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -2497,10 +2497,7 @@ fn segments<T: Copy + PartialEq + 'static>(
@@ -398,3 +398,6 @@ index 43337c5e1f..b311cf8923 100644
              None => div().child(prepare),
          };
          let owner = self.owner == Some(true);
+-- 
+2.47.3
+

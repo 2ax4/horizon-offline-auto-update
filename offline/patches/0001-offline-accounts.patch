@@ -1,4 +1,4 @@
-From 23215cf4bf99875fe0c2e364a8f4ade229e59c75 Mon Sep 17 00:00:00 2001
+From d2e6960133799beb054bfbcb85a8b9291a8c3533 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH] Offline accounts: add and play with no Microsoft account
@@ -28,7 +28,7 @@ Subject: [PATCH] Offline accounts: add and play with no Microsoft account
  create mode 100644 launcher/src/skins/tests.rs
 
 diff --git a/docs/launcher-commands.md b/docs/launcher-commands.md
-index e528b8967c..cfac379d32 100644
+index e528b89..cfac379 100644
 --- a/docs/launcher-commands.md
 +++ b/docs/launcher-commands.md
 @@ -188,14 +188,45 @@ MCP: `account_sign_out`, needs `confirm: true`.
@@ -80,7 +80,7 @@ index e528b8967c..cfac379d32 100644
  
  Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), native-cache-gib N (combined native compilation cache limit in GiB, default 30; 0 disables automatic cleanup), native-profile performance|dev|release (the profile native mods build with: performance is incremental, dev rebuilds a mod quickest for a slow game, release is slowest to build and slightly faster to play).
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 3c13c32011..16f3f87598 100644
+index b4172bf..b1569ba 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -6,8 +6,6 @@
@@ -92,7 +92,7 @@ index 3c13c32011..16f3f87598 100644
  //! The game binary itself, its harnesses and the servers don't go through the launcher's gate.
  //!
  //! The Azure app (client ID) is Horizon's own and is configuration: `HORIZON_MSA_CLIENT_ID` at
-@@ -23,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+@@ -24,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
  /// The keychain service name every secret is stored under.
  pub const SERVICE: &str = "dev.playhorizon.launcher";
  const SCOPE: &str = "XboxLive.signin offline_access";
@@ -101,7 +101,7 @@ index 3c13c32011..16f3f87598 100644
  /// What every Play says while no account in the launcher owns the game.
  pub const NEEDS_OWNER: &str =
      "Sign in with a Microsoft account that owns Minecraft: Java Edition to play";
-@@ -1695,11 +1693,27 @@ pub struct Accounts {
+@@ -1744,11 +1742,27 @@ pub struct Accounts {
      pub accounts: Vec<Account>,
      /// The UUID of the account the game starts with; none: the first one.
      pub selected: Option<String>,
@@ -134,7 +134,7 @@ index 3c13c32011..16f3f87598 100644
  }
  
  /// The secrets an account keeps in `store`, if it still has them there.
-@@ -1711,6 +1725,12 @@ fn secrets_in(store: &dyn SecretStore, uuid: &str) -> Option<Secrets> {
+@@ -1760,6 +1774,12 @@ fn secrets_in(store: &dyn SecretStore, uuid: &str) -> Option<Secrets> {
          .and_then(|s| serde_json::from_str(&s).ok())
  }
  
@@ -147,7 +147,7 @@ index 3c13c32011..16f3f87598 100644
  impl Accounts {
      pub(crate) fn path() -> PathBuf {
          crate::backend::data_dir().join("accounts.json")
-@@ -1740,16 +1760,6 @@ impl Accounts {
+@@ -1789,16 +1809,6 @@ impl Accounts {
              let _ = std::fs::remove_file(&tmp);
              return Err(e.to_string());
          }
@@ -164,7 +164,7 @@ index 3c13c32011..16f3f87598 100644
          Ok(())
      }
      /// Saves what a launch renewed (names, skins) into `accounts.json` as it is now, under the
-@@ -1816,7 +1826,6 @@ impl Accounts {
+@@ -1865,7 +1875,6 @@ impl Accounts {
          Ok(())
      }
      /// Whether an account here owned the game at its last check (the keychain's answer, no
@@ -172,7 +172,7 @@ index 3c13c32011..16f3f87598 100644
      pub fn has_owner(&self, store: &dyn SecretStore) -> bool {
          // The selected account first: it owning the game ends the search after one account's
          // item — every account's item read can ask for the keychain (macOS, #4912).
-@@ -1826,15 +1835,97 @@ impl Accounts {
+@@ -1875,15 +1884,97 @@ impl Accounts {
              .any(|a| secrets_in(store, &a.uuid).is_some_and(|s| s.owns))
      }
  
@@ -275,7 +275,7 @@ index 3c13c32011..16f3f87598 100644
      /// A renewed profile (its name or skin changed) in place of the old one; who plays stays.
      fn update(&mut self, account: Account) {
          if let Some(a) = self.accounts.iter_mut().find(|a| a.uuid == account.uuid) {
-@@ -1842,7 +1933,6 @@ impl Accounts {
+@@ -1891,7 +1982,6 @@ impl Accounts {
          }
      }
  
@@ -283,7 +283,7 @@ index 3c13c32011..16f3f87598 100644
      pub fn remove(&mut self, store: &dyn SecretStore, uuid: &str) -> Result<(), String> {
          let _operation = session::lock(store)?;
          store.delete(uuid)?;
-@@ -2007,33 +2097,6 @@ pub fn launch(
+@@ -2056,33 +2146,6 @@ pub fn launch(
      }
  }
  
@@ -317,7 +317,7 @@ index 3c13c32011..16f3f87598 100644
  /// Write the session for the game, readable by this user only, in a fresh file it deletes
  /// when it reads it.
  pub fn write_session_file(
-@@ -2291,7 +2354,7 @@ pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
+@@ -2340,7 +2403,7 @@ pub fn session_for_game(game_home: &Path) -> Result<GameSession, NoOwner> {
  /// plays changes for this launch only, so several games can play as several accounts at once
  /// (#4952). What the services renewed (tokens, names, skins) is still kept; which account
  /// `account select` picked is not touched.
@@ -326,7 +326,7 @@ index 3c13c32011..16f3f87598 100644
      let mut accounts = Accounts::load();
      let pass = launch_as(
          &Endpoints::live(),
-@@ -2321,13 +2384,21 @@ fn launch_as(
+@@ -2370,13 +2433,21 @@ fn launch_as(
      client_id: Option<&str>,
      store: &dyn SecretStore,
      accounts: &mut Accounts,
@@ -354,7 +354,7 @@ index 3c13c32011..16f3f87598 100644
  }
  
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 2429453be8..1d1ce36b1d 100644
+index 14b0d21..9c66eae 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -686,80 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
@@ -531,7 +531,7 @@ index 2429453be8..1d1ce36b1d 100644
  /// A secrets file of the test's own, gone first.
  fn secrets_file(name: &str) -> PathBuf {
      let dir = std::env::temp_dir().join(format!("horizon-secrets-{name}-{}", std::process::id()));
-@@ -2266,6 +2236,104 @@ fn targeted_sign_in_preserves_the_selected_account() {
+@@ -2333,6 +2303,104 @@ fn targeted_sign_in_preserves_the_selected_account() {
      assert_eq!(kept(&store).minecraft_token, "renewed");
  }
  
@@ -636,7 +636,7 @@ index 2429453be8..1d1ce36b1d 100644
  #[test]
  fn cancelled_or_removed_targeted_sign_in_keeps_credentials_unchanged() {
      let store = MemoryStore::default();
-@@ -2370,15 +2438,31 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
+@@ -2437,15 +2505,31 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
          skin: None,
          cape: None,
      });
@@ -674,7 +674,7 @@ index 2429453be8..1d1ce36b1d 100644
      assert!(pass.session.is_none() && pass.offline.is_some());
      // An account that isn't in the launcher is refused, and changes nothing either.
      let gone = launch_as(
-@@ -2386,7 +2470,7 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
+@@ -2453,7 +2537,7 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
          Some("test-client"),
          &store,
          &mut accounts,
@@ -684,7 +684,7 @@ index 2429453be8..1d1ce36b1d 100644
      assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
      assert_eq!(accounts.selected.as_deref(), Some(UUID));
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index a02b24bc59..20abb06ef0 100644
+index a02b24b..20abb06 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
 @@ -126,8 +126,35 @@ enum AccountCmd {
@@ -915,7 +915,7 @@ index a02b24bc59..20abb06ef0 100644
      }
      Ok(())
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 07cc6da4b6..77ab6f1765 100644
+index 07cc6da..77ab6f1 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -6,6 +6,7 @@ use super::*;
@@ -972,7 +972,7 @@ index 07cc6da4b6..77ab6f1765 100644
                          })),
                      id,
 diff --git a/launcher/src/home.rs b/launcher/src/home.rs
-index e670d9b028..71719ee44e 100644
+index e670d9b..71719ee 100644
 --- a/launcher/src/home.rs
 +++ b/launcher/src/home.rs
 @@ -243,7 +243,7 @@ impl Launcher {
@@ -985,7 +985,7 @@ index e670d9b028..71719ee44e 100644
              PlayPress::Play => {
                  play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/instances.rs b/launcher/src/instances.rs
-index 2dd022b3a5..4d6da0a10b 100644
+index 2dd022b..4d6da0a 100644
 --- a/launcher/src/instances.rs
 +++ b/launcher/src/instances.rs
 @@ -710,6 +710,34 @@ fn follow_player(game_home: &Path, home: &Path) {
@@ -1024,7 +1024,7 @@ index 2dd022b3a5..4d6da0a10b 100644
  mod switch;
  pub use switch::{switch, unkept, Plays, Unkept};
 diff --git a/launcher/src/lib.rs b/launcher/src/lib.rs
-index 0eb15c6afb..883dbf8716 100644
+index 0eb15c6..883dbf8 100644
 --- a/launcher/src/lib.rs
 +++ b/launcher/src/lib.rs
 @@ -50,6 +50,7 @@ pub mod setup_args;
@@ -1036,7 +1036,7 @@ index 0eb15c6afb..883dbf8716 100644
  pub mod tailscale;
  pub mod telemetry;
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 08618b1260..e58dbbd32c 100644
+index 08618b1..e58dbbd 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -75,6 +75,7 @@ mod switch_page;
@@ -1209,7 +1209,7 @@ index 08618b1260..e58dbbd32c 100644
      fn counts_get_thousands_separators() {
          let shown: Vec<String> = [0, 7, 999, 1000, 12_300, 1_234_500]
 diff --git a/launcher/src/mcp.rs b/launcher/src/mcp.rs
-index 4867e439be..128691529b 100644
+index 4867e43..1286915 100644
 --- a/launcher/src/mcp.rs
 +++ b/launcher/src/mcp.rs
 @@ -210,7 +210,6 @@ impl Session {
@@ -1221,7 +1221,7 @@ index 4867e439be..128691529b 100644
                      "sign_in": sign_in,
                  }))
 diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
-index d274cd229e..7430b2f0e6 100644
+index d274cd2..7430b2f 100644
 --- a/launcher/src/owner_page.rs
 +++ b/launcher/src/owner_page.rs
 @@ -1,15 +1,10 @@
@@ -1326,7 +1326,7 @@ index d274cd229e..7430b2f0e6 100644
          card = match state {
              Shown::Code(uri, user_code) => {
 diff --git a/launcher/src/profile_heads.rs b/launcher/src/profile_heads.rs
-index 8a83d1544a..c8119426ab 100644
+index 8a83d15..c811942 100644
 --- a/launcher/src/profile_heads.rs
 +++ b/launcher/src/profile_heads.rs
 @@ -23,11 +23,59 @@ struct Head {
@@ -1393,7 +1393,7 @@ index 8a83d1544a..c8119426ab 100644
              let url = account.skin.as_ref().map(|s| s.0.clone());
              if self.0.get(&account.uuid).is_some_and(|h| {
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index d0986405d0..942e1fe55e 100644
+index d098640..942e1fe 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -59,6 +59,8 @@ pub(super) enum Field {
@@ -1464,7 +1464,7 @@ index d0986405d0..942e1fe55e 100644
          }
 diff --git a/launcher/src/skin_page.rs b/launcher/src/skin_page.rs
 new file mode 100644
-index 0000000000..d4bcb8a9e6
+index 0000000..d4bcb8a
 --- /dev/null
 +++ b/launcher/src/skin_page.rs
 @@ -0,0 +1,264 @@
@@ -1734,7 +1734,7 @@ index 0000000000..d4bcb8a9e6
 +}
 diff --git a/launcher/src/skins.rs b/launcher/src/skins.rs
 new file mode 100644
-index 0000000000..a70933aa86
+index 0000000..a70933a
 --- /dev/null
 +++ b/launcher/src/skins.rs
 @@ -0,0 +1,183 @@
@@ -1923,7 +1923,7 @@ index 0000000000..a70933aa86
 +mod tests;
 diff --git a/launcher/src/skins/tests.rs b/launcher/src/skins/tests.rs
 new file mode 100644
-index 0000000000..69f957b74f
+index 0000000..69f957b
 --- /dev/null
 +++ b/launcher/src/skins/tests.rs
 @@ -0,0 +1,124 @@
@@ -2052,7 +2052,7 @@ index 0000000000..69f957b74f
 +    std::fs::remove_dir_all(&root).unwrap();
 +}
 diff --git a/launcher/src/switch_page.rs b/launcher/src/switch_page.rs
-index 4062a2e719..c8258dc1a8 100644
+index 4062a2e..c8258dc 100644
 --- a/launcher/src/switch_page.rs
 +++ b/launcher/src/switch_page.rs
 @@ -1,19 +1,30 @@
@@ -2330,7 +2330,7 @@ index 4062a2e719..c8258dc1a8 100644
 +    }
  }
 diff --git a/launcher/tests/owner_gate.rs b/launcher/tests/owner_gate.rs
-index 7c59068c3c..8f263f93b1 100644
+index 7c59068..8f263f9 100644
 --- a/launcher/tests/owner_gate.rs
 +++ b/launcher/tests/owner_gate.rs
 @@ -1,25 +1,18 @@
@@ -2425,3 +2425,6 @@ index 7c59068c3c..8f263f93b1 100644
 +    assert!(!said.contains(REFUSED), "{said}");
      let _ = std::fs::remove_dir_all(&root);
  }
+-- 
+2.47.3
+

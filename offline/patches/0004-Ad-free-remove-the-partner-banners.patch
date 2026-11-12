@@ -1,4 +1,4 @@
-From 0f52f03b5d445e10bd4f42446567c389c7e234d5 Mon Sep 17 00:00:00 2001
+From e4fa8bd7621d51c0f063f8179a4b86d3b7630b1e Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH] Ad-free: remove the partner banners
@@ -12,7 +12,7 @@ Subject: [PATCH] Ad-free: remove the partner banners
  5 files changed, 4 insertions(+), 163 deletions(-)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index e46e6fb723..19c5a4f9ff 100644
+index e46e6fb..19c5a4f 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -4479,13 +4479,6 @@ pub struct Settings {
@@ -30,7 +30,7 @@ index e46e6fb723..19c5a4f9ff 100644
      #[serde(default)]
      pub while_playing: WhilePlaying,
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 77ab6f1765..75c9110082 100644
+index 77ab6f1..75c9110 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -476,36 +476,6 @@ impl Launcher {
@@ -71,7 +71,7 @@ index 77ab6f1765..75c9110082 100644
              let url = self.links.discord.clone();
              foot = foot.child(keyboard(
 diff --git a/launcher/src/glass_servers.rs b/launcher/src/glass_servers.rs
-index 2f1fb53ce2..46b7f3bfbf 100644
+index 2f1fb53..46b7f3b 100644
 --- a/launcher/src/glass_servers.rs
 +++ b/launcher/src/glass_servers.rs
 @@ -66,9 +66,6 @@ impl Launcher {
@@ -132,7 +132,7 @@ index 2f1fb53ce2..46b7f3bfbf 100644
  
  /// The open server's port.
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index e58dbbd32c..09fb744ee4 100644
+index e58dbbd..09fb744 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -55,7 +55,6 @@ mod native_log_page;
@@ -227,7 +227,7 @@ index e58dbbd32c..09fb744ee4 100644
              foot = foot.child(link(
                  "sponsor",
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 942e1fe55e..5c139c6578 100644
+index 942e1fe..5c139c6 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -1450,34 +1450,11 @@ impl Launcher {
@@ -277,3 +277,6 @@ index 942e1fe55e..5c139c6578 100644
      }
  
      fn add_server_folder(&mut self, cx: &mut Context<Self>) {
+-- 
+2.47.3
+
