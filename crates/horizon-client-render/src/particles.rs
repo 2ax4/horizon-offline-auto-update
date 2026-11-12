@@ -526,6 +526,8 @@ pub struct Particle {
     no_render: bool,
     /// Ticked once when created (`CritParticle` constructor).
     pre_tick: bool,
+    /// A Polytone particle with physics, which joins only where its box is clear of blocks.
+    spawn_check: bool,
     /// `Particle.random`: the particle's own generator (`RandomSource.create()`).
     random: LegacyRandom,
     controller: Option<Box<dyn native::Controller>>,
@@ -895,6 +897,7 @@ impl Particle {
             behaviour: Behaviour::Base,
             no_render: false,
             pre_tick: false,
+            spawn_check: false,
             frame_ticks: 0,
             random: LegacyRandom::new(0),
             controller: None,
@@ -1758,28 +1761,6 @@ impl ParticleEngine {
         particle.behaviour = Behaviour::Controlled { translucent };
         particle.controller = Some(Box::new(controller));
         Some(particle)
-    }
-    /// Sets (or clears) the resource packs' Polytone custom particle types.
-    pub fn set_polytone(&mut self, registry: Option<std::sync::Arc<polytone::Registry>>) {
-        let registry = registry.filter(|r| !r.is_empty());
-        let same = match (&self.polytone, &registry) {
-            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.polytone_gpu.clear();
-            self.polytone_overrides = registry
-                .iter()
-                .flat_map(|r| {
-                    ParticleType::ALL.iter().filter_map(|&ty| {
-                        let id = format!("minecraft:{}", ty.name());
-                        r.get(&id).is_some().then_some((ty, id))
-                    })
-                })
-                .collect();
-        }
-        self.polytone = registry;
     }
     /// The quads the last render blends additively (`RenderPipelines` additive, src alpha and
     /// one), for the frame's additive pass.
@@ -3621,13 +3602,14 @@ impl ParticleEngine {
         self.sprite_from_age(&mut q);
         q
     }
-    /// ClientLevel.createFireworks: a Starter (or poofs without explosions).
+    /// ClientLevel.createFireworks: a Starter (or poofs without explosions) with `playSound`.
     pub fn fireworks(
         &mut self,
         at: [f64; 3],
         v: [f64; 3],
         explosions: Vec<FireworkExplosion>,
         camera: [f64; 3],
+        play_sound: bool,
     ) {
         if explosions.is_empty() {
             for _ in 0..self.random.next_int_bound(3).unwrap_or(0) + 2 {
@@ -3651,17 +3633,17 @@ impl ParticleEngine {
             life: 0,
             lifetime,
             twinkle_delay: twinkle,
-            far,
+            sound: play_sound.then_some(far),
         });
     }
     fn tick_starters(&mut self) {
         for mut s in std::mem::take(&mut self.starters) {
-            if s.life == 0 {
+            if s.life == 0 && s.sound.is_some() {
                 let large = s.explosions.len() >= 3
                     || s.explosions
                         .iter()
                         .any(|e| e.shape == FireworkShape::LargeBall);
-                let sound = match (large, s.far) {
+                let sound = match (large, s.sound == Some(true)) {
                     (true, true) => "minecraft:entity.firework_rocket.large_blast_far",
                     (true, false) => "minecraft:entity.firework_rocket.large_blast",
                     (false, true) => "minecraft:entity.firework_rocket.blast_far",
@@ -3704,16 +3686,13 @@ impl ParticleEngine {
                     (c & 255) as f32 / 255.0,
                     ((c >> 24) & 255) as f32 / 255.0,
                 ];
-                self.create(
-                    &ParticleOptions::colored(ParticleType::Flash, rgba),
-                    s.at,
-                    [0.0; 3],
-                );
+                let flash = ParticleOptions::colored(ParticleType::Flash, rgba);
+                self.create(&flash, s.at, [0.0; 3]);
             }
             s.life += 1;
             if s.life > s.lifetime {
-                if s.twinkle_delay {
-                    let sound = if s.far {
+                if s.twinkle_delay && s.sound.is_some() {
+                    let sound = if s.sound == Some(true) {
                         "minecraft:entity.firework_rocket.twinkle_far"
                     } else {
                         "minecraft:entity.firework_rocket.twinkle"
@@ -3846,6 +3825,9 @@ impl ParticleEngine {
         }
         let pending = std::mem::take(&mut self.pending);
         for mut p in pending {
+            if !self.polytone_joins(&p, level) {
+                continue;
+            }
             if p.pre_tick {
                 p.pre_tick = false;
                 self.tick_particle(&mut p, level);
@@ -5054,7 +5036,9 @@ struct Starter {
     life: i32,
     lifetime: i32,
     twinkle_delay: bool,
-    far: bool,
+    /// `FireworkParticles.Starter.playSound`, with `isFarAwayFromCamera` when
+    /// it plays: `None` for a silent rocket.
+    sound: Option<bool>,
 }
 const STAR: [[f64; 2]; 6] = [
     [0.0, 1.0],

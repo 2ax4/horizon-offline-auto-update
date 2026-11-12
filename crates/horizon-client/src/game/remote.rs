@@ -60,8 +60,12 @@ use std::{
 };
 use winit::{event::MouseButton, keyboard::KeyCode};
 
+#[path = "remote_abilities.rs"]
+mod abilities;
 #[path = "remote_poll.rs"]
 mod poll;
+#[path = "remote_tables.rs"]
+mod tables;
 
 type BuiltinCache = Vec<(std::path::PathBuf, Arc<Builtin>)>;
 static BUILTIN: std::sync::Mutex<BuiltinCache> = std::sync::Mutex::new(Vec::new());
@@ -539,9 +543,8 @@ pub(super) struct Remote {
     pub(super) builtin: Arc<Builtin>,
     lang: Arc<Language>,
     pub(super) registries: Arc<Dynamic>,
-    /// The game's enchantments and the server's that it lacks (a data
-    /// pack's), from their synced data; `None` when the server has none.
-    pub(super) enchantments: Option<Arc<horizon_client::enchant::Enchantments>>,
+    /// The game's tables with what the server's synced data puts over them.
+    pub(super) tables: tables::ServerTables,
     pub(super) joined: bool,
     /// `ServerReconfigScreen` is up since this tick.
     pub(super) reconfiguring: Option<u64>,
@@ -1159,7 +1162,7 @@ impl Game<'_> {
                 .unwrap_or_else(|| "Connecting to the server...".into()),
             lang,
             registries: Arc::new(Dynamic::default()),
-            enchantments: None,
+            tables: Default::default(),
             joined: false,
             reconfiguring: None,
             logged_in: false,
@@ -1389,7 +1392,7 @@ impl Game<'_> {
             status: "Playing Studio Replay".into(),
             lang,
             registries: Arc::new(Dynamic::default()),
-            enchantments: None,
+            tables: Default::default(),
             joined: false,
             reconfiguring: None,
             logged_in: true,
@@ -2259,25 +2262,9 @@ impl Game<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        let entries: Vec<(&str, serde_json::Value)> = registries
-            .registries
-            .get("minecraft:enchantment")
-            .into_iter()
-            .flatten()
-            .filter_map(|(name, data)| {
-                Some((
-                    name.as_str(),
-                    horizon_client::scoreboard::tag_to_json(data.as_ref()?),
-                ))
-            })
-            .collect();
-        let enchantments = self
-            .stations()
-            .enchantments
-            .with_entries(entries.iter().map(|(n, v)| (*n, v)))
-            .map(Arc::new);
+        let tables = self.server_tables(&registries);
         if let Some(r) = self.remote.as_mut() {
-            r.enchantments = enchantments;
+            r.tables = tables;
             let bits = ceil_log2(biomes.len());
             let column = r.chunk_format.layout();
             r.chunk_format =
@@ -2414,7 +2401,7 @@ impl Game<'_> {
             .as_ref()
             .is_none_or(|r| r.dimension.has_skylight);
         self.streaming.sky_light = has_sky;
-        self.streaming.nether_shading = self.dim == Dim::Nether;
+        self.streaming.nether_shading = self.nether_lighting();
         // The seed in SpawnInfo is already the hashed one the client's BiomeManager holds.
         self.streaming.biome_zoom = horizon_core::biome::BiomeZoom::new(spawn.seed);
         let player = self.player.as_ref();
@@ -5298,6 +5285,7 @@ impl Game<'_> {
                 self.remote_server_data(p.icon.as_deref());
             }
             C::MapItemData(p) => self.remote_map_item_data(&p),
+            C::UpdateTags(p) => self.remote_update_tags(&p),
             // handleTickingState / handleTickingStep: the level's TickRateManager.
             C::TickingState(p) => {
                 self.clock.set_rate(p.rate);
@@ -6729,20 +6717,6 @@ impl Game<'_> {
         Ok(())
     }
 
-    /// ClientPacketListener.handlePlayerAbilities: the player flies, may fly
-    /// and is invulnerable as the server says (bits 2, 4 and 1).
-    fn apply_remote_abilities(&mut self) {
-        let (Some(player), Some(a)) = (
-            self.player.as_mut(),
-            self.remote.as_ref().and_then(|r| r.abilities.as_ref()),
-        ) else {
-            return;
-        };
-        player.invulnerable = a.flags & 1 != 0;
-        player.flying = a.flags & 2 != 0;
-        player.may_fly = a.flags & 4 != 0;
-        player.flying_speed = a.flying_speed;
-    }
     /// The local player's share of every touching entity's
     /// `LivingEntity.pushEntities`, and of the boats' pushes: on a client
     /// `EntitySelector.pushableBy` lets entities push only the local player,
@@ -6960,7 +6934,7 @@ impl Game<'_> {
         }
         let game_time = self.world.game_time;
         // `AbstractPiglin.isConverting`: the dimension is not piglin safe.
-        let nether = self.dim == super::Dim::Nether;
+        let nether = !self.dimension_type().piglins_zombify;
         // What a wither's side heads can look at, by network entity id: the
         // mobs and the player (position and eye height).
         let wither_targets: Vec<(i32, [f64; 3], f64)> = if self
