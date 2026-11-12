@@ -1,8 +1,8 @@
-From 77544af42818537f83bb807571eb14c3fa3160fa Mon Sep 17 00:00:00 2001
+From 4afca076ed19287e5f40f26340a15fd7f99adf9a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
- prune orphaned translations
+Subject: [PATCH] Restore the 0.2.42 game-architecture CLI setting and prune
+ orphaned translations
 
 ---
  launcher/src/cli.rs  | 4 ++--
@@ -10,7 +10,7 @@ Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
  2 files changed, 3 insertions(+), 3 deletions(-)
 
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index 20abb06..e9929bf 100644
+index 20abb06ef0..e9929bf685 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
 @@ -1347,7 +1347,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
@@ -32,7 +32,7 @@ index 20abb06..e9929bf 100644
              };
              let folder = match folder {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index b311cf8..8a64f94 100644
+index b311cf8923..8a64f943da 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -3152,7 +3152,7 @@ impl Launcher {
@@ -44,6 +44,3 @@ index b311cf8..8a64f94 100644
          );
          // Custom title bars carry the mark and name already.
          let brand = (!titlebar::draws_brand(window)).then(|| {
--- 
-2.47.3
-

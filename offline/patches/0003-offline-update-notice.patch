@@ -1,7 +1,7 @@
-From f3844eaa56795b08883c753246eeb9438acc954a Mon Sep 17 00:00:00 2001
+From c267103bb16030225bf8ea9886ff6842639244f2 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 2/9] Offline updates follow the fork's releases
+Subject: [PATCH] Offline updates follow the fork's releases
 
 ---
  crates/horizon-release-sign/release-keys.txt  |   1 +
@@ -11,7 +11,7 @@ Subject: [PATCH 2/9] Offline updates follow the fork's releases
  4 files changed, 195 insertions(+), 42 deletions(-)
 
 diff --git a/crates/horizon-release-sign/release-keys.txt b/crates/horizon-release-sign/release-keys.txt
-index c39be44..c510154 100644
+index c39be4435e..c510154235 100644
 --- a/crates/horizon-release-sign/release-keys.txt
 +++ b/crates/horizon-release-sign/release-keys.txt
 @@ -3,3 +3,4 @@
@@ -20,7 +20,7 @@ index c39be44..c510154 100644
  MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
 +DfcWSiaD14ScBMxU0btrJMPDSspw+flKz43XoXHSsh4=
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 56bb785..d586d51 100644
+index fc81f2fab2..e46e6fb723 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -1105,7 +1105,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
@@ -98,7 +98,7 @@ index 56bb785..d586d51 100644
      remove_abandoned_stages(&work, std::time::SystemTime::now(), process_alive);
      let stage = new_stage_folder(&work)?;
 diff --git a/launcher/src/backend/release_loading_tests.rs b/launcher/src/backend/release_loading_tests.rs
-index d7f839b..d64487c 100644
+index d7f839bdef..d64487c024 100644
 --- a/launcher/src/backend/release_loading_tests.rs
 +++ b/launcher/src/backend/release_loading_tests.rs
 @@ -42,33 +42,74 @@ fn baseline(load: impl Fn() -> Result<serde_json::Value, String>) -> (Vec<Releas
@@ -281,7 +281,7 @@ index d7f839b..d64487c 100644
              "{label}: before={} after={} ratio={:.3}x requests={}->{}",
              before.0,
 diff --git a/launcher/src/signed.rs b/launcher/src/signed.rs
-index 74e96b6..1f23112 100644
+index 74e96b69b1..1f23112741 100644
 --- a/launcher/src/signed.rs
 +++ b/launcher/src/signed.rs
 @@ -4,18 +4,18 @@
@@ -486,6 +486,3 @@ index 74e96b6..1f23112 100644
 +        .is_err());
      }
  }
--- 
-2.47.3
-

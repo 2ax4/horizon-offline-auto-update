@@ -1,7 +1,7 @@
-From f64a1d18fa02b3b5c343fff1f0e08fa41a31c881 Mon Sep 17 00:00:00 2001
+From 3ace7a518c63d3d4fe1aea5588da5675758e82a4 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 5/9] Play the glass home button without the ownership check
+Subject: [PATCH] Play the glass home button without the ownership check
 
 ---
  launcher/src/glass_home.rs |  2 +-
@@ -9,7 +9,7 @@ Subject: [PATCH 5/9] Play the glass home button without the ownership check
  2 files changed, 10 insertions(+), 21 deletions(-)
 
 diff --git a/launcher/src/glass_home.rs b/launcher/src/glass_home.rs
-index 6bb8d5b..f008603 100644
+index 6bb8d5b06b..f00860349e 100644
 --- a/launcher/src/glass_home.rs
 +++ b/launcher/src/glass_home.rs
 @@ -446,7 +446,7 @@ impl Launcher {
@@ -22,7 +22,7 @@ index 6bb8d5b..f008603 100644
                  let main = match (&update, press) {
                      (Some(_), _) => main.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 09fb744..8d14706 100644
+index 09fb744ee4..8d14706f05 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -2547,13 +2547,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
@@ -79,6 +79,3 @@ index 09fb744..8d14706 100644
      }
  
      /// A server's Join (and every other shortcut) waits like Play: not while the version's
--- 
-2.47.3
-

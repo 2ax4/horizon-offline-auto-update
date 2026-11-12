@@ -1,14 +1,14 @@
-From c21850c1e852ef0982fe4a3bb49cb2771a84bfb4 Mon Sep 17 00:00:00 2001
+From 6d50c0df88650e52a419c7747d733c629ac4dcff Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 9/9] The Wardrobe and the Shop work for an offline name
+Subject: [PATCH] The Wardrobe and the Shop work for an offline name
 
 ---
  launcher/src/wardrobe_page.rs | 128 ++++++++++++++++++++++++++++++++--
  1 file changed, 122 insertions(+), 6 deletions(-)
 
 diff --git a/launcher/src/wardrobe_page.rs b/launcher/src/wardrobe_page.rs
-index cb9d2d4..a369a72 100644
+index cb9d2d451c..a369a72234 100644
 --- a/launcher/src/wardrobe_page.rs
 +++ b/launcher/src/wardrobe_page.rs
 @@ -18,7 +18,9 @@ use crate::glass_ui as ui;
@@ -217,6 +217,3 @@ index cb9d2d4..a369a72 100644
                  // The page itself still stands when the service refuses: say why instead.
                  result: result.or_else(|e| if e.retry_later() { Err(e) } else { Ok(()) }),
              };
--- 
-2.47.3
-
