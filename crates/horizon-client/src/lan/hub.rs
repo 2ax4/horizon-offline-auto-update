@@ -437,7 +437,7 @@ pub struct Hub {
     /// before the level's ChunkMap.tick (`Entities::synced`).
     pub synced: Vec<(i32, i32)>,
     /// What one tick of entity tracking sends each guest, kept between ticks.
-    entity_out: Vec<Vec<Vec<u8>>>,
+    entity_out: Vec<Vec<super::Body>>,
     /// Each placed guest's entities gone this tick, where they were last sent (only while the
     /// prediction records).
     entity_gone: Vec<Vec<[f64; 3]>>,
@@ -789,10 +789,10 @@ impl Hub {
     }
 
     pub fn guest(&self, conn: u32) -> Option<&Guest> {
-        self.guests.iter().find(|g| g.conn == conn)
+        super::guest::find(&self.guests, conn).map(|i| &self.guests[i])
     }
     pub fn guest_mut(&mut self, conn: u32) -> Option<&mut Guest> {
-        self.guests.iter_mut().find(|g| g.conn == conn)
+        super::guest::find(&self.guests, conn).map(|i| &mut self.guests[i])
     }
 
     /// The network id of a name in a built-in or synchronized registry.
@@ -3326,7 +3326,7 @@ impl Hub {
             return;
         }
         let dimension = &self.config.dimension;
-        let mut outs: Vec<Vec<Vec<u8>>> = self
+        let mut outs: Vec<Vec<super::Body>> = self
             .guests
             .iter()
             .filter(|g| self.here(g))
