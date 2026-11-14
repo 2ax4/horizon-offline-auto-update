@@ -1,6 +1,6 @@
 # Shader API reference (0.2)
 
-Generated from `crates/horizon-shader-api` (`HORIZON_WRITE_DOCS=1 cargo test -p horizon-shader-api --test reference`
+Generated from `crates/horizon-shader-api` (`HORIZON_WRITE_DOCS=1 cargo test -p horizon-shader-api --test it reference::`
 rewrites it; the test fails when it drifts). The API's design and pack format: [shaders.md](shaders.md).
 
 **Experimental** ([stability.md](stability.md)): `horizon-shader check` takes 0.2 packs, the game draws them only

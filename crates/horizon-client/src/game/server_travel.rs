@@ -38,6 +38,10 @@ pub(super) struct Trip {
     /// A respawn at this point outside the Overworld, resolved through its
     /// block on arrival.
     respawn: Option<RespawnConfig>,
+    /// Whether that point's block is used up (`findRespawnAndUseSpawnBlock`'s
+    /// `consumeSpawnBlock`): a death does, the credits and an End portal
+    /// leave it as it is.
+    consume: bool,
     /// A respawn at the world spawn, moved onto a free column within the
     /// respawn radius once the chunks around it have loaded.
     world_spawn: bool,
@@ -207,6 +211,7 @@ impl Game<'_> {
             placed: false,
             hold: true,
             left: None,
+            consume: false,
         });
     }
     /// Before the arrivals: a hold follows the player where a mod sent them (`native_player_teleport` may cancel
@@ -361,8 +366,17 @@ impl Game<'_> {
                 let from_end = self.dim == Dim::End;
                 // Entity.canTeleport: out of the End only after the credits.
                 if !from_end || seen_credits {
-                    let target = if from_end { Dim::Overworld } else { Dim::End };
+                    // EndPortalBlock.getPortalDestination: into the End from
+                    // anywhere else, out of it to the player's own point, in
+                    // the level the config names
+                    // (`findRespawnPositionAndUseSpawnBlock`, not used up).
+                    let (target, respawn) = if from_end {
+                        self.end_departure(host, conn)
+                    } else {
+                        (Dim::End, None)
+                    };
                     self.start_server_trip(host, conn, target, None, false);
+                    self.trip_respawn(conn, respawn);
                 }
             }
             _ => self.start_gateway_trip(host, conn, pos),
@@ -402,6 +416,25 @@ impl Game<'_> {
         !cancel
     }
 
+    /// The level a player leaving the End goes to, and the respawn point it
+    /// resolves there: the point's own level
+    /// (`ServerPlayer.RespawnConfig.getDimensionOrDefault`), else the
+    /// Overworld's.
+    fn end_departure(&mut self, host: &mut LanHost, conn: u32) -> (Dim, Option<RespawnConfig>) {
+        let config = self.as_guest(host, conn, |g| g.respawn_config).flatten();
+        (config.map_or(Dim::Overworld, |c| c.dim), config)
+    }
+
+    /// The respawn point of the trip a player has just started: its block is
+    /// resolved once the level it names has loaded (`arrive_server_trips`).
+    fn trip_respawn(&mut self, conn: u32, respawn: Option<RespawnConfig>) {
+        if let Some(config) = respawn
+            && let Some(trip) = self.server_trips.iter_mut().find(|t| t.is(conn))
+        {
+            trip.respawn = Some(config);
+        }
+    }
+
     /// `Entity.handlePortal` for one player, whose portal state is in place.
     fn handle_server_portal(&mut self, host: &mut LanHost, conn: u32) {
         let Some(g) = host.hub.guest(conn) else {
@@ -427,7 +460,12 @@ impl Game<'_> {
                 .get(&conn)
                 .is_some_and(|play| play.respawn_requested)
             {
-                if !self.server_player_portal_allowed(host, conn, Dim::Overworld, "end_portal") {
+                // PlayerList.respawn(keepAllPlayerData = true) and
+                // EndPortalBlock.getPortalDestination for a player out of the
+                // End: its own point, in the level the config names
+                // (`findRespawnPositionAndUseSpawnBlock`), not used up.
+                let (target, respawn) = self.end_departure(host, conn);
+                if !self.server_player_portal_allowed(host, conn, target, "end_portal") {
                     return;
                 }
                 if let Some(play) = host.play.get_mut(&conn) {
@@ -440,7 +478,8 @@ impl Game<'_> {
                     let (uuid, name) = (g.uuid, g.name.clone());
                     self.native_player_clone(uuid, &name, false);
                 }
-                self.start_server_trip(host, conn, Dim::Overworld, None, true);
+                self.start_server_trip(host, conn, target, None, true);
+                self.trip_respawn(conn, respawn);
                 self.portals.player.cooldown = 10;
             }
             return;
@@ -464,15 +503,20 @@ impl Game<'_> {
                 return;
             }
             if self.portals.player.cooldown == 0 {
-                let target = if self.dim == Dim::End {
-                    Dim::Overworld
+                // EndPortalBlock.getPortalDestination: into the End from
+                // anywhere else, out of it to the player's own point, in the
+                // level the config names (`findRespawnPositionAndUseSpawnBlock`,
+                // not used up).
+                let (target, respawn) = if self.dim == Dim::End {
+                    self.end_departure(host, conn)
                 } else {
-                    Dim::End
+                    (Dim::End, None)
                 };
                 if !self.server_player_portal_allowed(host, conn, target, "end_portal") {
                     return;
                 }
                 self.start_server_trip(host, conn, target, None, false);
+                self.trip_respawn(conn, respawn);
             }
             // Entity.setAsInsidePortal while cooling down restarts the cooldown.
             self.portals.player.cooldown = 10;
@@ -660,11 +704,19 @@ impl Game<'_> {
             g.loading = true;
         }
         self.as_guest(host, conn, |g| {
-            g.trigger_dimension(source, target, [from.x, from.y, from.z]);
-            // ServerPlayer.teleport: stopUsingItem after the dimension change triggers; the
-            // End credits make a new player instead.
-            if !credits_respawn && source != target {
-                g.stop_using();
+            if credits_respawn {
+                // ServerGamePacketListenerImpl.handleClientCommand:
+                // CHANGED_DIMENSION with END → OVERWORLD, whatever level the
+                // point is in (`PlayerList.respawn` is no teleport, so the
+                // entered Nether position stays as it was). The End credits
+                // make a new player, so nothing stops its item use here.
+                g.trigger_changed_dimension(Dim::End, Dim::Overworld);
+            } else {
+                g.trigger_dimension(source, target, [from.x, from.y, from.z]);
+                // ServerPlayer.teleport: stopUsingItem after the dimension change triggers.
+                if source != target {
+                    g.stop_using();
+                }
             }
         });
         self.server_trips.push(Trip {
@@ -677,6 +729,7 @@ impl Game<'_> {
             vehicle,
             gateway: None,
             respawn: None,
+            consume: false,
             world_spawn: false,
             finder: None,
             placed: false,
@@ -702,6 +755,7 @@ impl Game<'_> {
             vehicle: None,
             gateway: None,
             respawn: Some(config),
+            consume: true,
             world_spawn: false,
             finder: None,
             placed: false,
@@ -712,17 +766,22 @@ impl Game<'_> {
 
     /// `findRespawnAndUseSpawnBlock` for the player in place, at its point
     /// in the level in place: where it stands up, facing the anchor (with
-    /// the deplete sound) or the bed; else the point is forgotten, and the
-    /// caller tells the player (`Hub::missing_respawn_block`).
+    /// the deplete sound, `PlayerList.respawn`'s, when the block is used up)
+    /// or the bed; else the point is forgotten, and the caller tells the
+    /// player (`Hub::missing_respawn_block`).
     pub(super) fn resolve_server_respawn(
         &mut self,
         config: RespawnConfig,
+        consume: bool,
     ) -> Option<(Vec3, f32, f32)> {
         let [x, y, z] = config.pos;
         let anchor = self.is_anchor(self.world.block(x, y, z));
-        match self.find_respawn_and_use(config, true) {
+        match self.find_respawn_and_use(config, consume) {
             Ok(Some((at, yaw, pitch))) => {
-                if !config.forced && anchor {
+                if consume && anchor {
+                    // PlayerList.respawn: the deplete sound has no `forced`
+                    // test, so a point `/spawnpoint` kept plays it too; a
+                    // return from the End credits keeps all data and skips it.
                     let [x, y, z] = config.pos.map(f64::from);
                     self.audio.play(
                         "minecraft:block.respawn_anchor.deplete",
@@ -774,6 +833,7 @@ impl Game<'_> {
             vehicle: None,
             gateway: None,
             respawn: None,
+            consume: false,
             world_spawn: true,
             finder: None,
             placed: false,
@@ -826,6 +886,7 @@ impl Game<'_> {
             vehicle: None,
             gateway: Some(job),
             respawn: None,
+            consume: false,
             world_spawn: false,
             finder: None,
             placed: false,
@@ -879,7 +940,9 @@ impl Game<'_> {
             self.resolve_arrivals();
             let yaw = host.hub.guests[i].yaw;
             let (position, yaw) = if let Some(config) = trip.respawn {
-                match self.as_guest(host, trip.conn, |g| g.resolve_server_respawn(config)) {
+                match self.as_guest(host, trip.conn, |g| {
+                    g.resolve_server_respawn(config, trip.consume)
+                }) {
                     Some(Some((at, yaw, pitch))) => {
                         host.hub.guests[i].pitch = pitch;
                         (at, yaw)
@@ -1121,6 +1184,7 @@ impl Game<'_> {
                 vehicle: None,
                 gateway: None,
                 respawn: None,
+                consume: false,
                 world_spawn: false,
                 finder: None,
                 placed: true,
@@ -1241,7 +1305,11 @@ mod tests {
 #[cfg(test)]
 mod credits_respawn_tests {
     use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
-    use horizon_client::lan::{Joined, NetConfig, PlayerSender, guest::Guest, hub::HubConfig};
+    use horizon_client::lan::{
+        Joined, NetConfig, PlayerSender,
+        guest::{Guest, SPECTATOR},
+        hub::HubConfig,
+    };
     use horizon_protocol::packets::configuration::ClientInformation;
     use std::sync::{Arc, atomic::AtomicI32, mpsc};
 
@@ -1353,6 +1421,180 @@ mod credits_respawn_tests {
         assert_eq!(guest.load_timeout, 60);
         assert!(guest.loading);
         assert!(!guest.client_loaded());
+        drop(host);
+        drop(game);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// The player's own point in the tests here: a respawn anchor in the Nether.
+    const ANCHOR: [i32; 3] = [10, 100, 10];
+
+    /// A server on a scratch world with one guest, placed in the Overworld,
+    /// whose own point is a respawn anchor in the Nether.
+    fn server_with_a_nether_anchor() -> (Game<'static>, super::LanHost, std::path::PathBuf) {
+        let mut game = crate::game::native_machines::tests::server_game();
+        let scratch = std::env::temp_dir().join(format!(
+            "horizon-credits-anchor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        game.world_root = scratch.clone();
+        // The world spawn a player without a point of its own comes back to.
+        game.level.world_spawn = Some([0, 100, 0]);
+        game.lan_host(
+            super::super::lan::LanSettings {
+                port: 0,
+                guest_commands: true,
+                force_game_mode: false,
+            },
+            NetConfig {
+                announce: false,
+                ..NetConfig::loopback(0, "credits-anchor-test".into(), 2)
+            },
+            HubConfig {
+                default_game_mode: 0,
+                guest_commands: true,
+                force_game_mode: false,
+                hardcore: false,
+                view_distance: 2,
+                simulation_distance: 2,
+                dimension: "minecraft:overworld".into(),
+                allow_flight: false,
+                seed: 0,
+                max_players: 2,
+                integrated: false,
+                levels: Default::default(),
+            },
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut guest = Guest::new(
+            Joined {
+                conn: 2,
+                uuid: 330,
+                name: "CreditsGuest".into(),
+                properties: Vec::new(),
+                info: ClientInformation::new(2),
+                brand: "test".into(),
+                sender: PlayerSender::new(tx, Arc::default()),
+                latency: Arc::new(AtomicI32::new(0)),
+                address: "127.0.0.1:25565".parse().unwrap(),
+                expected: false,
+                configured: Default::default(),
+            },
+            2,
+            [0.5, 100.0, 0.5],
+            2,
+        );
+        guest.dimension = "minecraft:overworld".into();
+        guest.placed = true;
+        guest.loaded = true;
+        guest.loading = false;
+        guest.load_timeout = 0;
+        guest.respawn_elsewhere = Some(("minecraft:the_nether".into(), ANCHOR, 0.0, 0.0, false));
+        let mut host = game.lan.take().unwrap();
+        host.hub.guests.push(guest);
+        (game, host, scratch)
+    }
+
+    /// A player whose own point is a charged Nether anchor and who has seen the
+    /// credits comes back at that anchor, in the Nether, and the anchor keeps
+    /// its charge: `PlayerList.respawn(keepAllPlayerData = true)` resolves the
+    /// point in the config's own level and does not use the block up
+    /// (`ServerPlayer.findRespawnPositionAndUseSpawnBlock(false, ..)`).
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn the_credits_respawn_returns_to_a_nether_anchor_and_keeps_its_charge() {
+        use horizon_client::chunk::Chunk;
+        let (mut game, mut host, scratch) = server_with_a_nether_anchor();
+        let play = host.play.entry(2).or_default();
+        play.won_game = true;
+        play.respawn_requested = true;
+
+        game.handle_server_portal(&mut host, 2);
+        assert_eq!(
+            host.hub.guests[0].dimension, "minecraft:the_nether",
+            "the credits respawn goes to the config's level, not the Overworld's"
+        );
+
+        // The Nether loads around the anchor, which holds one charge.
+        game.enter_level(Some(&mut host), super::Dim::Nether)
+            .unwrap();
+        for x in -2..=2 {
+            for z in -2..=2 {
+                game.streaming
+                    .insert_remote(&mut game.world, Chunk::empty(x, z));
+            }
+        }
+        let charged = {
+            let registry = game.pack.assets.registry;
+            let id = registry.default_state("minecraft:respawn_anchor").unwrap();
+            let mut value = registry.state(id).unwrap().clone();
+            value.properties.insert("charges".into(), "1".into());
+            registry.resolve(&value).unwrap()
+        };
+        game.world
+            .set(ANCHOR[0], ANCHOR[1], ANCHOR[2], charged)
+            .unwrap();
+        game.tick_server_travel(&mut host);
+
+        // RespawnAnchorBlock.findStandUpPosition: the block's top is the only
+        // spot with a floor under it here (`DismountHelper.findSafeDismountLocation`).
+        assert_eq!(
+            host.hub.guests[0].position,
+            [10.5, 101.0, 10.5],
+            "the player stands on its anchor"
+        );
+        assert_eq!(
+            game.world.block(ANCHOR[0], ANCHOR[1], ANCHOR[2]),
+            charged,
+            "the anchor keeps its charge"
+        );
+        // PlayerList.respawn copies the point when its block resolved.
+        assert_eq!(
+            host.hub.guests[0].respawn_elsewhere.as_ref().map(|r| r.1),
+            Some(ANCHOR),
+            "the point stays the player's own"
+        );
+        assert!(!game.on_server_trip(2), "the trip has arrived");
+        drop(host);
+        drop(game);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// A spectator that right-clicks the exit portal in the End leaves for the
+    /// level of its own point, not the Overworld: a spectator is a
+    /// `ServerPlayer`, so `EndPortalBlock.getPortalDestination` resolves its
+    /// point too (`findRespawnPositionAndUseSpawnBlock(false, ..)`).
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_spectator_leaves_the_end_for_its_nether_point() {
+        use horizon_client::chunk::Chunk;
+        let (mut game, mut host, scratch) = server_with_a_nether_anchor();
+        {
+            let g = &mut host.hub.guests[0];
+            g.game_mode = SPECTATOR;
+            g.seen_credits = true;
+            g.dimension = "minecraft:the_end".into();
+        }
+        game.enter_level(Some(&mut host), super::Dim::End).unwrap();
+        game.streaming
+            .insert_remote(&mut game.world, Chunk::empty(0, 0));
+        let portal = [0, 100, 0];
+        assert!(
+            game.set_state_named(portal, "minecraft:end_portal", &[])
+                .unwrap()
+        );
+        assert!(game.spectator_use_portal(&mut host, 2, 0, portal));
+        assert_eq!(
+            host.hub.guests[0].dimension, "minecraft:the_nether",
+            "a spectator's exit from the End goes to its point's level"
+        );
+        assert!(game.on_server_trip(2), "the player is on its way there");
         drop(host);
         drop(game);
         std::fs::remove_dir_all(scratch).unwrap();

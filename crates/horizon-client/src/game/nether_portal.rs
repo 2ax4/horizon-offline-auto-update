@@ -12,6 +12,7 @@
 use super::entity::{Entity as _, entity_lists_of, for_each_entity, with_entity};
 use super::{Dim, Game, Result, Screen, level_flags};
 use horizon_client::fast_hash::FxHashMap;
+use horizon_client::mobs::{Species, spawn_rules};
 use horizon_client::nether_portal::{ENTITY_DELAY, PortalState};
 use horizon_client::world::PendingEntity;
 use horizon_core::{
@@ -30,6 +31,10 @@ use horizon_world::{
 use std::collections::HashMap;
 
 mod respawn_attributes;
+
+#[cfg(test)]
+#[path = "portal_spawn_tests.rs"]
+mod portal_spawn_tests;
 
 /// `Player.getDimensionChangingDelay`.
 pub(super) const PLAYER_DELAY: i32 = 10;
@@ -814,6 +819,49 @@ impl Game<'_> {
                 process: None,
             },
         );
+    }
+    /// The rest of `NetherPortalBlock.randomTick` after a won roll: with a
+    /// player close enough for spawning, a zombified piglin spawns on the block
+    /// under the portal column when it is a valid spawn, plays its ambient
+    /// sound (`EntityType.spawn`) and waits out a portal cooldown.
+    pub(super) fn portal_spawn(&mut self, pos: [i32; 3]) {
+        // ChunkMap.anyPlayerCloseEnoughForSpawning: a non-spectator within 128
+        // blocks of the chunk centre.
+        let centre = [
+            f64::from((pos[0] >> 4) * 16 + 8),
+            f64::from((pos[2] >> 4) * 16 + 8),
+        ];
+        let close = self.level_players().iter().any(|p| {
+            let (dx, dz) = (p.position.x - centre[0], p.position.z - centre[1]);
+            !p.spectator && dx * dx + dz * dz < 16384.0
+        });
+        if !close {
+            return;
+        }
+        let facts = self.res.facts();
+        let mut y = pos[1];
+        while &*facts.get(self.world.block(pos[0], y, pos[2])).name == "minecraft:nether_portal" {
+            y -= 1;
+        }
+        // `BlockState.isValidSpawn(level, pos, ZOMBIFIED_PIGLIN)`: the same
+        // per-state table the natural spawns read, so glowstone's 15 light and
+        // bedrock's `isValidSpawn(never)` both refuse it.
+        let w = self.mob_world_base(&[]);
+        if !spawn_rules::is_valid_spawn(Species::ZombifiedPiglin, &w, pos[0], y, pos[2]) {
+            return;
+        }
+        let at = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(y + 1),
+            f64::from(pos[2]) + 0.5,
+        ];
+        if let Some(id) = self.spawn_mob("minecraft:zombified_piglin", at, false) {
+            // `EntityType.spawn` calls `Mob.playAmbientSound` once the mob is in
+            // the level, before the cooldown below.
+            let _ = self.mob_ambient(id);
+            // setPortalCooldown: the new piglin does not travel at once.
+            self.set_portal_cooldown(id);
+        }
     }
     /// `canUsePortal(false)` of a mob: what the mob itself decides
     /// (`mobs::mob_can_use_portal`), riding nothing, not asleep, and not

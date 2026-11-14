@@ -323,7 +323,15 @@ struct Grid {
 }
 
 impl Menu {
-    /// `on_take` for a quick-moved slot. A merchant result reports the stack it moved. A
+    /// `ItemStack.onCraftedBy`'s count for `n` of `stack` (AIR for an emptied quick move).
+    pub(super) fn crafted_by(&mut self, stack: &ItemStack, n: i32) {
+        let empty = stack.count == 0;
+        let item = if empty { "minecraft:air" } else { &*stack.item };
+        self.crafted_counts.push((item.into(), n));
+    }
+
+    /// `on_take` for a quick-moved slot. A merchant, stonecutter or smithing result reports the
+    /// stack its move left behind (`StonecutterMenu`/`ItemCombinerMenu.quickMoveStack`). A
     /// crafting result reports the copy it takes (which Item.onCraftedBy may still change)
     /// minus what stayed behind: `ResultSlot.onQuickCraft` counts only the items that moved.
     pub(super) fn take_after_quick_move(
@@ -333,7 +341,10 @@ impl Menu {
         clicked: &mut ItemStack,
         stack: &mut ItemStack,
     ) {
-        if self.slots[index].role == super::Role::MerchantResult {
+        let role = self.slots[index].role;
+        let rest = matches!(role, super::Role::MerchantResult | super::Role::StoneResult)
+            || (role == super::Role::CombineResult && self.kind == Kind::Smithing);
+        if rest {
             return self.on_take(env, index, stack);
         }
         let left = if self.slots[index].role == super::Role::CraftResult {

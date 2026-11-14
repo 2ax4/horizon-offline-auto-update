@@ -14,6 +14,10 @@ use std::{
 #[path = "phantom_spawn_tests.rs"]
 mod phantom_spawn_tests;
 
+#[cfg(test)]
+#[path = "stat_award_tests.rs"]
+mod stat_award_tests;
+
 /// `stats[type][key]`, with `type` and `key` namespaced ids.
 #[derive(Default)]
 pub(super) struct Stats {

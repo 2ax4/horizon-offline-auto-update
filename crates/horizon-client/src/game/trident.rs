@@ -3,7 +3,7 @@
 //! 8 damage plus Impaling, the reversed bounce off a hit, sticking, Loyalty's
 //! return to the owner, pickup) with `ThrownTridentRenderer`, and Channeling's
 //! lightning on a hit (`channeling.json`).
-use super::{Game, view_vector};
+use super::{Game, commands::Target, minecarts::CartHit, view_vector};
 use horizon_client::{
     arrows::{Pickup, back_off, clip_block_hit},
     collisions::SceneCollisions,
@@ -1096,7 +1096,11 @@ impl Game<'_> {
                         if let Some(i) = self.boats.iter().position(|b| b.id == id) {
                             self.hurt_boat(i, damage, creative);
                         } else if let Some(i) = self.carts.iter().position(|c| c.id == id) {
-                            self.hurt_cart(i, damage, creative, false);
+                            // `damageSources().trident(this, owner)`: the
+                            // trident is the direct entity, so no piglin anger.
+                            let by = t.guest.map_or(Target::Player, Target::Guest);
+                            let hit = CartHit::attributed(Some(by));
+                            self.hurt_cart(i, damage, creative, false, hit);
                         } else {
                             // ItemFrame.hurtServer: the item comes out, or the frame breaks.
                             self.projectile_hurts_frame(id, true, creative);

@@ -766,7 +766,6 @@ impl Game<'_> {
         origin: [f64; 3],
     ) -> Vec<(Target, f64)> {
         let level = self.experience.level;
-        let creative = self.creative;
         // EntitySelector tests the type before any predicate. With no scores=
         // or team= (whose holders may be made as they are read), the rest of
         // the extra filter is a pure test of each candidate, so the ones of
@@ -798,7 +797,7 @@ impl Game<'_> {
                     return None;
                 }
                 for (name, neg) in &s.names {
-                    let n = self.target_name(t).plain();
+                    let n = self.target_plain_name(t);
                     if (n == *name) == *neg {
                         return None;
                     }
@@ -807,7 +806,8 @@ impl Game<'_> {
                     return None;
                 }
                 let player = match t {
-                    Target::Player => Some((level, if creative { "creative" } else { "survival" })),
+                    // ServerPlayer.gameMode: the real mode, not `creative`.
+                    Target::Player => Some((level, self.mode.name())),
                     Target::Guest(conn) => self.guest_level_and_mode(conn),
                     _ => None,
                 };
@@ -1471,7 +1471,7 @@ impl Game<'_> {
                             item.target = uuid;
                         }
                     } else {
-                        let r = &mut g.world.random;
+                        let mut r = horizon_client::random_source::entity(); // player.getRandom()
                         let pitch = ((r.next_float() - r.next_float()) * 0.7 + 1.0) * 2.0;
                         g.audio
                             .play("minecraft:entity.item.pickup", Some(p), 0.2, pitch);
@@ -2065,38 +2065,6 @@ impl Game<'_> {
         };
         self.feedback(message);
         Ok(targets.len() as i32)
-    }
-    /// `ServerClockManager.getInstance`: commands address clock-keyed state.
-    /// Keep the existing Overworld clock tied to the world's canonical day time.
-    pub(super) fn command_clock_time(&self, clock: &str) -> i64 {
-        if clock == "minecraft:overworld" {
-            self.world.day_time
-        } else {
-            self.ui.command_clocks.get(clock).map_or(0, |c| c.0)
-        }
-    }
-    pub(super) fn set_command_clock_time(&mut self, clock: &str, total: i64) {
-        if clock == "minecraft:overworld" {
-            self.world.day_time = total;
-        } else {
-            self.ui
-                .command_clocks
-                .entry(clock.to_owned())
-                .or_default()
-                .0 = total;
-        }
-    }
-    pub(super) fn command_clock_state(&mut self, clock: &str) -> &mut super::chat::WorldClock {
-        if clock == "minecraft:overworld" {
-            &mut self.ui.clock
-        } else {
-            &mut self
-                .ui
-                .command_clocks
-                .entry(clock.to_owned())
-                .or_default()
-                .1
-        }
     }
     /// `TimeCommand.getDefaultClock`: explicit registered clocks and dimension defaults are
     /// separate; built-in timelines and markers belong only to Overworld.
@@ -2734,7 +2702,7 @@ impl Game<'_> {
             return Err(err("commands.setblock.failed", &[]));
         }
         let current = self.world.block(pos[0], pos[1], pos[2]);
-        if ctx.has("keep") && current != self.world.air {
+        if ctx.has("keep") && !self.res.facts().is_air(current) {
             return Err(err("commands.setblock.failed", &[]));
         }
         // SetBlockCommand.setBlock skips placement when destruction already
@@ -2971,7 +2939,6 @@ impl Game<'_> {
             return Err(err("commands.fill.failed", &[]));
         }
         let state = self.block_state(&block)?;
-        let air = self.world.air;
         let (hollow, outline, destroy, strict, keep) = (
             ctx.has("hollow"),
             ctx.has("outline"),
@@ -2998,7 +2965,7 @@ impl Game<'_> {
             for z in min[2]..=max[2] {
                 for x in min[0]..=max[0] {
                     let current = self.world.block(x, y, z);
-                    if keep && current != air {
+                    if keep && !self.res.facts().is_air(current) {
                         continue;
                     }
                     // Already the block it would become: nothing to place (place_state would do nothing either).
@@ -3032,7 +2999,7 @@ impl Game<'_> {
                         || z == min[2]
                         || z == max[2];
                     let mut affected = false;
-                    if destroy && current != air {
+                    if destroy && !self.res.facts().is_air(current) {
                         self.destroy_block_dropping([x, y, z])?;
                         affected = true;
                     }
@@ -3044,7 +3011,7 @@ impl Game<'_> {
                             }
                             continue;
                         }
-                        air
+                        self.world.air
                     } else {
                         state
                     };
@@ -3222,7 +3189,6 @@ impl Game<'_> {
             Some(Arg::Block(f)) => Some(f.clone()),
             _ => None,
         };
-        let air = self.world.air;
         let masked = ctx.has("masked");
         self.clone_enter(from_dim)?;
         let mut copies = Vec::new();
@@ -3230,7 +3196,7 @@ impl Game<'_> {
             for z in min[2]..=max[2] {
                 for x in min[0]..=max[0] {
                     let s = self.world.block(x, y, z);
-                    if masked && s == air {
+                    if masked && self.res.facts().is_air(s) {
                         continue;
                     }
                     if let Some(f) = &filter
@@ -3254,7 +3220,7 @@ impl Game<'_> {
         }
         if moving {
             for (from, ..) in &copies {
-                self.place_state(*from, air, true, false)?;
+                self.place_state(*from, self.world.air, true, false)?;
             }
         }
         self.clone_enter(to_dim)?;
@@ -3296,33 +3262,11 @@ impl Game<'_> {
         }
         Ok(count)
     }
-    /// Player.giveExperiencePoints including negative amounts.
-    /// The caller reports the level change to the mods.
+    /// Player.giveExperiencePoints including negative amounts, which
+    /// `Experience::give` walks down a level at a time. The caller reports the
+    /// level change to the mods.
     fn give_points(&mut self, amount: i32) {
-        let e = &mut self.experience;
-        let mut sound_level = None;
-        e.progress += amount as f32 / horizon_client::entities::Experience::needed(e.level) as f32;
-        e.total = e.total.saturating_add(amount).clamp(0, i32::MAX);
-        while e.progress < 0.0 {
-            let f = e.progress * horizon_client::entities::Experience::needed(e.level) as f32;
-            if e.level > 0 {
-                e.level -= 1;
-                e.progress = 1.0 + f / horizon_client::entities::Experience::needed(e.level) as f32;
-            } else {
-                e.level = 0;
-                e.progress = 0.0;
-            }
-        }
-        while e.progress >= 1.0 {
-            e.progress =
-                (e.progress - 1.0) * horizon_client::entities::Experience::needed(e.level) as f32;
-            e.level += 1;
-            if e.level % 5 == 0 {
-                sound_level.get_or_insert(e.level);
-            }
-            e.progress /= horizon_client::entities::Experience::needed(e.level) as f32;
-        }
-        if let Some(level) = sound_level {
+        if let Some(level) = self.experience.give(amount) {
             self.play_level_up(1, level);
         }
     }
@@ -4276,30 +4220,7 @@ impl Game<'_> {
             _ => String::new(),
         };
         let message = self.expand_selectors(&raw);
-        // CommandSourceStack.getDisplayName: the executing entity's name.
-        let name = match self.command_source {
-            Some(source) => match source.entity {
-                Some(target) => self.target_name(target),
-                None => source
-                    .block
-                    .and_then(|pos| match self.world.block_entities.get(&pos) {
-                        Some(horizon_client::containers::BlockEntity::CommandBlock(block)) => {
-                            Some(block.name())
-                        }
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        source.cart.and_then(|id| {
-                            self.carts
-                                .iter()
-                                .find(|cart| cart.id == id)
-                                .map(|cart| cart.command.name())
-                        })
-                    })
-                    .unwrap_or_else(|| self.server_name()),
-            },
-            None => self.player_display_name(),
-        };
+        let name = self.source_display_name();
         // A player's command whose output is captured (a function, `execute …
         // run say`, the command harness) gets the announcement with that
         // output, in order; everyone else gets the broadcast.
@@ -4475,6 +4396,8 @@ fn difficulty_names(from: u8, to: u8) -> (&'static str, &'static str) {
     )
 }
 
+#[cfg(test)]
+mod air_filter_tests;
 #[cfg(test)]
 mod teleport_pitch_tests {
     #[test]

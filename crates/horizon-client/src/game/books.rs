@@ -498,16 +498,17 @@ impl Game<'_> {
                 _ => {}
             },
             Some(BookScreen::Edit { signing: true, .. }) => match key {
-                Some(KeyCode::Escape) => {
-                    if let Some(BookScreen::Edit { signing, .. }) = self.book.as_mut() {
-                        *signing = false;
-                    }
-                }
+                // `BookSignScreen` overrides neither `onClose` nor
+                // `shouldCloseOnEsc`: Escape is `Screen.onClose`, which closes
+                // the whole book and saves nothing.
+                Some(KeyCode::Escape) => self.close_book(),
+                // `BookSignScreen.keyPressed` signs whenever the title box is
+                // not empty, blank or not, and trims the title on send.
                 Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
-                    let blank = self.book.as_ref().is_some_and(
-                        |b| matches!(b, BookScreen::Edit { title, .. } if title.trim().is_empty()),
+                    let empty = self.book.as_ref().is_some_and(
+                        |b| matches!(b, BookScreen::Edit { title, .. } if title.is_empty()),
                     );
-                    if !blank {
+                    if !empty {
                         self.save_book(true);
                     }
                 }
@@ -519,7 +520,10 @@ impl Game<'_> {
                 }
             },
             Some(BookScreen::Edit { .. }) => match key {
-                Some(KeyCode::Escape) => self.save_book(false),
+                // `BookEditScreen` overrides neither `onClose` nor
+                // `shouldCloseOnEsc` either: Escape is `Screen.onClose`, and
+                // only Done calls `saveChanges`.
+                Some(KeyCode::Escape) => self.close_book(),
                 Some(KeyCode::PageUp) => self.turn_page(false),
                 Some(KeyCode::PageDown) => self.turn_page(true),
                 Some(KeyCode::ArrowUp) => self.book_move_line(-1),
@@ -1839,6 +1843,10 @@ mod lectern_books_tag_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "book_escape_tests.rs"]
+mod book_escape_tests;
 
 #[cfg(test)]
 #[path = "lectern_tests.rs"]

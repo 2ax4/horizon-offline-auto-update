@@ -42,6 +42,9 @@ pub struct Interaction {
     pub sound: Option<&'static str>,
     /// The custom statistic the player earns (`use_cauldron`, ...).
     pub stat: Option<&'static str>,
+    /// `player.awardStat(Stats.ITEM_USED.get(itemInHand.getItem()))` after
+    /// `stat`: the bottle and bucket interactions count the item as used.
+    pub item_used: bool,
     /// `lowerFillLevel` posts BLOCK_CHANGE with the new state.
     pub lower_fill_level: bool,
     /// The `Level.gameEvent` the interaction ends with, after its sound:
@@ -66,6 +69,7 @@ fn pass() -> Interaction {
         block: None,
         sound: None,
         stat: None,
+        item_used: false,
         lower_fill_level: false,
         fluid_event: None,
     }
@@ -142,6 +146,7 @@ fn changed(block: BlockState, sound: Option<&'static str>, stat: &'static str) -
         block: Some(block),
         sound,
         stat: Some(stat),
+        item_used: false,
         lower_fill_level: false,
         fluid_event: None,
     }
@@ -161,6 +166,12 @@ impl Interaction {
     /// The same answer, ending with the interaction's `Level.gameEvent`.
     fn with_event(mut self, event: &'static str) -> Self {
         self.fluid_event = Some(event);
+        self
+    }
+
+    /// The same answer, also counting the held item as used.
+    fn using_item(mut self) -> Self {
+        self.item_used = true;
         self
     }
 }
@@ -231,11 +242,14 @@ pub fn interact(
             Some(sound),
             "use_cauldron",
         )
+        .using_item()
         .with_event("minecraft:fluid_pickup")
     };
     let empty_bucket = |player: &mut dyn Player, block: BlockState, sound| {
         filled(player, ItemStack::new("minecraft:bucket", 1), true);
-        changed(block, Some(sound), "fill_cauldron").with_event("minecraft:fluid_place")
+        changed(block, Some(sound), "fill_cauldron")
+            .using_item()
+            .with_event("minecraft:fluid_place")
     };
     match item {
         "minecraft:lava_bucket" => {
@@ -280,6 +294,7 @@ pub fn interact(
                 Some("minecraft:item.bottle.empty"),
                 "use_cauldron",
             )
+            .using_item()
             .with_event("minecraft:fluid_place")
         }
         ("water", "minecraft:bucket") => fill_bucket(
@@ -295,6 +310,7 @@ pub fn interact(
                 true,
             );
             changed_lowered(cauldron, Some("minecraft:item.bottle.fill"), "use_cauldron")
+                .using_item()
                 .with_event("minecraft:fluid_pickup")
         }
         ("water", "minecraft:potion") => {
@@ -307,6 +323,7 @@ pub fn interact(
             next.properties
                 .insert("level".into(), (level % 3 + 1).to_string());
             changed(next, Some("minecraft:item.bottle.empty"), "use_cauldron")
+                .using_item()
                 .with_event("minecraft:fluid_place")
         }
         ("water", name)

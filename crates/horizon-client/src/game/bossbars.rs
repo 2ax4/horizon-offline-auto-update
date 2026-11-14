@@ -28,6 +28,9 @@ pub(super) struct BossState {
     /// The bars server mods show single players (`native_boss_bar`): by
     /// player UUID, each bar's id and bar, in the order they were added.
     pub(super) native: HashMap<u128, Vec<(u128, horizon_client::mod_api::NativeBossBar)>>,
+    /// `EnderDragonFight.dragonEvent`'s name: the last custom name its
+    /// dragon had (`updateDragon`), else the type's name.
+    dragon_name: Option<Tag>,
 }
 
 impl BossState {
@@ -472,6 +475,7 @@ impl Game<'_> {
             return;
         }
         self.load_bossbars();
+        self.update_dragon_bar_name();
         let now = boss_overlay::now_millis();
         let viewers = self.boss_viewers();
         let live: HashSet<u128> = viewers.iter().map(|v| v.uuid).collect();
@@ -495,6 +499,28 @@ impl Game<'_> {
         };
         for (conn, packet) in &packets {
             host.hub.send_to(*conn, packet);
+        }
+    }
+    /// `EnderDragonFight.updateDragon`: the fight's dragon's custom name
+    /// becomes the bar's, and stays after the name is removed.
+    fn update_dragon_bar_name(&mut self) {
+        // `EnderDragon.aiStep` calls `updateDragon` only while it has AI (and
+        // is alive); `kill`/`tickDeath` call it too, so a dead dragon updates.
+        let ticks = self.dragon.as_ref().is_some_and(|d| !d.alive() || !d.no_ai);
+        if !ticks || !self.is_fight_dragon() {
+            return;
+        }
+        let custom = self
+            .dragon
+            .as_ref()
+            .filter(|d| d.id != 0)
+            .and_then(|d| self.persist_raw(d.id))
+            .and_then(|raw| raw.get("CustomName"))
+            .cloned();
+        if let Some(custom) = custom {
+            self.bosses.dragon_name = Some(json_to_tag(
+                &horizon_client::entity_nbt::name_text(&custom).component(),
+            ));
         }
     }
     fn boss_viewers(&self) -> Vec<Viewer> {
@@ -574,7 +600,11 @@ impl Game<'_> {
         {
             out.push(Offer {
                 id: bossbar::stable_uuid("minecraft:ender_dragon"),
-                name: translate_tag("entity.minecraft.ender_dragon"),
+                name: self
+                    .bosses
+                    .dragon_name
+                    .clone()
+                    .unwrap_or_else(|| translate_tag("entity.minecraft.ender_dragon")),
                 progress,
                 color: 0,
                 overlay: 0,
@@ -620,20 +650,20 @@ impl Game<'_> {
                 });
             }
         }
-        if viewer.here
-            && let Some((id, name, progress)) = self.raid_boss_at(viewer.at, viewer.alive)
-        {
-            out.push(Offer {
-                id: bossbar::stable_uuid(&format!("raid:{id}")),
-                name,
-                progress,
-                color: 2,
-                overlay: 2,
-                darken: false,
-                music: false,
-                fog: false,
-                scope: Scope::Level(self.dim),
-            });
+        if viewer.here {
+            for (id, name, progress) in self.raid_bars_at(viewer.uuid) {
+                out.push(Offer {
+                    id: bossbar::stable_uuid(&format!("raid:{id}")),
+                    name,
+                    progress,
+                    color: 2,
+                    overlay: 2,
+                    darken: false,
+                    music: false,
+                    fog: false,
+                    scope: Scope::Level(self.dim),
+                });
+            }
         }
         out
     }

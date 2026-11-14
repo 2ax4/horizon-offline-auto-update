@@ -203,7 +203,7 @@ impl Game<'_> {
         let Some(id) = self.health_resources.damage.id(kind) else {
             return;
         };
-        let (hurt, amount) = match self.hurt_player_equipment(id, amount, None, false, 0) {
+        let (hurt, amount) = match self.hurt_player_equipment(id, amount, None, false, 0, None) {
             Ok((outcome, actual)) => (outcome.hurt, actual),
             Err(error) => {
                 log::warn!("falling block damage failed: {error}");

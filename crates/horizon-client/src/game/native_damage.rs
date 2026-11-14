@@ -61,7 +61,7 @@ pub(super) fn parties(hurting: &Hurting<'_>) -> Parties {
                 Some(Who::Player) => scope,
                 None => 0,
             };
-            let direct = if super::creatures::melee(damage.kind) {
+            let direct = if super::combat::melee(damage.kind) {
                 causing
             } else {
                 0

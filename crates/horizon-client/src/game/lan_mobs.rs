@@ -114,7 +114,10 @@ pub(super) fn acts_on_player(e: &MobEvent) -> bool {
         MobEvent::AttackPlayer(..)
             | MobEvent::CubeHurtPlayer { .. }
             | MobEvent::AttackPlayerWithEffect { .. }
-            | MobEvent::StingPlayer { .. }
+            | MobEvent::Sting {
+                target: Who::Player,
+                ..
+            }
             | MobEvent::DamagePlayer { .. }
             | MobEvent::SonicBoom {
                 target: Who::Player,
@@ -318,7 +321,10 @@ impl Game<'_> {
             e,
             MobEvent::AttackPlayer(..)
                 | MobEvent::AttackPlayerWithEffect { .. }
-                | MobEvent::StingPlayer { .. }
+                | MobEvent::Sting {
+                    target: Who::Player,
+                    ..
+                }
         ) {
             self.combat.melee_mob = Some(mob);
         }

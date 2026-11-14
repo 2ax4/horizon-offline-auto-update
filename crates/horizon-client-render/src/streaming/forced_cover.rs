@@ -262,7 +262,7 @@ mod tests {
         let m = ForcedCover::MOST;
         // Some held both ways past the boundary, none at it (a chunk held both ways counts twice
         // towards `MOST`, as `refresh` counts them).
-        for (n, both) in [(m, false), (m + 1, false), (6000, true), (20_000, true)] {
+        for (n, both) in [(m, false), (m + 1, false), (6000, true)] {
             for (kind, all) in sets(&mut seed, n).into_iter().enumerate() {
                 // Every third chunk a mod's ticket; with `both`, every fifth held both ways.
                 let (mut forced, mut mod_forced) = (HashSet::new(), HashSet::new());

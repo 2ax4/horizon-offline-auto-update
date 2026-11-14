@@ -263,8 +263,11 @@ impl Game<'_> {
             return Ok(true);
         }
         // ItemStack.useOn: after the block's own useItemOn/useWithoutItem
-        // passed. DebugStickItem.useOn cycles the selected property.
-        if let Some(hit) = block_hit
+        // passed, and only where the player may use an item on that block.
+        // DebugStickItem.useOn cycles the selected property.
+        let may_use_on = block_hit.is_some_and(|hit| self.may_use_on(hit.pos));
+        if may_use_on
+            && let Some(hit) = block_hit
             && let Some(success) = self.debug_stick_use_on(hit.pos)?
         {
             // `Minecraft.startUseItem`: the stick's client-side `useOn` is
@@ -286,13 +289,14 @@ impl Game<'_> {
         // TntBlock.useItemOn is the block's own: a sneak with something in hand skips it, and
         // the flint and steel or fire charge lights a fire on the TNT instead.
         if block_hit.is_some()
-            && (self.use_bone_meal(&stack)?
+            && ((may_use_on && self.use_bone_meal(&stack)?)
                 || (!(sneaking && hands_full) && self.ignite_tnt(&stack)?))
         {
             return Ok(true);
         }
         // ShearsItem.useOn: shears crop a growing plant's head to its top age.
-        if let Some(hit) = block_hit
+        if may_use_on
+            && let Some(hit) = block_hit
             && self.shears_crop(hit.pos, &stack)?
         {
             return Ok(true);
@@ -316,7 +320,8 @@ impl Game<'_> {
             UseResult::Pass => {}
         }
         // PotionItem.useOn comes before PotionItem.use's drink.
-        if let Some(hit) = block_hit
+        if may_use_on
+            && let Some(hit) = block_hit
             && self.use_water_bottle_on_block(hit.pos, hit.face, &stack)?
         {
             return Ok(true);
@@ -403,7 +408,7 @@ impl Game<'_> {
         // ItemStack.useOn passes in adventure mode unless the item's
         // can_place_on matches the clicked block; Item.use then runs as usual.
         if let Some(hit) = block_hit
-            && (self.may_build() || self.can_place_on_in_adventure(hit.pos))
+            && self.may_use_on(hit.pos)
             && (self.launch_firework(hit, &stack)
                 || self.place_minecart(hit, &stack)
                 || self.place_painting(hit, &stack)
@@ -441,7 +446,7 @@ impl Game<'_> {
         if info.block.is_none() {
             return Ok(false);
         }
-        if !self.may_build() && !self.can_place_on_in_adventure(hit.pos) {
+        if !self.may_use_on(hit.pos) {
             // ItemStack.useOn passes in adventure mode; useItem eats.
             return Ok(!on_block && self.start_eating(&info));
         }
@@ -705,3 +710,7 @@ mod sign_use_tests;
 #[cfg(test)]
 #[path = "sign_chain_tests.rs"]
 mod sign_chain_tests;
+
+#[cfg(test)]
+#[path = "adventure_use_on_tests.rs"]
+mod adventure_use_on_tests;

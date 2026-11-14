@@ -407,7 +407,7 @@ pub(super) struct Dragon {
     /// after (`strafe_after_crystal`), taken on its next tick.
     strafe_request: Option<FightWho>,
     /// `Mob.isNoAi` (`NoAI`): it flaps in place, with no phase or flight.
-    no_ai: bool,
+    pub(super) no_ai: bool,
     random: LegacyRandom,
 }
 /// A player in the fight: the window's own player, or a guest by
@@ -923,7 +923,7 @@ fn hurt_source(
     direct: Option<&ProjectileKind>,
 ) -> HurtSource<'static> {
     let causing = by.unwrap_or(0);
-    let melee = direct.is_none() && (super::creatures::melee(kind) || kind == DamageKind::Thorns);
+    let melee = direct.is_none() && (super::combat::melee(kind) || kind == DamageKind::Thorns);
     HurtSource {
         damage_type: super::creatures::damage_type(kind, by.is_some()),
         causing,
@@ -4301,7 +4301,7 @@ impl Game<'_> {
     }
     /// The dragon is the End fight's own (`EnderDragon.dragonFight`, set
     /// only for the dragon whose UUID is the fight's `dragonUUID`).
-    fn is_fight_dragon(&mut self) -> bool {
+    pub(super) fn is_fight_dragon(&mut self) -> bool {
         if !self.dimension_type().has_ender_dragon_fight {
             return false;
         }

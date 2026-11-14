@@ -1,6 +1,7 @@
 //! `/recipe`, `/damage`, `/rotate`, `/swing`, `/playsound`, `/stopsound`,
 //! `/particle`, `/attribute`, `/ride` and `/spreadplayers`.
 use super::{Arg, Context, Game, R, Target, err, wrap_degrees};
+use crate::game::minecarts::CartHit;
 use horizon_client::{
     mobs::{Damage, DamageKind, MobEvent, Who, finalize},
     scoreboard_cmd::{Holder, Tracker},
@@ -129,7 +130,8 @@ impl Game<'_> {
             "player_attack" => DamageKind::PlayerAttack,
             "mace_smash" => DamageKind::MaceSmash,
             "spear" => DamageKind::Spear,
-            "mob_attack" | "mob_attack_no_aggro" => DamageKind::MobAttack,
+            "mob_attack" => DamageKind::MobAttack,
+            "mob_attack_no_aggro" => DamageKind::MobAttackNoAggro,
             "arrow" => DamageKind::Arrow,
             "thrown" | "trident" | "mob_projectile" => DamageKind::Thrown,
             "fireball" | "unattributed_fireball" => DamageKind::Fireball,
@@ -294,7 +296,7 @@ impl Game<'_> {
             }
             Target::Item(id) => self.command_damage_item(id, amount, ty, cause.or(by)),
             Target::Boat(_) | Target::Cart(_) => {
-                self.command_damage_vehicle(target, amount, ty, cause.or(by))
+                self.command_damage_vehicle(target, amount, ty, by, cause.or(by))
             }
             Target::Dragon(id) => self.command_damage_dragon(
                 id,
@@ -316,11 +318,13 @@ impl Game<'_> {
     }
 
     /// `VehicleEntity.hurtServer`: report acceptance even when the vehicle survives.
+    /// `by` is the `DamageSource`'s direct entity, `causing` its causing entity.
     fn command_damage_vehicle(
         &mut self,
         target: Target,
         amount: f32,
         damage_type: &str,
+        by: Option<Target>,
         causing: Option<Target>,
     ) -> bool {
         let registry = &self.motion.health.damage;
@@ -353,11 +357,9 @@ impl Game<'_> {
                 .iter()
                 .position(|b| b.id == id)
                 .is_some_and(|i| self.hurt_boat_result(i, amount, creative).is_some()),
-            Target::Cart(_) => self
-                .carts
-                .iter()
-                .position(|c| c.id == id)
-                .is_some_and(|i| self.hurt_cart_result(i, amount, creative, ignites)),
+            Target::Cart(_) => self.carts.iter().position(|c| c.id == id).is_some_and(|i| {
+                self.hurt_cart_result(i, amount, creative, ignites, CartHit::command(by, causing))
+            }),
             _ => false,
         }
     }
@@ -1062,6 +1064,18 @@ impl Game<'_> {
                 let Some(key) = player.attributes.key(attribute) else {
                     return Err(no_attribute(&name, &description));
                 };
+                // Every arm below starts from an instance or a supplier value,
+                // and vanilla's `getAttributeInstance` (modifier add/remove,
+                // base set), `getEntityWithAttribute` (the gets) and
+                // `resetBaseValue` all throw `no_attribute` when the supplier
+                // creates none: a player has no `minecraft:follow_range`.
+                if !player
+                    .attributes
+                    .has_attribute(Some(key.clone()))
+                    .unwrap_or(false)
+                {
+                    return Err(no_attribute(&name, &description));
+                }
                 let unavailable = |_| no_attribute(&name, &description);
                 match id {
                     "attribute.get" | "attribute.base.get" => {
@@ -1132,7 +1146,7 @@ impl Game<'_> {
                     "attribute.modifier.add" => {
                         if player
                             .attributes
-                            .has_modifier(Some(key), &modifier_id)
+                            .has_modifier(Some(key.clone()), &modifier_id)
                             .unwrap_or(false)
                         {
                             return Err(text_error(
@@ -1147,11 +1161,39 @@ impl Game<'_> {
                         let op = ctx
                             .literals
                             .last()
-                            .cloned()
-                            .unwrap_or_else(|| "add_value".into());
+                            .map(String::as_str)
+                            .unwrap_or("add_value");
+                        let operation = match op {
+                            "add_multiplied_base" => {
+                                horizon_world::attributes::Operation::AddMultipliedBase
+                            }
+                            "add_multiplied_total" => {
+                                horizon_world::attributes::Operation::AddMultipliedTotal
+                            }
+                            _ => horizon_world::attributes::Operation::AddValue,
+                        };
+                        // AttributeInstance.addPermanentModifier: unlike equipment's
+                        // transient modifiers, this one is in AttributeInstance.pack.
+                        let modifier = horizon_world::attributes::Modifier::new(
+                            &modifier_id,
+                            value_arg,
+                            operation,
+                        )
+                        .map_err(|_| no_attribute(&name, &description))?;
+                        let handle = player
+                            .attributes
+                            .get_instance(Some(key))
+                            .map_err(|_| no_attribute(&name, &description))?
+                            .ok_or_else(|| no_attribute(&name, &description))?;
                         player
-                            .set_modifier(attribute, &modifier_id, value_arg, &op, true)
+                            .attributes
+                            .edit(&handle, |value, observer| {
+                                value.add_permanent(modifier, observer)
+                            })
                             .map_err(|_| no_attribute(&name, &description))?;
+                        if attribute == "minecraft:max_health" {
+                            let _ = player.clamp_health_to_max();
+                        }
                         Ok(Some((
                             1,
                             Text::translate(
@@ -1186,22 +1228,24 @@ impl Game<'_> {
                         )))
                     }
                     _ => {
-                        let Some(handle) = player.attributes.get_instance(Some(key)).ok().flatten()
-                        else {
-                            return Err(no_attribute(&name, &description));
-                        };
-                        let found = player
+                        // getAttributeModifier: getEntityWithAttribute checks
+                        // hasAttribute, then hasModifier and getModifierValue read
+                        // the cached instance or the type's supplier. None of
+                        // them calls getInstance, so a failed lookup leaves the
+                        // attribute map (and the `attributes` list a save packs)
+                        // untouched.
+                        if !player
                             .attributes
-                            .edit(&handle, |value, _| {
-                                Ok(value
-                                    .modifiers()
-                                    .iter()
-                                    .find(|m| m.id() == modifier_id)
-                                    .map(|m| m.amount()))
-                            })
+                            .has_attribute(Some(key.clone()))
+                            .map_err(unavailable)?
+                        {
+                            return Err(no_attribute(&name, &description));
+                        }
+                        let Some(v) = player
+                            .attributes
+                            .modifier_value(Some(key), &modifier_id)
                             .ok()
-                            .flatten();
-                        let Some(v) = found else {
+                        else {
                             return Err(text_error(
                                 "commands.attribute.failed.no_modifier",
                                 &[
@@ -2211,6 +2255,10 @@ pub(super) fn look_at(from: [f64; 3], to: [f64; 3]) -> [f32; 2] {
 }
 
 #[cfg(test)]
+#[path = "attribute_missing_tests.rs"]
+mod attribute_missing_tests;
+
+#[cfg(test)]
 mod allay_owner_damage_tests {
     use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
     use horizon_client::mobs::{Damage, Mob};
@@ -2812,6 +2860,113 @@ mod vehicle_damage_command_tests {
                     );
                 }
             }
+        });
+    }
+}
+
+#[cfg(test)]
+#[path = "attribute_tests.rs"]
+mod attribute_tests;
+
+#[cfg(test)]
+mod attribute_modifier_command_tests {
+    use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
+    use horizon_client::chunk::Chunk;
+    use horizon_client::motion::PlayerMotion;
+    use horizon_client_core::nbt_value::text;
+    use horizon_core::geometry::Vec3;
+    use horizon_core::position::ChunkPos;
+    use horizon_world::nbt::Tag;
+    use std::sync::Arc;
+
+    fn with_game(test: impl FnOnce(&mut Game<'_>)) {
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.game_dir = Some(
+            std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join(format!(
+                "attribute-modifier-{:?}",
+                std::thread::current().id()
+            )),
+        );
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.build_registries();
+        game.set_allow_commands(true);
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        game.block_ticks
+            .add_empty_chunk(ChunkPos::new(0, 0))
+            .unwrap();
+        assert!(game.run_command("difficulty normal"));
+        assert!(game.run_command("forceload add 0 0"));
+        test(&mut game);
+    }
+
+    /// `AttributeCommand.addModifier` uses `AttributeInstance.addPermanentModifier`;
+    /// `AttributeInstance.pack` saves only permanent modifiers. A command
+    /// modifier must therefore be in the player's saved list and survive a reload.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_command_modifier_is_saved_with_the_player() {
+        with_game(|game| {
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            assert!(game.run_command(
+                "attribute @s minecraft:step_height modifier add test:a 0.4 add_value"
+            ));
+            assert_eq!(
+                game.player
+                    .as_mut()
+                    .unwrap()
+                    .attribute("minecraft:step_height")
+                    .unwrap(),
+                1.0
+            );
+            let saved = game.player.as_ref().unwrap().saved_attributes();
+            let holds = match &saved {
+                Tag::List(instances) => instances.iter().any(|entry| {
+                    text(entry.get("id")).as_deref() == Some("minecraft:step_height")
+                        && matches!(
+                            entry.get("modifiers"),
+                            Some(Tag::List(modifiers))
+                                if modifiers
+                                    .iter()
+                                    .any(|m| text(m.get("id")).as_deref() == Some("test:a"))
+                        )
+                }),
+                _ => false,
+            };
+            assert!(holds, "saved attributes: {saved:?}");
+            let mut back = PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
+            back.apply_saved_attributes(Some(&saved)).unwrap();
+            assert_eq!(
+                back.attribute("minecraft:step_height").unwrap(),
+                1.0,
+                "saved attributes: {saved:?}"
+            );
         });
     }
 }

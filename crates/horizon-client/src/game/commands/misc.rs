@@ -277,20 +277,33 @@ impl Game<'_> {
         }
         .unwrap_or(min);
         if id == "random.roll" {
-            let who = self.target_name(
-                self.command_source
-                    .and_then(|s| s.entity)
-                    .unwrap_or(Target::Player),
-            );
-            self.system_message(Text::translate(
+            let line = Text::translate(
                 "commands.random.roll",
                 &[
-                    who,
+                    self.source_display_name(),
                     Text::literal(value.to_string()),
                     Text::literal(min.to_string()),
                     Text::literal(max.to_string()),
                 ],
-            ));
+            );
+            // PlayerList.broadcastSystemMessage: every player hears the roll,
+            // the source's own copy with the captured output it has (`/say`'s).
+            let captured = self.chat_capture.as_ref().and(self.lan_acting);
+            if let Some(host) = &self.lan {
+                let content = horizon_client::lan::data::component_nbt(&line.component());
+                match captured {
+                    Some(conn) => host.hub.system_message_except(content, conn),
+                    None => host.hub.system_message(content),
+                }
+            }
+            // MinecraftServer.sendSystemMessage: the server's log, unless the
+            // console's captured reply below is what logs it (`console_reply`).
+            if self.options.dedicated.is_some()
+                && (self.lan_acting.is_some() || self.chat_capture.is_none())
+            {
+                super::super::dedicated::log("INFO", &format!("System chat: {}", line.plain()));
+            }
+            self.system_message(line);
         } else {
             self.feedback(Text::translate(
                 "commands.random.sample.success",
@@ -345,3 +358,6 @@ impl Game<'_> {
         Ok(1)
     }
 }
+
+#[cfg(test)]
+mod random_command_tests;

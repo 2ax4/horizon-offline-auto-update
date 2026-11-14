@@ -303,6 +303,7 @@ fn grow_up(m: &mut Mob, events: &mut Vec<MobEvent>) {
                     keep_equipment: false,
                     preserve_can_pick_up_loot: false,
                 },
+                after: super::conversion::After::Finalize,
             });
         }
     }
@@ -374,10 +375,6 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
                     m.yaw = m.random.next_float() * 360.0;
                     m.on_ground = false;
                 }
-            }
-            // LivingEntity air: dolphins drown underwater and refill instantly in air.
-            if !m.fluids.eye_in_water {
-                m.air = 4800;
             }
         }
         _ => {}

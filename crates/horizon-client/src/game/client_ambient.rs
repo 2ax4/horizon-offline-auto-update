@@ -204,6 +204,11 @@ impl Game<'_> {
     /// list the server sent, and the mobs and guests of a game in the frame
     /// theirs.
     fn effect_swirls(&mut self) {
+        // `ITEM_SLIME` and `ITEM_COBWEB` crumbs draw the item's model, which
+        // `BreakingItemParticle`'s providers resolve as they spawn: the sprites
+        // are kept per type here, and this resolves them once (it returns at
+        // once after).
+        self.ensure_item_particle_sprites();
         if let Some(p) = self.player.as_ref() {
             let effects = &self.potions.effects.list;
             let list: Vec<_> = effects
@@ -268,12 +273,19 @@ impl Game<'_> {
     }
 }
 
-/// `MobEffect.particleFactory`: the omens have particles of their own, any
-/// other effect an entity effect in its colour, faint when ambient.
+/// `MobEffect.particleFactory`: the omens and the four effects `MobEffects`
+/// registers with a particle of their own (Wind Charged `SMALL_GUST`,
+/// Weaving `ITEM_COBWEB`, Oozing `ITEM_SLIME`, Infested `INFESTED`) show
+/// that one; any other effect an entity effect in its colour, faint when
+/// ambient.
 pub(super) fn effect_particle(effect: &str, ambient: bool) -> Option<ParticleOptions> {
     Some(match effect.trim_start_matches("minecraft:") {
         "trial_omen" => ParticleOptions::simple(ParticleType::TrialOmen),
         "raid_omen" => ParticleOptions::simple(ParticleType::RaidOmen),
+        "wind_charged" => ParticleOptions::simple(ParticleType::SmallGust),
+        "weaving" => ParticleOptions::simple(ParticleType::ItemCobweb),
+        "oozing" => ParticleOptions::simple(ParticleType::ItemSlime),
+        "infested" => ParticleOptions::simple(ParticleType::Infested),
         other => {
             let color = horizon_client::brewing::effect(other)?.color;
             let channel = |shift: u32| ((color >> shift) & 255) as f32 / 255.0;
@@ -313,3 +325,7 @@ fn swirl(
     let z = feet.z + size.0 * (2.0 * r.next_double() - 1.0) * 0.5;
     particles.add(&list[pick], [x, y, z], [1.0; 3]);
 }
+
+#[cfg(test)]
+#[path = "effect_particle_tests.rs"]
+mod effect_particle_tests;

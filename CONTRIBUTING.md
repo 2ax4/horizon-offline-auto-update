@@ -155,9 +155,14 @@ it (edited on every push, never repeated): talk to its author in the thread befo
   replaces our commits with yours and erases the fixes we added (it happened on #5188 and #5203). Tell your agent
   too: `git merge origin/main`, never `git rebase` or `git push --force` on a branch a maintainer has touched. If
   our fixes get erased anyway, we finish the work in our own pull request that keeps your commits and credits you.
+- **Title: `kind(area): what changes`**, so the queue reads at a glance: `parity(mobs): a ghast's fireball uses its
+  ExplosionPower`, `perf(launcher): download the game's files in parallel`, `bug(saves): keep /attribute modifiers
+  through a save`. The kind is one of the words below; the area is an area label, several with commas
+  (`perf(chunks,rendering): ...`), or leave it out (`docs: ...`). Release notes drop the prefix.
 - **Tick its kind** in the template: `parity` (Horizon now does what vanilla does), `bug` (a crash or breakage),
   `perf`, `feature` (new for players), `extra` (Horizon-only, off by default), `tooling` or `docs`. A workflow sets
-  that label, and area labels (`launcher`, `mobs`, `worldgen`, `rendering`...) from the paths you change.
+  that label from the box, else from the title, and area labels (`launcher`, `mobs`, `worldgen`, `rendering`...)
+  from the title and the paths you change.
   `label:parity` is the list of real progress toward vanilla.
 - **Release labels** (we set them if you can't): `feature` also puts it under "New" in the release notes,
   `skip-release` when players see no change (tooling, docs, tests), nothing for a fix. `release-now` is for crash

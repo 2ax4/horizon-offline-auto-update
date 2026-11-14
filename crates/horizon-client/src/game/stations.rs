@@ -2959,16 +2959,15 @@ impl Game<'_> {
             return Ok(());
         };
         let was_idle = b.brew_time <= 0;
-        let was_unfueled = b.fuel <= 0;
-        let fuel_item = was_unfueled
-            .then(|| b.items[4].as_ref().map(|s| s.item.clone()))
-            .flatten();
+        // `serverTick` takes the fuel item only while the stand has no fuel
+        // uses left, which `out.fuel_taken` reports.
+        let fuel_item = b.items[4].as_ref().map(|s| s.item.clone());
         let out = b.tick(
             &world_stations!(self).brewing,
             world_items!(self),
             self.res.providers(),
         );
-        self.finish_brewing_tick(pos, was_idle, was_unfueled, fuel_item, out)
+        self.finish_brewing_tick(pos, was_idle, fuel_item, out)
     }
 }
 

@@ -190,7 +190,8 @@ impl Game<'_> {
                 world_items!(self),
             );
             if environment.should_play_lava_hurt_sound(item.ticks) {
-                let pitch = 2.0 + self.world.random.next_float() * 0.4;
+                // `Entity.lavaHurt` pitches the burn from `this.random`, the item's own.
+                let pitch = 2.0 + item.random.next_float() * 0.4;
                 self.audio.play(
                     "minecraft:entity.generic.burn",
                     Some([item.position.x, item.position.y, item.position.z]),
@@ -282,11 +283,10 @@ impl Game<'_> {
                             pickups::Taken::Item(Box::new(item)),
                             pickups::Collector::Player,
                         );
-                        let pitch = ((self.world.random.next_float()
-                            - self.world.random.next_float())
-                            * 0.7
-                            + 1.0)
-                            * 2.0;
+                        // `ClientPacketListener.handleTakeItemEntity` pitches the
+                        // pickup from the listener's own random, not the level's.
+                        let mut r = random_source::create();
+                        let pitch = ((r.next_float() - r.next_float()) * 0.7 + 1.0) * 2.0;
                         self.audio
                             .play("minecraft:entity.item.pickup", Some(feet), 0.2, pitch);
                         continue;
@@ -306,12 +306,10 @@ impl Game<'_> {
                                 pickups::Taken::Item(Box::new(item.clone())),
                                 pickups::Collector::Player,
                             );
-                            // handleTakeItemEntity: the random pitch of a full pickup.
-                            let pitch = ((self.world.random.next_float()
-                                - self.world.random.next_float())
-                                * 0.7
-                                + 1.0)
-                                * 2.0;
+                            // handleTakeItemEntity: the random pitch of a full pickup,
+                            // from the listener's own random as above.
+                            let mut r = random_source::create();
+                            let pitch = ((r.next_float() - r.next_float()) * 0.7 + 1.0) * 2.0;
                             self.audio
                                 .play("minecraft:entity.item.pickup", Some(feet), 0.2, pitch);
                         }
@@ -594,8 +592,8 @@ impl Game<'_> {
         for o in taken {
             // ClientPacketListener.handleTakeItemEntity: every orb taken sounds
             // at the orb, whether mending took its points or not.
-            let pitch =
-                (self.world.random.next_float() - self.world.random.next_float()) * 0.35 + 0.9;
+            let mut r = random_source::create();
+            let pitch = (r.next_float() - r.next_float()) * 0.35 + 0.9;
             let at = [o.position.x, o.position.y, o.position.z];
             self.audio.play(
                 "minecraft:entity.experience_orb.pickup",
@@ -635,9 +633,11 @@ impl Game<'_> {
         };
         self.native_loot_drops(&context, &mut stacks);
         stacks.retain(|stack| stack.count > 0 && &*stack.item != "minecraft:air");
+        // `Inventory.dropAll` scatters every stack from `this.random`, the
+        // dying player's own, never the level's.
+        let mut r = random_source::entity();
         for stack in stacks {
-            let r = &mut self.world.random;
-            let v = horizon_client::entities::drop_motion(r, self.yaw, self.pitch, true);
+            let v = horizon_client::entities::drop_motion(&mut r, self.yaw, self.pitch, true);
             self.spawn_item(stack, at, v, 40);
         }
     }
@@ -782,6 +782,26 @@ impl Game<'_> {
         self.spawn_item_own(stack, p, 10);
     }
 
+    /// `Containers.dropItemStack`: a crafting remainder leaves from inside the
+    /// block, split by the level random, and can be picked up at once. Unlike
+    /// `Block.popResource` it has no `block_drops` test.
+    pub(super) fn drop_item_stack_containers(&mut self, pos: [i32; 3], stack: ItemStack) {
+        let count = stack.count;
+        let at = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+        for piece in
+            horizon_world::level::removal::drop_item_stack_at(&mut self.world.random, at, count)
+        {
+            self.spawn_item_thrown(
+                ItemStack {
+                    count: piece.count,
+                    ..stack.clone()
+                },
+                piece.pos,
+                piece.motion,
+            );
+        }
+    }
+
     /// `Block.popResourceFromFace`: the loot leaves the clicked face with the
     /// face's own motion instead of the item's random one.
     pub(super) fn pop_resource_from_face(
@@ -839,8 +859,9 @@ impl Game<'_> {
         eye: [f64; 3],
         thrown_from_hand: bool,
     ) {
-        let r = &mut self.world.random;
-        let v = horizon_client::entities::drop_motion(r, self.yaw, self.pitch, false);
+        // `this.random` of the thrower (`Entity.random`), never the level's.
+        let mut r = random_source::entity();
+        let v = horizon_client::entities::drop_motion(&mut r, self.yaw, self.pitch, false);
         // `getEyeY() - 0.3F`.
         let y = eye[1] - f64::from(0.3f32);
         self.spawn_item(thrown, [eye[0], y, eye[2]], v, 40);
@@ -1068,6 +1089,9 @@ mod escape_tests {
 #[cfg(test)]
 #[path = "item_void_tests.rs"]
 mod item_void_tests;
+#[cfg(test)]
+#[path = "thrown_items_tests.rs"]
+mod thrown_items_tests;
 #[cfg(test)]
 #[path = "wither_star_tests.rs"]
 mod wither_star_tests;

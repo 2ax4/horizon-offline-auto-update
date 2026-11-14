@@ -179,8 +179,19 @@ impl Game<'_> {
         let brewed = std::mem::take(&mut menu.brewed);
         let crafted = std::mem::take(&mut menu.crafted);
         let item_crafted = std::mem::take(&mut menu.item_crafted);
+        let crafted_counts = std::mem::take(&mut menu.crafted_counts);
         menu.drops.clear();
         store_player(menu, &mut host.hub.guests[gi]);
+        // `ItemStack.onCraftedBy`'s `Stats.ITEM_CRAFTED` count, before the
+        // recipe the take used.
+        if !crafted_counts.is_empty() {
+            let conn = host.hub.guests[gi].conn;
+            self.as_guest(host, conn, |g| {
+                for (item, count) in crafted_counts {
+                    g.award_stat("crafted", &item, count);
+                }
+            });
+        }
         if !brewed.is_empty() {
             let conn = host.hub.guests[gi].conn;
             self.as_guest(host, conn, |g| {
@@ -1208,6 +1219,9 @@ impl Game<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod stonecutter_stat_tests;
 
 #[cfg(test)]
 mod machine_recipe_placement_tests {

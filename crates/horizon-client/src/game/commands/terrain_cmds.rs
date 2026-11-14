@@ -406,8 +406,8 @@ impl Game<'_> {
             _ => 0.0,
         };
         let time = match ctx.get("time") {
-            Some(Arg::Int(t)) => i64::from(*t),
-            _ => 0,
+            Some(Arg::Int(t)) => Some(i64::from(*t)),
+            _ => None,
         };
         match id {
             "worldborder.get" => {
@@ -420,10 +420,15 @@ impl Game<'_> {
             }
             "worldborder.set" | "worldborder.add" => {
                 let current = self.border.size();
-                let distance = if id == "worldborder.add" {
-                    current + double
-                } else {
-                    double
+                // `add` measures from the size the border has now and, given a
+                // time, keeps a change in flight going for its remaining ticks
+                // plus the argument (`getLerpTime() + time`); `set` replaces it.
+                let (distance, ticks) = match (id, time) {
+                    ("worldborder.add", Some(t)) => {
+                        (current + double, self.border.remaining_ticks() + t)
+                    }
+                    ("worldborder.add", None) => (current + double, 0),
+                    (_, t) => (double, t.unwrap_or(0)),
                 };
                 if current == distance {
                     return Err(err("commands.worldborder.set.failed.nochange", &[]));
@@ -438,8 +443,8 @@ impl Game<'_> {
                     ));
                 }
                 let shown = Text::literal(super::percent_f(distance, 1));
-                if time > 0 {
-                    self.border.lerp_to(distance, time);
+                if ticks > 0 {
+                    self.border.lerp_to(distance, ticks);
                     let key = if distance > current {
                         "commands.worldborder.set.grow"
                     } else {
@@ -447,7 +452,7 @@ impl Game<'_> {
                     };
                     self.feedback(Text::translate(
                         key,
-                        &[shown, Text::literal(ticks_to_seconds(time))],
+                        &[shown, Text::literal(ticks_to_seconds(ticks))],
                     ));
                 } else {
                     self.border.set_size(distance);

@@ -2806,13 +2806,13 @@ mod tests {
             H::HdrUiBrightness,
         ] {
             // Everything a drag can land on, each read back where the slider puts it.
+            // `set_slider` overwrites only this slider's field, so both settings are reused.
             let mut set = std::collections::BTreeSet::new();
+            let (mut s, mut again) = (fresh(), fresh());
             for i in 0..=10_000 {
-                let mut s = fresh();
                 h.set_slider(&mut s, i as f32 / 10_000.0);
                 let v = value(h, &s);
                 set.insert(v);
-                let mut again = fresh();
                 h.set_slider(&mut again, h.slider(&s).unwrap());
                 assert_eq!(value(h, &again), v, "{h:?} round trip");
             }

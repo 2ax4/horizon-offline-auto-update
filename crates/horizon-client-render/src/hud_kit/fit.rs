@@ -189,7 +189,10 @@ mod tests {
         let atlas = atlas();
         let mut cut = 0;
         for text in corpus() {
-            for width in (-4..=160).map(|w| w as f32 * 1.5) {
+            // Every third width of the old 1.5 step: ~7,500 strings at 55 widths still cut
+            // ~200,000 times, and the quadratic oracle took ~90 s of every CI run at all 165
+            // (main's run 43595807302).
+            for width in (-4..=160).step_by(3).map(|w| w as f32 * 1.5) {
                 let new = ellipsize(&atlas, &text, width);
                 assert_eq!(new, old_fit(&atlas, &text, width), "{text:?} at {width}");
                 cut += usize::from(matches!(new, Cow::Owned(_)));

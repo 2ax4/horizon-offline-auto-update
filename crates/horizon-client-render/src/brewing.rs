@@ -378,6 +378,9 @@ pub struct BrewTick {
     pub bottles: Option<[bool; 3]>,
     /// Level event 1035 (brew sound).
     pub brewed: bool,
+    /// A fuel item was taken: `serverTick` marks the stand changed for it even
+    /// when its `brewing_fuel` gave no uses.
+    pub fuel_taken: bool,
     /// Remainders dropped at the stand.
     pub drops: Vec<ItemStack>,
 }
@@ -412,13 +415,17 @@ impl BrewingStand {
             self.fuel = providers.int_value(&uses);
             self.total_fuel = self.fuel;
             self.speed = providers.float_value(&speed, 1.0);
-            let remainder = items.get(&fuel.item).and_then(|i| i.remainder.clone());
+            // `Item.getCraftingRemainder`, not the `use_remainder` component.
+            let remainder = items
+                .get(&fuel.item)
+                .and_then(|i| i.crafting_remainder.clone());
             fuel.count -= 1;
             if fuel.count == 0 {
                 self.items[4] = remainder.map(|r| ItemStack::new(&r, 1));
             } else if let Some(r) = remainder {
                 out.drops.push(ItemStack::new(&r, 1));
             }
+            out.fuel_taken = true;
         }
         let brewable = self.brewable(brewing);
         if self.brew_time > 0 {
@@ -469,9 +476,10 @@ impl BrewingStand {
                 self.items[slot] = Some(r.output.clone());
             }
         }
+        // `Item.getCraftingRemainder`, not the `use_remainder` component.
         let remainder = items
             .get(&ingredient.item)
-            .and_then(|i| i.remainder.clone());
+            .and_then(|i| i.crafting_remainder.clone());
         if let Some(i) = self.items[3].as_mut() {
             i.count -= 1;
             if i.count == 0 {

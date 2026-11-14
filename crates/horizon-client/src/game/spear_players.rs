@@ -285,7 +285,7 @@ impl Game<'_> {
             (landed, thorns)
         };
         let (landed, thorns) = self.guest_struck_by(host, s.victim, land)?;
-        self.pvp_aftermath(host, victim, Some(attacker), landed.hurt, thorns);
+        self.pvp_aftermath(host, victim, Some(attacker), thorns);
         Some(landed)
     }
 

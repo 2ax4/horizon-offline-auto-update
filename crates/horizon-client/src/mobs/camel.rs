@@ -274,6 +274,14 @@ pub fn stand_up_instantly(m: &mut Mob) {
 pub fn is_camel(s: super::Species) -> bool {
     matches!(s, super::Species::Camel | super::Species::CamelHusk)
 }
+/// `CamelHusk.interact`: a click on a husk sets `PersistenceRequired` before
+/// the hand does anything, so one that took a saddle, food or a lead stays
+/// past the monster category's 128 blocks (`Mob.checkDespawn`).
+pub fn keep_on_interact(m: &mut Mob) {
+    if m.species() == super::Species::CamelHusk {
+        m.persistent = true;
+    }
+}
 /// The sit, stand, dash ready, dash and eat sounds (`CamelHusk` overrides each).
 pub fn voice(m: &Mob, which: usize) -> &'static str {
     let husk = m.species() == super::Species::CamelHusk;

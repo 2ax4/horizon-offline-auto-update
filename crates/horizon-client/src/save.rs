@@ -5493,6 +5493,81 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn loaded_chunk_uses_saved_monument_from_its_referenced_start_chunk() {
+        use horizon_core::{
+            geometry::Direction,
+            random::{LegacyRandom, WorldgenRandom},
+        };
+        use horizon_world::worldgen::structure::{
+            legacy::{LegacyPiece, random_horizontal},
+            monument::MonumentBuilding,
+        };
+        let root = PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"));
+        let assets = Arc::new(crate::assets::Assets::load(&root).expect("assets"));
+        let biomes = Arc::new(Biomes::load(&root).expect("biomes"));
+        let inner = Arc::new(
+            crate::vanillagen::VanillaTerrain::new(
+                &root.join("worldgen"),
+                assets.registry,
+                &biomes,
+                12345,
+            )
+            .unwrap(),
+        );
+        // A moved, rotated monument that generation cannot reproduce at the owning chunk.
+        // Vanilla reseeds, draws the default even with a saved orientation, then rebuilds.
+        let mut random = WorldgenRandom::new(LegacyRandom::new(0));
+        random.set_large_feature_seed(12345, -2, 3);
+        random_horizontal(&mut random);
+        let top = MonumentBuilding::new(&mut random, 100, -300, Direction::East);
+        let expected = Tag::compound([
+            ("id", string("minecraft:monument")),
+            ("ChunkX", Tag::Int(-2)),
+            ("ChunkZ", Tag::Int(3)),
+            ("references", Tag::Int(5)),
+            (
+                "Children",
+                Tag::List(vec![Tag::Compound(top.save().unwrap())]),
+            ),
+        ]);
+        let mut saved = encode(&Chunk::empty(-2, 3), assets.registry, &biomes);
+        let Some(Tag::Compound(structures)) = saved.tag.get_mut("structures") else {
+            panic!("structures")
+        };
+        structures.insert(
+            "starts".into(),
+            Tag::compound([("minecraft:monument", expected.clone())]),
+        );
+        let save = Arc::new(SaveDir::new(
+            std::env::temp_dir().join(format!("horizon-saved-monument-{}", std::process::id())),
+            LevelShape::OVERWORLD,
+        ));
+        save.pending
+            .lock()
+            .unwrap()
+            .insert((Folder::Region, -2, 3), (0, Record::Tag(Arc::new(saved))));
+        let generator = Persistent {
+            inner: inner.clone(),
+            save,
+            registry: assets,
+            biomes,
+        };
+        let mut worker = generator.worker();
+        let mut referring = Chunk::empty(-1, 3);
+        referring
+            .structure_refs
+            .push(("minecraft:monument".into(), (-2, 3)));
+        generator.prepare_loaded(&mut worker, &referring);
+        let starts = inner.starts_at(-2, 3);
+        let restored = starts
+            .iter()
+            .find(|s| s.name == "minecraft:monument")
+            .expect("referenced saved monument");
+        assert_eq!(restored.save(), Some(expected));
+    }
+
+    #[test]
     fn loaded_chunk_uses_saved_jigsaw_from_its_referenced_start_chunk() {
         let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;

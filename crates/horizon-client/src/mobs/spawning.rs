@@ -27,6 +27,10 @@ pub struct BiomeFacts {
     pub full_moon: bool,
     /// `spawns_coral_variant_zombie_nautilus` (the warm ocean).
     pub coral_nautilus: bool,
+    /// `#minecraft:spawns_white_rabbits` (`Rabbit.getRandomRabbitVariant`).
+    pub white_rabbit: bool,
+    /// `#minecraft:spawns_gold_rabbits` (`Rabbit.getRandomRabbitVariant`).
+    pub gold_rabbit: bool,
 }
 /// `SpawnPlacements.isSpawnPositionOk` for the species.
 pub fn placement_ok(species: Species, w: &MobWorld, x: i32, y: i32, z: i32) -> bool {
@@ -263,15 +267,8 @@ pub fn finalize(m: &mut Mob, biome: &BiomeFacts, difficulty: &LocalDifficulty) {
             // Zombie.finalizeSpawn's setCanBreakDoors.
             let can_break_doors = m.random.next_float() < difficulty.special() * 0.1;
             super::doors::set_can_break_doors(m, can_break_doors);
-            let spear = m.random.next_int_bound(20).unwrap_or(1) == 0;
-            m.extra.set_main_hand(Some(
-                if spear {
-                    "minecraft:golden_spear"
-                } else {
-                    "minecraft:golden_sword"
-                }
-                .into(),
-            ));
+            let item = super::piglin::default_equipment(&mut m.random);
+            m.extra.set_main_hand(Some(item.into()));
         }
         // AbstractSkeleton.populateDefaultEquipmentSlots: armour, then a bow.
         S::Skeleton | S::Stray | S::Bogged | S::Parched => {
@@ -360,7 +357,7 @@ pub fn finalize(m: &mut Mob, biome: &BiomeFacts, difficulty: &LocalDifficulty) {
                 2
             };
         }
-        S::Slime | S::MagmaCube => super::cube::finalize(m),
+        S::Slime | S::MagmaCube => super::cube::finalize(m, difficulty.special()),
         _ => {}
     }
     // Zombie.finalizeSpawn ends with handleAttributes: the reinforcement

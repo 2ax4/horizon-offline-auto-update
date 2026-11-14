@@ -605,6 +605,7 @@ fn convert(m: &mut Mob, kind: &'static str, cx: &mut Cx) {
         from: Box::new(m.clone()),
         kind,
         params: super::conversion::Params::KEEP_ALL,
+        after: super::conversion::After::None,
     });
     m.removed = true;
 }
@@ -1306,7 +1307,9 @@ mod conversion_tests {
             Mob::new(2, Arc::new(types.types[kind].clone()), at, yaw)
         };
         match event {
-            MobEvent::Convert { from, kind, params } => {
+            MobEvent::Convert {
+                from, kind, params, ..
+            } => {
                 let mut m = new(kind, from.position, from.yaw);
                 crate::mobs::conversion::single(from, &mut m, *params);
                 Some(m)

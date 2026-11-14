@@ -3217,9 +3217,9 @@ impl Game<'_> {
             g.position[1] + g.eye_height() - f64::from(0.3f32),
             g.position[2],
         ];
+        let mut r = horizon_client::random_source::entity(); // the guest's Entity.random
         for stack in stacks {
-            let r = &mut self.world.random;
-            let v = horizon_client::entities::drop_motion(r, g.yaw, g.pitch, false);
+            let v = horizon_client::entities::drop_motion(&mut r, g.yaw, g.pitch, false);
             self.spawn_item(stack, eye, v, 40);
         }
     }
@@ -3770,7 +3770,7 @@ impl Game<'_> {
         self.guest_suggestions(host, conn, &payload);
     }
 
-    fn guest_suggestions(&mut self, host: &mut LanHost, conn: u32, payload: &[u8]) {
+    pub(super) fn guest_suggestions(&mut self, host: &mut LanHost, conn: u32, payload: &[u8]) {
         let mut r = horizon_protocol::buf::Reader::new(payload);
         let (Ok(id), Ok(text)) = (r.varint(), r.string(32500)) else {
             return;
@@ -3786,9 +3786,8 @@ impl Game<'_> {
         let skip = usize::from(text.starts_with('/'));
         let command = &text[skip..];
         let d = vanilla::game_dispatcher_with_features(&self.level.enabled_features);
-        // The completions come from the server's players and lists, not from the host's own registries: a
-        // dedicated server has no local player (they would list "Player"), and a LAN world's guests are not in
-        // the host's list.
+        // Server players and lists, not the host's registries: a dedicated server has no local player.
+        let triggers = super::scoreboard::trigger_objectives_for(&self.score.board, &player_name);
         let mut players = if self.options.dedicated.is_some() {
             Vec::new()
         } else {
@@ -3819,13 +3818,14 @@ impl Game<'_> {
             }
             None => Default::default(),
         };
-        let reg = &mut self.ui.registries;
+        let reg = self.suggestion_registries();
         let level = std::mem::replace(&mut reg.permission, permission);
         let own_players = std::mem::replace(&mut reg.players, players);
         let own_ops = std::mem::replace(&mut reg.ops, ops);
         let own_banned = std::mem::replace(&mut reg.banned_players, banned_players);
         let own_banned_ips = std::mem::replace(&mut reg.banned_ips, banned_ips);
         let own_whitelisted = std::mem::replace(&mut reg.whitelisted, whitelisted);
+        let own_triggers = std::mem::replace(&mut reg.trigger_objectives, triggers);
         let parse = d.parse(command, &self.ui.registries);
         let ((mut start, mut end), mut suggestions) =
             d.suggestions(&parse, command.len(), &self.ui.registries);
@@ -3874,6 +3874,7 @@ impl Game<'_> {
         reg.banned_players = own_banned;
         reg.banned_ips = own_banned_ips;
         reg.whitelisted = own_whitelisted;
+        reg.trigger_objectives = own_triggers;
         // ServerCommandSuggestionsProvider.limitSuggestionCount.
         suggestions.truncate(1000);
         let utf16 = |byte: usize| command[..byte.min(command.len())].encode_utf16().count() as i32;
@@ -3897,7 +3898,6 @@ impl Game<'_> {
             ),
         );
     }
-
     pub(super) fn guest_respawn(&mut self, host: &mut LanHost, conn: u32) {
         let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn) else {
             return;
@@ -4064,7 +4064,7 @@ impl Game<'_> {
             && self.world.loaded(c.pos[0], c.pos[2])
         {
             let found = self
-                .as_guest(host, conn, |g| g.resolve_server_respawn(c))
+                .as_guest(host, conn, |g| g.resolve_server_respawn(c, true))
                 .flatten();
             let world = self
                 .level
@@ -4345,7 +4345,7 @@ impl Game<'_> {
 
     /// `ServerPlayer.die` for a guest whose health has run out: the death
     /// message, the loot and experience, the death screen.
-    fn guest_die(&mut self, host: &mut LanHost, gi: usize, conn: u32) {
+    pub(super) fn guest_die(&mut self, host: &mut LanHost, gi: usize, conn: u32) {
         if host.hub.guests[gi].health <= 0.0
             && !host.hub.guests[gi].dead
             && !horizon_client::mod_api::mods().is_empty()
@@ -4482,10 +4482,9 @@ impl Game<'_> {
             if consumed && catalyst_xp > 0 {
                 self.guest_catalyst_trigger(host, gi, conn, at, blow.clone());
             }
-            // ServerPlayer.die: the drops, then the deathCount objectives, then,
-            // with a kill credit, `killed_by` for the killer's type and the
-            // killer's awardKillScore, then the `deaths` statistic and the two
-            // timers it resets.
+            // ServerPlayer.die: the drops, the deathCount objectives, the
+            // experience (`dropAllDeathLoot`), then a kill credit's `killed_by`,
+            // awardKillScore and wither rose, then `deaths` and the two timers.
             self.as_guest(host, conn, |game| {
                 if let Some(eyes) = drops {
                     game.drop_inventory(eyes, (uuid, id));
@@ -4495,16 +4494,17 @@ impl Game<'_> {
                     game.award_stat("killed_by", kind, 1);
                 }
             });
+            // The experience the catalyst took does not drop (`Player.
+            // skipDropExperience`), and `dropAllDeathLoot` drops it before the rose.
+            if !consumed {
+                self.spawn_orbs(at, reward);
+            }
             self.guest_killed_player_trigger(host, conn, at, blow);
+            self.guest_award_kill_score(host, conn, at);
             self.as_guest(host, conn, |game| {
                 game.award_custom_stat("deaths", 1);
                 game.stats.reset_death_timers();
             });
-            // The experience the catalyst took does not drop (`Player.
-            // skipDropExperience`).
-            if !consumed {
-                self.spawn_orbs(at, reward);
-            }
         }
     }
 

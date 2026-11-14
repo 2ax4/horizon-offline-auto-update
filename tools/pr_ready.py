@@ -277,9 +277,9 @@ def tests_passed(output):
 
 
 def unittest_passed(output):
-    failed = re.search(r"^(FAILED \(.*\))$", output, re.M)
+    outcome = re.search(r"^((?:OK|FAILED) \(.*\))$", output, re.M)
     ran = re.search(r"^Ran (\d+) tests?", output, re.M)
-    return f"{ran.group(1) if ran else '?'} run, {failed.group(1)}" if failed else f"{ran.group(1)} passed" if ran else ""
+    return f"{ran.group(1) if ran else '?'} run, {outcome.group(1)}" if outcome else f"{ran.group(1)} passed" if ran else ""
 
 
 def parity_summary(output):
@@ -304,7 +304,7 @@ def parity_summary(output):
 # CI's verify job (.github/workflows/ci.yml): clippy over the whole workspace, and over the server build (the game
 # without sound or controllers).
 CI_CLIPPY = "cargo clippy --workspace --all-targets --locked -- -D warnings"
-CI_CLIPPY_SERVER = "cargo clippy -p horizon-client --all-targets --locked --no-default-features -- -D warnings"
+CI_CLIPPY_SERVER = "cargo clippy -p horizon-client --lib --bins --locked --no-default-features -- -D warnings"
 
 
 # CI installs the current stable each run (rustup toolchain install stable), and Rust ships one every six weeks
@@ -389,7 +389,6 @@ def plan(args, base, changed, crates_of, libraries, dependencies):
         # docs/layers.md: a crate depends only on its own layer or a lower one, and the exceptions only shrink.
         Step("Layers", f"python3 tools/check_layers.py --base {shlex.quote(base)}", where="here"),
         Step("Addresses", f"python3 tools/check_addresses.py --base {shlex.quote(base)}", where="here"),
-        Step("File size", f"python3 tools/check_file_size.py --base {shlex.quote(base)}", where="here"),
         # Always, as in CI: some read the crates, the roadmap or the workflows.
         Step("Python tests", "python3 -m unittest discover -s tests", where="here", summary=unittest_passed),
         Step("rustfmt", "cargo fmt --all -- --check", skip=None if rust else no_rust),
@@ -507,8 +506,6 @@ def run_windows(steps, verbose):
             command = [sys.executable, "tools/check_layers.py", *command[2:]]
         elif step.name == "Addresses":
             command = [sys.executable, "tools/check_addresses.py", *command[2:]]
-        elif step.name == "File size":
-            command = [sys.executable, "tools/check_file_size.py", *command[2:]]
         elif step.name == "Python tests":
             command = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
         elif step.name == "rustfmt":

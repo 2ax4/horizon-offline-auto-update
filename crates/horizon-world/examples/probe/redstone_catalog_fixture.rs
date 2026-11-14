@@ -193,6 +193,7 @@ impl Run<'_> {
                 may_build: true,
                 can_eat: false,
                 game_master: false,
+                respawn_point: None,
             };
             self.behaviours.use_without_item(
                 &mut self.level,

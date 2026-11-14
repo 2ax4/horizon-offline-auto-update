@@ -91,6 +91,7 @@ impl Mob {
             hunted_recently: m.species() == Species::Piglin && m.extra.ints[0] > 0,
             hurt_recently: m.species() == Species::Piglin && m.extra.piglin.hurt,
             huntable: m.species() == Species::Hoglin && !m.is_baby() && !m.extra.cannot_be_hunted,
+            invulnerable: m.is_invulnerable(),
         }
     }
 }

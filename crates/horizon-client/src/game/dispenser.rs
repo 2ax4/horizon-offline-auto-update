@@ -1043,7 +1043,7 @@ impl Game<'_> {
         true
     }
     /// After `EntityType.spawn` / `MobBucketItem.spawn`: `mob.playAmbientSound()`.
-    fn mob_ambient(&mut self, id: u32) -> Result<()> {
+    pub(super) fn mob_ambient(&mut self, id: u32) -> Result<()> {
         if self.dragon_spawn_ambient(id) {
             return Ok(());
         }

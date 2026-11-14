@@ -1845,13 +1845,12 @@ impl Menu {
             return;
         }
         if self.slots[s].role == Role::StoneResult {
-            // StonecutterMenu's result onTake: awardUsedRecipes, one input
-            // used up, the result again for the selected recipe.
+            // StonecutterMenu's result onTake: onCraftedBy, awardUsedRecipes, one input used.
+            self.crafted_by(taken, taken.count as i32);
             if let Some(r) = self.stone.used {
-                self.crafted.push((
-                    env.station_recipes.stonecutting[r].id.clone(),
-                    vec![self.containers[MAIN][0].clone()],
-                ));
+                let id = env.station_recipes.stonecutting[r].id.clone();
+                self.crafted
+                    .push((id, vec![self.containers[MAIN][0].clone()]));
             }
             if self.remove(env, 0, 1).is_some() {
                 self.stone_setup_result(env, self.data[0]);
@@ -1884,8 +1883,9 @@ impl Menu {
             return;
         }
         if self.slots[s].role == Role::CombineResult {
-            // SmithingMenu.onTake: awardUsedRecipes, then one of each input.
+            // SmithingMenu.onTake: onCraftedBy, awardUsedRecipes, then one of each input.
             if self.kind == Kind::Smithing {
+                self.crafted_by(taken, taken.count as i32);
                 let inputs = [0, 1, 2].map(|i| self.containers[MAIN][i].clone());
                 if let Some((id, _)) = env.station_recipes.smithing_recipe(
                     env.enchantments,
@@ -2743,8 +2743,8 @@ impl Menu {
             return None;
         }
         if after_take || matches!(self.kind, Kind::Inventory | Kind::Crafting) {
-            // A merchant result reports the stack it moved, a crafting result the copy it
-            // takes (which Item.onCraftedBy may still change).
+            // A merchant, stonecutter or smithing result reports what its move left behind, a
+            // crafting result the copy it takes (which Item.onCraftedBy may still change).
             self.take_after_quick_move(env, index, &mut clicked, &mut stack);
         }
         // What the result slot's move left over is dropped.
@@ -3295,14 +3295,8 @@ impl Menu {
     }
     /// `MerchantResultSlot.checkTakeAchievements`: award the tallied count, then reset it.
     fn merchant_check_take_achievements(&mut self, stack: &ItemStack) {
-        // ItemStack.getItem returns AIR for the emptied quick-move remainder.
-        let item = if stack.count == 0 {
-            "minecraft:air".into()
-        } else {
-            stack.item.clone()
-        };
-        self.crafted_counts
-            .push((item, std::mem::take(&mut self.merchant_remove_count)));
+        let n = std::mem::take(&mut self.merchant_remove_count);
+        self.crafted_by(stack, n);
     }
 
     /// `MerchantResultSlot.onTake`: the payment is taken and the merchant
@@ -4200,6 +4194,7 @@ pub(crate) mod tests {
         });
     }
 
+    mod crafted_stat_tests;
     mod mod_grid_tests;
 
     /// Extra sources (`native_recipe_sources`) count as more inventory: the

@@ -82,6 +82,11 @@ impl Game<'_> {
             return Ok(false);
         };
         let kind = stack.item.trim_end_matches("_spawn_egg").to_owned();
+        // ItemStack.useOn in adventure mode: an egg used on a block without a
+        // matching `can_place_on` passes to `use`, whose fluid ray finds none.
+        if !fluid && !self.may_use_on(hit.pos) {
+            return Ok(false);
+        }
         if !self.spawn_egg_allowed(&stack.item) {
             self.use_failed = true;
             return Ok(true);

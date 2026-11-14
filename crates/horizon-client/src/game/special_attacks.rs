@@ -1,5 +1,5 @@
 //! Accepted melee hits on special targets and their shared attacker tail.
-use super::{dragon::Hurt, *};
+use super::{dragon::Hurt, minecarts::CartHit, *};
 use horizon_client::mobs::DamageKind;
 
 impl Game<'_> {
@@ -66,7 +66,8 @@ impl Game<'_> {
         let id = self.carts[i].id as i32;
         let kind = self.carts[i].kind.id();
         let (damage, scale, _, magic) = self.melee_damage(kind, false);
-        if self.hurt_cart_result(i, damage, self.creative, burning) && damage > 0.0 {
+        let hit = CartHit::player();
+        if self.hurt_cart_result(i, damage, self.creative, burning, hit) && damage > 0.0 {
             self.vehicle_attack_sounds(area, magic.then_some(id));
             let (knockback, _) = self.extra_knockback(kind, scale);
             self.special_attack_slowdown(knockback);

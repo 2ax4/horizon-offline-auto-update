@@ -157,11 +157,19 @@ impl Islands<'_> {
         start: &Start,
     ) -> Option<Plan> {
         let lanes = lanes();
-        if lanes < 2
-            || mods_hook_turns()
-            || mobs.len() < MIN_TICKING
-            || horizon_client::random_source::repeating_per_thread()
-        {
+        let early = if lanes < 2 {
+            Some(Verdict::OneLane)
+        } else if mods_hook_turns() {
+            Some(Verdict::ModsHookTurns)
+        } else if mobs.len() < MIN_TICKING {
+            Some(Verdict::FewMobs)
+        } else if horizon_client::random_source::repeating_per_thread() {
+            Some(Verdict::RepeatingSeeds)
+        } else {
+            None
+        };
+        if let Some(verdict) = early {
+            verdict.record(&Census::default());
             return None;
         }
         // A content mod's effect ticks through the native mods (`ModEffectTicks`), which run
@@ -174,6 +182,7 @@ impl Islands<'_> {
                     .any(|e| horizon_client_core::potions::is_mod_effect(e.0))
             })
         {
+            Verdict::ModEffect.record(&Census::default());
             return None;
         }
         // Where an owner stands: the players a pet can see this tick.
@@ -184,7 +193,26 @@ impl Islands<'_> {
             .map(|p| (p.uuid, p.position))
             .collect();
         horizon_client::spans::time("islands_plan", || {
-            islands(&reaches(mobs, snapshot, turns, &players)?, lanes)
+            let list = match reaches_why(mobs, snapshot, turns, &players) {
+                Ok(list) => list,
+                Err(bad) => {
+                    bad.verdict.record(&Census::default());
+                    bad.log();
+                    return None;
+                }
+            };
+            let mut census = Census::default();
+            let plan = islands_why(&list, lanes, &mut census);
+            match plan {
+                Ok(plan) => {
+                    Verdict::Grouped.record(&census);
+                    Some(plan)
+                }
+                Err(verdict) => {
+                    verdict.record(&census);
+                    None
+                }
+            }
         })
     }
 
@@ -689,21 +717,85 @@ fn warden_links(m: &Mob, links: &mut Vec<u32>) {
 /// Each mob's reach; None when a value is not finite or the lists don't match. Changes to movement,
 /// reads or cross-mob writes require a conservative reach and a behavioral regression; verify is
 /// no safety net. `owners`: each player a mob can see this tick, by UUID, where it stands.
+#[cfg(test)]
 fn reaches(
     mobs: &[Mob],
     snapshot: &[Seen],
     turns: &Turns,
     owners: &[([i32; 4], Vec3)],
 ) -> Option<Vec<Reach>> {
+    reaches_why(mobs, snapshot, turns, owners).ok()
+}
+
+/// The mob whose reach has no finite bound, and which bound: one such mob keeps every mob of the
+/// level serial, so a capture names it (the `mob_islands.ticks` verdict, and a log line).
+struct Unbounded {
+    verdict: Verdict,
+    /// The mob's id, species and where it is, or nothing for the lists' lengths.
+    mob: Option<(u32, String, Vec3, Vec3)>,
+}
+
+impl Unbounded {
+    fn of(verdict: Verdict, m: &Mob, id: u32) -> Self {
+        Self {
+            verdict,
+            mob: Some((id, format!("{:?}", m.species()), m.position, m.velocity)),
+        }
+    }
+
+    /// Logs the mob, at most once a minute.
+    fn log(&self) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let last = LAST.load(Ordering::Relaxed);
+        if now < last.saturating_add(60)
+            || LAST
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        match &self.mob {
+            Some((id, species, at, v)) => log::warn!(
+                "mob islands: mob {id} ({species}) at ({:.1}, {:.1}, {:.1}) with velocity \
+                 ({:.3}, {:.3}, {:.3}) keeps every mob of the level serial: {}",
+                at.x,
+                at.y,
+                at.z,
+                v.x,
+                v.y,
+                v.z,
+                self.verdict.label()
+            ),
+            None => log::warn!(
+                "mob islands: the mobs and their snapshot differ in length, so the tick runs serially"
+            ),
+        }
+    }
+}
+
+/// [`reaches`], with the mob and the bound that kept it from being one.
+fn reaches_why(
+    mobs: &[Mob],
+    snapshot: &[Seen],
+    turns: &Turns,
+    owners: &[([i32; 4], Vec3)],
+) -> std::result::Result<Vec<Reach>, Unbounded> {
     if mobs.len() != snapshot.len() {
-        return None;
+        return Err(Unbounded {
+            verdict: Verdict::UnboundedLists,
+            mob: None,
+        });
     }
     let mut out = Vec::with_capacity(mobs.len());
     for (m, s) in mobs.iter().zip(snapshot) {
         if !(m.position.x.is_finite() && m.position.y.is_finite() && m.position.z.is_finite())
             || !(m.velocity.x.is_finite() && m.velocity.y.is_finite() && m.velocity.z.is_finite())
         {
-            return None;
+            return Err(Unbounded::of(Verdict::UnboundedState, m, s.id));
         }
         let (bx, bz) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
         let v = m.velocity;
@@ -713,14 +805,16 @@ fn reaches(
             .items
             .and_then(|items| teleport_consumable(m, items))
         {
-            Some(d) if !d.is_finite() => return None,
+            Some(d) if !d.is_finite() => {
+                return Err(Unbounded::of(Verdict::UnboundedMeal, m, s.id));
+            }
             Some(d) => Some(d / 2.0 + 1.0),
             None => None,
         };
         let motion = 2.0 * (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
             + jump(s.species)
             + meal.unwrap_or(0.0)
-            + locomotion(m)?
+            + locomotion(m).ok_or_else(|| Unbounded::of(Verdict::UnboundedLocomotion, m, s.id))?
             + SLACK;
         let mut body = grow(s.bounds, motion);
         // ...then the drop to the ground below the landing, as deep as the world goes.
@@ -803,7 +897,7 @@ fn reaches(
             away,
         });
     }
-    Some(out)
+    Ok(out)
 }
 
 /// Union-find over the mobs' places.
@@ -879,10 +973,107 @@ impl Cells {
 /// The islands of `reaches`, packed into at most `lanes` groups; None when the loop should run
 /// serially: too few ticking mobs, a plan past its budget, one island holding most of the ticking
 /// mobs, or only one group.
+#[cfg(test)]
 fn islands(reaches: &[Reach], lanes: usize) -> Option<Plan> {
+    islands_why(reaches, lanes, &mut Census::default()).ok()
+}
+
+/// Why a tick's mobs run in groups or serially, as the `mob_islands.ticks` counter's `verdict`
+/// label: one count per tick, so a capture shows which rule keeps a server's mob loop on one
+/// thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The mobs ran in groups.
+    Grouped,
+    /// One lane (a machine or `HORIZON_WORKER_THREADS` with fewer than two threads).
+    OneLane,
+    /// A native mod can run code in a mob's turn (`HORIZON_MOB_TURN`).
+    ModsHookTurns,
+    /// Fewer than `MIN_TICKING` mobs in the loop.
+    FewMobs,
+    /// `HORIZON_TEST_SEEDS`.
+    RepeatingSeeds,
+    /// A mob carries a content mod's effect while mods are loaded.
+    ModEffect,
+    /// The mob and snapshot lists differ in length.
+    UnboundedLists,
+    /// A mob's position or velocity is not finite: that one mob keeps every mob serial.
+    UnboundedState,
+    /// A teleporting meal's diameter is not finite.
+    UnboundedMeal,
+    /// A mob's locomotion bound is not finite (`locomotion`).
+    UnboundedLocomotion,
+    /// Fewer than `MIN_TICKING` of the mobs tick.
+    FewTicking,
+    /// The plan used up its cell visits.
+    OverBudget,
+    /// One island holds more than three quarters of the ticking mobs.
+    OneIsland,
+    /// The islands fit in one group.
+    OneGroup,
+}
+
+impl Verdict {
+    fn label(self) -> &'static str {
+        match self {
+            Verdict::Grouped => "grouped",
+            Verdict::OneLane => "one_lane",
+            Verdict::ModsHookTurns => "mods_hook_turns",
+            Verdict::FewMobs => "few_mobs",
+            Verdict::RepeatingSeeds => "repeating_seeds",
+            Verdict::ModEffect => "mod_effect",
+            Verdict::UnboundedLists => "unbounded_lists",
+            Verdict::UnboundedState => "unbounded_state",
+            Verdict::UnboundedMeal => "unbounded_meal",
+            Verdict::UnboundedLocomotion => "unbounded_locomotion",
+            Verdict::FewTicking => "few_ticking",
+            Verdict::OverBudget => "over_budget",
+            Verdict::OneIsland => "one_island",
+            Verdict::OneGroup => "one_group",
+        }
+    }
+
+    /// Counts the tick under its verdict, and sets the gauges of what the plan found when it got
+    /// that far. Nothing is read while the profiler is off.
+    fn record(self, census: &Census) {
+        if !horizon_client::spans::enabled() {
+            return;
+        }
+        horizon_perf_format::counter("mob_islands.ticks", &[("verdict", self.label())]).add(1);
+        if census.ticking > 0 {
+            for (name, value) in [
+                ("mob_islands.ticking", census.ticking),
+                ("mob_islands.islands", census.islands),
+                ("mob_islands.largest_island", census.largest),
+            ] {
+                horizon_perf_format::gauge(name, &[]).set(value as f64);
+            }
+        }
+    }
+}
+
+/// What a plan found among a tick's mobs: how many tick, how many islands they form, and how many
+/// the largest holds. Zero until the plan got that far.
+#[derive(Default)]
+struct Census {
+    ticking: usize,
+    islands: usize,
+    largest: usize,
+}
+
+/// [`islands`], with the reason a tick runs serially.
+fn islands_why(
+    reaches: &[Reach],
+    lanes: usize,
+    census: &mut Census,
+) -> std::result::Result<Plan, Verdict> {
     let ticking = reaches.iter().filter(|r| r.ticking).count();
-    if lanes < 2 || ticking < MIN_TICKING {
-        return None;
+    census.ticking = ticking;
+    if lanes < 2 {
+        return Err(Verdict::OneLane);
+    }
+    if ticking < MIN_TICKING {
+        return Err(Verdict::FewTicking);
     }
     let n = reaches.len();
     let mut budget = PLAN_BUDGET;
@@ -942,25 +1133,33 @@ fn islands(reaches: &[Reach], lanes: usize) -> Option<Plan> {
     // Columns by the cells their boxes cover.
     let (mut bodies, mut claims) = (Cells::default(), Cells::default());
     for (c, col) in columns.iter().enumerate() {
-        bodies.insert(c as u32, col.body, &mut budget)?;
+        bodies
+            .insert(c as u32, col.body, &mut budget)
+            .ok_or(Verdict::OverBudget)?;
         if let Some(b) = col.claims {
-            claims.insert(c as u32, b, &mut budget)?;
+            claims
+                .insert(c as u32, b, &mut budget)
+                .ok_or(Verdict::OverBudget)?;
         }
     }
     for col in &columns {
-        bodies.query(col.sense, &mut budget, |j| {
-            let other = &columns[j as usize];
-            if other.body.intersects(col.sense) {
-                sets.join(col.first, other.first);
-            }
-        })?;
-        if let Some(reads) = col.village_reads {
-            claims.query(reads, &mut budget, |j| {
+        bodies
+            .query(col.sense, &mut budget, |j| {
                 let other = &columns[j as usize];
-                if other.claims.is_some_and(|b| b.intersects(reads)) {
+                if other.body.intersects(col.sense) {
                     sets.join(col.first, other.first);
                 }
-            })?;
+            })
+            .ok_or(Verdict::OverBudget)?;
+        if let Some(reads) = col.village_reads {
+            claims
+                .query(reads, &mut budget, |j| {
+                    let other = &columns[j as usize];
+                    if other.claims.is_some_and(|b| b.intersects(reads)) {
+                        sets.join(col.first, other.first);
+                    }
+                })
+                .ok_or(Verdict::OverBudget)?;
         }
     }
     let mut raids = FxHashMap::<i32, u32>::default();
@@ -988,14 +1187,18 @@ fn islands(reaches: &[Reach], lanes: usize) -> Option<Plan> {
         islands[k].0 += usize::from(r.ticking);
     }
     let largest = islands.iter().map(|i| i.0).max().unwrap_or(0);
+    (census.islands, census.largest) = (islands.len(), largest);
     if largest * 4 > ticking * 3 {
-        return None;
+        return Err(Verdict::OneIsland);
     }
     // Heaviest first (stable: ties keep the list's order), each to the lightest group.
     islands.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut groups: Vec<(usize, Vec<usize>)> = vec![(0, Vec::new()); lanes];
     for (weight, members) in islands {
-        let g = groups.iter_mut().min_by_key(|g| g.0)?;
+        let g = groups
+            .iter_mut()
+            .min_by_key(|g| g.0)
+            .ok_or(Verdict::OneGroup)?;
         g.0 += weight;
         g.1.extend(members);
     }
@@ -1007,7 +1210,11 @@ fn islands(reaches: &[Reach], lanes: usize) -> Option<Plan> {
     for g in &mut groups {
         g.sort_unstable();
     }
-    (groups.len() > 1).then_some(Plan { groups })
+    if groups.len() > 1 {
+        Ok(Plan { groups })
+    } else {
+        Err(Verdict::OneGroup)
+    }
 }
 
 /// Every mob's snapshot entry across the groups, for a lookup by id of a mob in another group:
@@ -1620,12 +1827,25 @@ mod tests {
             assert_ne!(of[0], of[200], "{attr:?}");
             mobs[0] = unchanged.clone();
         }
+        let bad = |mobs: &[Mob], snapshot: &[Seen]| {
+            let bad = reaches_why(mobs, snapshot, &turns, &owners).err().unwrap();
+            (bad.verdict, bad.mob.map(|m| m.0))
+        };
         mobs[0].velocity.x = f64::NAN;
-        assert!(reaches(&mobs, &snapshot, &turns, &owners).is_none());
+        assert_eq!(
+            bad(&mobs, &snapshot),
+            (Verdict::UnboundedState, Some(snapshot[0].id))
+        );
         mobs[0] = unchanged;
         mobs[0].position.y = f64::NAN;
-        assert!(reaches(&mobs, &snapshot, &turns, &owners).is_none());
-        assert!(reaches(&mobs, &snapshot[..399], &turns, &owners).is_none());
+        assert_eq!(
+            bad(&mobs, &snapshot),
+            (Verdict::UnboundedState, Some(snapshot[0].id))
+        );
+        assert_eq!(
+            bad(&mobs, &snapshot[..399]),
+            (Verdict::UnboundedLists, None)
+        );
     }
 
     /// A later id is visible frozen without waiting; an earlier id waits for its publication,
@@ -1811,6 +2031,27 @@ mod tests {
             ..r
         }));
         assert!(islands(&resting, 2).is_none());
+    }
+
+    /// A serial tick says why: the verdict the `mob_islands.ticks` counter is labelled with, and
+    /// what the plan found (how many tick, how many islands, the largest) when it got that far.
+    #[test]
+    fn a_serial_tick_names_its_rule() {
+        let why = |list: &[Reach], lanes| {
+            let mut census = Census::default();
+            let verdict = islands_why(list, lanes, &mut census).err();
+            (verdict, (census.ticking, census.islands, census.largest))
+        };
+        let mut few = herd(0, 100, 0.0, 0.0);
+        few.extend(herd(1000, 100, 1000.0, 0.0));
+        assert_eq!(why(&few, 2), (Some(Verdict::FewTicking), (200, 0, 0)));
+        let mut three = few.clone();
+        three.extend(herd(2000, 100, 2000.0, 0.0));
+        assert_eq!(why(&three, 1), (Some(Verdict::OneLane), (300, 0, 0)));
+        assert_eq!(why(&three, 2), (None, (300, 3, 100)));
+        let mut lopsided = herd(0, 400, 0.0, 0.0);
+        lopsided.extend(herd(1000, 100, 1000.0, 0.0));
+        assert_eq!(why(&lopsided, 2), (Some(Verdict::OneIsland), (500, 2, 400)));
     }
 
     fn separated_herds_game() -> Game<'static> {

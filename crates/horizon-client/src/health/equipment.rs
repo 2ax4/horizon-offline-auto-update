@@ -11,6 +11,8 @@ pub struct EquipmentHurt {
     blocking: Option<Blocking>,
     living_cause: bool,
     causing: i32,
+    /// The attacker's weapon, for the armour fraction's `armor_effectiveness`.
+    armor_weapon: Option<ArmorWeapon>,
     before: f32,
     fire_ticks: i32,
     prepared: Option<PreparedHurt<()>>,
@@ -69,6 +71,8 @@ impl PlayerMotion {
             client_loaded: self.client_loaded,
             rules: hit.rules,
             source,
+            weapon: hit.armor_weapon.as_ref(),
+            random: &mut self.random,
             living_cause: hit.living_cause,
             events: &mut self.events,
             dead: &mut h.dead,
@@ -112,6 +116,7 @@ impl PlayerMotion {
         blocking: Option<Blocking>,
         living_cause: bool,
         causing: i32,
+        armor_weapon: Option<ArmorWeapon>,
     ) -> Result<EquipmentHurt> {
         let mut hit = EquipmentHurt {
             source,
@@ -120,6 +125,7 @@ impl PlayerMotion {
             blocking,
             living_cause,
             causing,
+            armor_weapon,
             before: self.health.health() + self.health.absorption(),
             fire_ticks: self.fire_ticks,
             prepared: None,
