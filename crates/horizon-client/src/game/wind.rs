@@ -5,6 +5,7 @@ use super::Game;
 use super::entity::{Blast, Entity as _, for_each_entity_mut};
 use super::minecarts::CartHit;
 use horizon_client::advancements::EntityView;
+use horizon_client::chunk::LevelShape;
 use horizon_client::join_seq::Joined as _;
 use horizon_client::{
     Result,
@@ -138,6 +139,14 @@ pub(super) fn reverse(p: &mut Projectile, jitter: f32) {
         p.velocity.z * -0.5,
     );
     p.yaw += 170.0 + jitter * 20.0;
+}
+/// `AbstractWindCharge.tick`: a charge whose block Y is above the level's
+/// `getMaxY() + 30` bursts where it is, whatever it would have met. `shape`
+/// is the level's own height, not the chunks' widened column
+/// (`LevelShape::max_y` is `getMaxY() + 1`), and `getBlockY` is
+/// `floor(y)`, so `floor(y) > getMaxY() + 30` is `y >= max_y + 30`.
+pub(super) fn above_the_top(shape: LevelShape, y: f64) -> bool {
+    y >= f64::from(shape.max_y() + 30)
 }
 /// Whether a block reacts to a wind charge's burst by being used.
 fn triggers(name: &str) -> bool {
@@ -318,8 +327,8 @@ impl Game<'_> {
         // The first run of this tick already gave these.
         again.take_shoot_event();
         again.bubble_surfaces.clear();
-        // AbstractWindCharge.tick: out of the world's top it bursts.
-        if keep && again.position.y > 350.0 {
+        // AbstractWindCharge.tick: above the world's top it bursts.
+        if keep && above_the_top(self.world.shape, again.position.y) {
             keep = false;
             hit = Hit::Block {
                 pos: [0; 3],
@@ -365,8 +374,10 @@ impl Game<'_> {
                 self.hurt_vehicle(p, id, 1.0);
             }
             Who::Mob(id) => {
+                // AbstractWindCharge.onHitEntity: `damageSources().windCharge`
+                // (`minecraft:wind_charge`, whose message id is `mob`).
                 let source = Damage {
-                    kind: DamageKind::Thrown,
+                    kind: DamageKind::WindCharge,
                     attacker: p.owner,
                     from: Some([p.previous.x, p.previous.y, p.previous.z]),
                     attacker_species: owner_breeze.then_some(Species::Breeze),

@@ -163,8 +163,9 @@ impl ExperienceOrb {
     /// resets its fall, and `Entity.baseTick` halves it in lava (`isInLava`
     /// is false on the orb's first tick, `Entity.firstTick`). Answers
     /// `isEyeInFluid(FluidTags.WATER)` for the eye the scan reads, `0.425`
-    /// above the orb's feet, and `isInWater`.
-    pub fn update_fluids(&mut self, world: &World, fluids: &FluidResources) -> (bool, bool) {
+    /// above the orb's feet, `isInWater`, and `isInLava` (before
+    /// `Entity.firstTick` is taken into account).
+    pub fn update_fluids(&mut self, world: &World, fluids: &FluidResources) -> (bool, bool, bool) {
         let (water, lava, eye) = update_entity_fluids(
             self.bounds(),
             self.position,
@@ -180,7 +181,7 @@ impl ExperienceOrb {
         if lava > 0.0 && self.ticks > 1 {
             self.fall_distance *= 0.5;
         }
-        (eye, water > 0.0)
+        (eye, water > 0.0, lava > 0.0)
     }
 }
 impl ArmorStand {
@@ -496,6 +497,7 @@ mod tests {
             health: 5,
             air: 300,
             following: None,
+            fire_ticks: 0,
         };
         let mut still = orb.clone();
         assert!(still.tick(
@@ -588,6 +590,7 @@ mod tests {
             health: 5,
             air: 300,
             following: None,
+            fire_ticks: 0,
         };
         assert!(orb.tick(
             &world,

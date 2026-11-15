@@ -771,46 +771,13 @@ impl Game<'_> {
             _ => None,
         };
         let field = |key: &str| opts.as_ref().and_then(|c| c.get(&key.into()).cloned());
-        let number = |t: &Tag| -> Option<f32> {
-            Some(match t {
-                Tag::Byte(v) => f32::from(*v),
-                Tag::Short(v) => f32::from(*v),
-                Tag::Int(v) => *v as f32,
-                Tag::Long(v) => *v as f32,
-                Tag::Float(v) => f32::from_bits(*v),
-                Tag::Double(v) => f64::from_bits(*v) as f32,
-                _ => return None,
-            })
-        };
         let string = |t: &Tag| match t {
             Tag::String(s) => Some(s.to_string_lossy()),
             _ => None,
         };
-        // ExtraCodecs.RGB_COLOR_CODEC: an int or a list of three floats.
-        let rgb = match field("color") {
-            Some(Tag::List(l)) if l.len() >= 3 => [
-                number(&l[0]).unwrap_or(1.0),
-                number(&l[1]).unwrap_or(0.0),
-                number(&l[2]).unwrap_or(0.0),
-            ],
-            Some(Tag::Int(v)) => [
-                ((v >> 16) & 255) as f32 / 255.0,
-                ((v >> 8) & 255) as f32 / 255.0,
-                (v & 255) as f32 / 255.0,
-            ],
-            _ => [1.0, 0.0, 0.0],
-        };
         // The block state of a block particle, for its packet.
         let mut block_state = None;
         let options = match ty {
-            ParticleType::Dust => ParticleOptions::dust(
-                rgb,
-                field("scale")
-                    .as_ref()
-                    .and_then(number)
-                    .unwrap_or(1.0)
-                    .clamp(0.01, 4.0),
-            ),
             // ItemParticleOption: an item id, or a stack {id, ...}.
             ParticleType::Item => {
                 let id = match field("item") {
@@ -832,6 +799,7 @@ impl Game<'_> {
                 ParticleOptions::simple(ty)
             }
             ParticleType::Block
+            | ParticleType::BlockCrumble
             | ParticleType::FallingDust
             | ParticleType::DustPillar
             | ParticleType::BlockMarker => {
@@ -876,7 +844,13 @@ impl Game<'_> {
                     _ => ParticleOptions::simple(ty),
                 }
             }
-            _ => ParticleOptions::simple(ty),
+            // Every other type with options decodes its own codec
+            // (`ParticleTypes.CODEC`): dust, spells, sculk charge, shriek,
+            // geysers. A type without options keeps the defaults.
+            _ => opts
+                .as_ref()
+                .and_then(|c| crate::game::potions::particle_options(ty, c))
+                .unwrap_or_else(|| ParticleOptions::simple(ty)),
         };
         let pos = self
             .position_arg(ctx, "pos")
@@ -1793,8 +1767,7 @@ impl Game<'_> {
         // `RideCommand.mount` forces the ride (`startRiding(vehicle, true, true)`),
         // which skips `canRide` and `canAddPassenger`: a boat under water still
         // takes the rider. Horizon's boats seat at most `max_passengers`, so a
-        // full boat still refuses. Minecarts carry only players here: Horizon's
-        // carts have no mob passengers yet.
+        // full boat still refuses.
         match vehicle {
             Target::Boat(id) => {
                 let Some(i) = self.boats.iter().position(|b| b.id == id) else {
@@ -1811,8 +1784,8 @@ impl Game<'_> {
                     if !self.native_may_board(id) {
                         return Err(generic());
                     }
-                    self.yaw = self.boats[i].yaw;
-                    // ServerPlayer.startRiding seats the player immediately.
+                    // ServerPlayer.startRiding seats the player immediately,
+                    // keeping its rotation (`Relative.ROTATION`).
                     let at = self.player_boat_seat(i);
                     if let Some(player) = self.player.as_mut() {
                         player.position = at;
@@ -1826,17 +1799,23 @@ impl Game<'_> {
                 return Ok(());
             }
             Target::Cart(id) => {
-                if target != Target::Player
-                    || self.ridden_by_guest(id)
-                    || !self.native_may_board(id)
-                {
+                if let Some(rider) = rider {
+                    // A cart carries any mob the forced ride puts in it
+                    // (`Entity.positionRider` seats it, game/minecarts.rs).
+                    if !self.try_mount_mob(rider, id) {
+                        return Err(generic());
+                    }
+                    return Ok(());
+                }
+                if self.ridden_by_guest(id) || !self.native_may_board(id) {
                     return Err(generic());
                 }
                 self.start_riding(id);
                 return Ok(());
             }
-            // An armor stand, a display, a marker, an interaction or any entity Horizon keeps as its
+            // An armor stand, a display, an interaction or any entity Horizon keeps as its
             // compound: the forced ride takes it too, and the rider sits on its passenger point.
+            // A marker takes no rider at all (`Marker.couldAcceptPassenger`).
             Target::Stand(id) | Target::Other(id) => {
                 let Some(seat) = self.seat(id) else {
                     return Err(generic());
@@ -1875,7 +1854,6 @@ impl Game<'_> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
             m.extra.flag = false;
             m.extra.counter = 0;
-            self.yaw = m.yaw;
         }
         self.mount.jump_ticks = 0;
         self.mount.jump_scale = 0.0;
@@ -2863,6 +2841,10 @@ mod vehicle_damage_command_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "../particle_command_tests.rs"]
+mod particle_command_tests;
 
 #[cfg(test)]
 #[path = "attribute_tests.rs"]

@@ -610,6 +610,8 @@ fn overlay_map(overlay: &PackOverlay, kind: &str, out: &mut HashMap<String, Valu
 
 mod odds;
 pub use odds::LootOdds;
+mod predicates;
+pub use predicates::load_predicates;
 
 /// Loot tables by id. Each is kept as its JSON text and read into a [`Value`]
 /// the first time it is rolled: of vanilla's ~1,450 tables a game rolls a
@@ -807,9 +809,7 @@ impl LootData {
         let mut modifiers = HashMap::new();
         load_kind(&all, "item_modifier", &mut modifiers)?;
         overlay_map(overlay, "item_modifier", &mut modifiers);
-        let mut predicates = HashMap::new();
-        load_kind(&all, "predicate", &mut predicates)?;
-        overlay_map(overlay, "predicate", &mut predicates);
+        let predicates = load_predicates(root, overlay)?;
         let raw = crate::item_defaults::shared(root)?;
         let items = raw
             .iter()

@@ -685,6 +685,7 @@ impl Game<'_> {
                 centre(pos.y, face[1]),
                 centre(pos.z, face[2]),
             ],
+            inside: false,
         });
         self.chat_capture = Some(Vec::new());
         let used = self.use_item_as_player();

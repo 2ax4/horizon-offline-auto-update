@@ -150,7 +150,7 @@ Each shader that marks the frame today writes the light instead:
 - **HDR lighting** (light levels 11 to 15, up to 4 times): the lightmap going past 1, which is what its alpha means
   now.
 - **Where:** terrain and fluids (`terrain.wgsl`, `mesher/fluid.rs`, distant terrain in `lod/mesh.rs`, the visibility
-  buffer), particles (`particles.rs`), the sun and moon (`fs_sky_celestial`), entities, dropped and held items
+  buffer), particles (`particles.rs`), the sun and moon (`fs_sky_celestial`, `fs_sky_sun`), entities, dropped and held items
   (`entity.wgsl`, `dynamic_light.rs`) and lightning (`gfx/lightning.rs`).
 - **The hand** draws at gain 1, as it stays at the world's brightness today, and before `keep_world` (see the HUD
   below), so it needs no mark.
@@ -252,8 +252,11 @@ They read the frame as it is stored and, outside the 0.1 path, have no marks to 
 above. Native upscaling
 ([#1403](https://github.com/horizon-rust/horizon/issues/1403)) should take the float frame. Horizon's TAA
 blends the gamma-stored frame as it is; a tone-weighted resolve is for passes that accumulate linear light (a 0.2
-pack's post chain, or the frame under linear storage), where bright pixels would otherwise sparkle. Frame generation stays off with HDR output, as today.
+pack's post chain, or the frame under linear storage), where bright pixels would otherwise sparkle. Frame generation
+interpolates the float frame's light before the tone curve, and the made frame goes through the tone curve, the HUD's
+layer and HDR output's last pass as the real one does; the compatibility frame keeps it off with HDR output.
 The rules such a pass keeps now are in [hdr-passes.md](../hdr-passes.md).
+Where a 0.2 pack's stages, post chain and `[tonemap]` sit around them is in [shader-api-frame.md](shader-api-frame.md) (proposed).
 
 ## Tests
 
@@ -308,11 +311,22 @@ Behind `HORIZON_HDR_FRAME=float` until the last step, each a small pull request:
      writes, and the world is mastered for a 1000-nit display at ITU-R BT.2408's 203-nit reference white, as HDR10
      content usually is: S = 1000/203 (4.93). The tiers multiply their brightest pixels by 1.6 (low), 2.4
      (incandescent), 2.8 (bright) and 4.0 (very bright), and HDR lighting the strongest-lit surfaces by 3.0
-     (`gfx/hdr.rs` `TIERS`, `SUNLIT_GAIN`, `SCENE_PEAK`). The curve holds light above S at S, keeping its hue (where
-     the sky adds onto the sun), then maps S onto the display's peak T with BT.2390's EETF in PQ on the brightest
+     (`gfx/hdr.rs` `TIERS`, `SUNLIT_GAIN`, `SCENE_PEAK`). The sun's disc shows vanilla's colour, sky plus sun
+     clipped at white channel by channel, with white at S (`gfx/celestial.rs`, `fs_sky_sun`). The sky under it is
+     vanilla's times one gain (HDR lighting's), so a blend of the frame by a weight and a min at S give it exactly;
+     added in the frame's gamma instead, sky and sun passed S and the hold flattened the disc in the sky's hue. The
+     very bright tier's lift weight takes both from the plain add, so the texture's faint halo and the moon add onto
+     the sky as before. The curve holds light above S at S, keeping its hue (where something adds onto the disc, or the moon
+     onto a bright sky), then maps S onto the display's peak T with BT.2390's EETF in PQ on the brightest
      channel: the identity where T reaches S, that is where Peak Brightness is at least 1000/203 times Paper White,
      so at a paper white of 203 a display at 1000 nits or more shows the scene as written and one above 1000 shows
-     it as at 1000. Light Horizon doesn't lift (HDR Lighting off, the title, a 0.2 pack's own) has
+     it as at 1000, but for the sun's disc: where T passes S its white is min(T, `SUN_CAP`) (2000 nits at a paper
+     white of 203; `Hdr::sun_peak`), so Peak Brightness above S moves the disc alone, and nothing from the cap up.
+     The disc's writer reads that peak, the one thing of the display a writer reads, and the curve holds light at
+     it instead of at S: min(light, the disc's peak), the identity up to it. The frame carries no mark for the
+     disc, so light that adds up past S (additive particles over a light source, lightning's quads over a bright
+     background, the moon over a bright sky) is held at the disc's peak there too. Where T is at most S the disc's
+     peak is S and every pass computes what it did. Light Horizon doesn't lift (HDR Lighting off, the title, a 0.2 pack's own) has
      no known peak, so there the curve's source still follows the display, as the 0.2 rule above describes. HDR off,
      the HUD, the black lift, the SDR screenshot's shoulder and the compatibility frame (HDR's default until step 5,
      whose look then changes once) don't change.

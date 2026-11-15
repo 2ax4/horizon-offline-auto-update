@@ -403,14 +403,20 @@ impl Game<'_> {
             return;
         };
         if let Some(title) = title {
-            let mut written = ItemStack::new("minecraft:written_book", 1);
-            written.data_mut().written = Some(WrittenBook {
+            // `signBook` transmutes the carried stack, so a renamed book and
+            // quill stays renamed and keeps its other components.
+            let mut written = stack.transmute("minecraft:written_book", stack.count);
+            let data = written.data_mut();
+            data.writable_pages = Vec::new();
+            data.written = Some(WrittenBook {
                 title,
                 author,
                 generation: 0,
                 pages,
                 page_tags: Vec::new(),
-                resolved: false,
+                // `signBook`'s `new WrittenBookContent(..., true)`: the pages
+                // are literals, so the content is already resolved.
+                resolved: true,
             });
             *stack = written;
         } else {
@@ -2127,6 +2133,10 @@ mod sign_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sign_book_tests.rs"]
+mod sign_book_tests;
 
 #[cfg(test)]
 mod tests {

@@ -27,7 +27,7 @@ here.
 - **Prerequisites:** Rust (stable), Python 3.11+, JDK 25, git 2.38 or newer, and on Linux the ALSA and udev headers
   (`libasound2-dev libudev-dev`).
 - **Resources:** Horizon never downloads the game; it prepares its resources from your own copy of Minecraft 26.3, as
-  described in [Build from source](README.md#build-from-source).
+  described in [Build from source](docs/native-client.md#run-from-a-checkout).
 - **Commands:**
 
   ```sh
@@ -119,6 +119,8 @@ including examples. The dependency scope includes optional, platform, build and 
 library, binary, integration and doc tests without building unrelated example executables. Shared Cargo
 configuration and toolchain changes select the whole workspace; CI also keeps its workspace-wide checks.
 
+For a quick check while you work, `python3 tools/check_changed.py` runs rustfmt, clippy and tests for only the crates your branch changed and the crates that depend on them (`--dry-run` lists the commands).
+
 ### Translations
 
 Most of Horizon's translations were written by machine and stay marked unreviewed until someone who speaks the
@@ -142,10 +144,12 @@ it (edited on every push, never repeated): talk to its author in the thread befo
 
 ## Pull requests
 
-- **Small.** One change per pull request, under about 500 lines of code where you can; split bigger work into
-  pieces that each make sense alone. Small pull requests get reviewed and merged the same day. Bigger than that:
+- **One change per pull request**, under about 3000 lines of code; split bigger work into pieces that each make
+  sense alone. Smaller pull requests get reviewed and merged faster. Bigger than that:
   [large pull requests](#large-pull-requests). What counts: lines added plus lines removed, outside Markdown (`.md`)
-  files and test files (any `tests/` or `test/` folder, and `test_*.py`). Tests written inside a source file do count.
+  files and test files (any `tests/` or `test/` folder, and `test_*.py`). Tests inside a source file
+  (`#[cfg(test)]` modules) don't count, and neither do lines moved unchanged (same text, whitespace ignored, runs of
+  3 or more lines), so a refactor that moves code can be far bigger than 3000 lines.
   pr_ready counts it the same way and warns when a pull request is over.
 - **Fill in the template**: what and why, the vanilla reference, the pr_ready block, screenshots for anything you
   can see.
@@ -176,7 +180,7 @@ How agents, checks, releases and signed updates keep this safe: [security](docs/
 
 ### Large pull requests
 
-500 lines of code ([what counts](#pull-requests)) stays the default. A pull request that can't be split below it
+3000 lines of code ([what counts](#pull-requests)) stays the default. A pull request that can't be split below it
 starts from a spec:
 
 1. **Open an issue with the spec** before the code: what changes, the files it touches, the behaviour players and

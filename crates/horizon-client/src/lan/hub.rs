@@ -2169,6 +2169,7 @@ impl Hub {
         let ticks = self.ticks;
         let g = &mut self.guests[i];
         g.teleport_tick = ticks;
+        g.held_ticket_chunk = Some(g.ticket_chunk()); // `teleport` has no `move`
         if let Some(p) = position {
             g.position = p;
             g.previous_position = p;
@@ -4273,6 +4274,7 @@ impl Hub {
         // A passenger only turns: its vehicle carries it (absSnapTo where it is).
         if g.vehicle.is_some() {
             (g.yaw, g.pitch) = (yaw, pitch);
+            g.release_tickets();
             return;
         }
         let d = [0, 1, 2].map(|k| to[k] - g.first_good[k]);
@@ -4399,8 +4401,7 @@ impl Hub {
         g.client_is_floating = floating;
         // Entity.move's verticalCollisionBelow, which the check above reads of the last move.
         g.rests_on_ground = stands;
-        g.previous_position = g.position;
-        g.position = to;
+        g.accept_move(to);
         // ServerChunkCache.move: its pairs are checked again.
         g.moved = true;
         let moved = [0, 1, 2].map(|k| g.position[k] - g.previous_position[k]);
@@ -4910,8 +4911,7 @@ impl Hub {
         g.send(&g.abilities());
         // The new player faces the level's respawn direction (snapTo).
         [g.yaw, g.pitch] = rotation;
-        g.position = at;
-        g.previous_position = at;
+        g.place(at);
         g.send(&C::Respawn(play::Respawn {
             spawn: info,
             keep: 0,
@@ -5027,8 +5027,7 @@ impl Hub {
         if let Some(pitch) = pitch {
             g.pitch = pitch;
         }
-        g.position = at;
-        g.previous_position = at;
+        g.place(at); // a level change adds it to the new `ChunkMap`
         g.send(&C::Respawn(play::Respawn {
             spawn: info,
             // ClientboundRespawnPacket.KEEP_ALL_DATA.
@@ -5089,6 +5088,7 @@ impl Hub {
     /// closes once its chunk is in) and TeleportTransition.PLAY_PORTAL_SOUND.
     pub fn land(&mut self, i: usize, at: [f64; 3]) {
         self.guests[i].landing = false;
+        self.guests[i].place(at); // `teleport` holds the chunk it leaves: the exit's
         self.teleport(i, Some(at));
         let g = &self.guests[i];
         g.send(&C::GameEvent(play::GameEvent {

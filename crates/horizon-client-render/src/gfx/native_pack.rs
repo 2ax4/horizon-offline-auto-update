@@ -1,6 +1,7 @@
 //! One of Horizon's own shader packs while it runs (docs/shaders.md): the frame its stages
 //! read, its sky, material and post stages, and the timer of their passes.
 
+use horizon_shader_api::check::CheckedStage;
 use horizon_shader_api::{Report, StageKind};
 
 use super::displace::Displacement;
@@ -40,6 +41,29 @@ fn option_on(constants: &[(String, f64)], id: Option<&String>) -> bool {
             .find(|(k, _)| k == id)
             .is_none_or(|(_, v)| *v != 0.0)
     })
+}
+
+/// Whether a stage of the pack reads the world before translucent terrain (`opaque_depth`,
+/// `opaque_color`): only the material stage has them, for `material` and, under
+/// `[displacement]`, `displacement`, and whatever those call.
+fn reads_opaque(stages: &[CheckedStage]) -> bool {
+    let reads = |s: &CheckedStage, function: naga::Handle<naga::Function>| {
+        s.module
+            .global_variables
+            .iter()
+            .filter(|(_, g)| matches!(g.name.as_deref(), Some("opaque_depth" | "opaque_color")))
+            .any(|(global, _)| !s.info[function][global].is_empty())
+    };
+    stages
+        .iter()
+        .filter(|s| s.kind == StageKind::Material)
+        .any(|s| {
+            s.module
+                .functions
+                .iter()
+                .filter(|(_, f)| matches!(f.name.as_deref(), Some("material" | "displacement")))
+                .any(|(function, _)| reads(s, function))
+        })
 }
 
 /// `[displacement]`'s cells: the value of its `cells_option`, if any.
@@ -191,6 +215,7 @@ impl NativePack {
             .find(|s| s.kind == StageKind::Material)
             .is_some_and(|s| s.reads("reflection"))
             && option_on(constants, option);
+        frame.reads_opaque = reads_opaque(&report.stages);
         let fog = report.material_fog;
         let keeps = |key: fn(&horizon_shader_api::Stage) -> Option<bool>| {
             report.sky.as_ref().and_then(key).unwrap_or(true)
@@ -295,19 +320,73 @@ impl NativePack {
             || self.weather.is_some()
             || self.post.is_some()
     }
+
+    /// Whether a stage reads the arena's solid quads as `TerrainVertex`es, so they upload
+    /// wide (`Renderer::follow_packed_layout`): `[displacement]`'s copy of the quads. The
+    /// material's and the shadow pass's solid entries unpack compact records as the engine's
+    /// own pipelines do (`native_material::SECTION_CORNER`).
+    pub fn reads_terrain_vertices(&self) -> bool {
+        self.displacement.is_some()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NativePack, TerrainShape, chosen_shadow};
+    use super::{NativePack, TerrainShape, chosen_shadow, reads_opaque};
     use horizon_shader_api::manifest::{OptionKind, PackOption, Shadow};
+
+    /// The world before translucent terrain is copied only for a pack whose material, or the
+    /// functions it calls, or its `displacement`, reads `opaque_depth` or `opaque_color` (#16124).
+    #[test]
+    fn the_opaque_copies_are_made_only_for_a_pack_that_reads_them() {
+        use horizon_shader_api::{MANIFEST, Pack, check};
+        let reads = |material: &str, displacement: &str| {
+            let manifest = "schema = 1
+id = \"t\"
+name = \"T\"
+version = \"1\"
+                api = \"0.2\"
+[material]
+file = \"material.wgsl\"
+[displacement]
+";
+            let text = format!(
+                "fn material(input: MaterialInput) -> Surface {{
+    {material}
+}}
+                fn displacement(input: DisplacementInput) -> f32 {{
+    {displacement}
+}}
+                fn behind(t: vec2<i32>) -> vec4<f32> {{ return textureLoad(opaque_color, t, 0); }}
+"
+            );
+            let files = [(MANIFEST, manifest), ("material.wgsl", text.as_str())]
+                .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+                .into();
+            reads_opaque(&check(&Pack::from_files(files).unwrap()).unwrap().stages)
+        };
+        let plain = "return Surface(input.albedo);";
+        let flat = "return 0.0;";
+        assert!(!reads(plain, flat), "a helper nothing calls reads nothing");
+        assert!(reads(
+            "return Surface(input.albedo + behind(vec2<i32>(input.screen)));",
+            flat
+        ));
+        assert!(reads(
+            "return Surface(input.albedo * textureLoad(opaque_depth, vec2<i32>(0), 0));",
+            flat
+        ));
+        assert!(reads(
+            plain,
+            "return textureLoad(opaque_depth, vec2<i32>(input.uv), 0);"
+        ));
+    }
 
     /// A device with OpenGL's minimum 16 sampled textures per stage refuses a pack whose
     /// sky adds the terrain's 10 to the frame's 9: that is the pack's error to report, not
     /// a validation panic (#10095).
     #[test]
     fn a_pack_the_backend_refuses_is_an_error_not_a_panic() {
-        use horizon_shader_api::{MANIFEST, Pack, check};
         let instance = crate::gfx::test_gpu::instance();
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
             return;
@@ -322,32 +401,182 @@ mod tests {
         else {
             return;
         };
-        // The terrain's group 0: its uniform and the 10 sampled textures (_terrain.wgsl_'s
-        // 8 sprite arrays, the lightmap and the emission thresholds).
+        let (globals, empty) = terrain_layouts(&device);
+        let report = pack("0.1", "");
+        let built = NativePack::new(
+            &device,
+            &queue,
+            &terrain_shape(&globals, &empty),
+            report,
+            &[],
+            Default::default(),
+        );
+        assert!(built.is_err(), "the pack should be refused");
+    }
+
+    /// A 0.2 pack whose stages read no terrain vertices (a sky, the post every 0.2 pack runs, a
+    /// material and a shadow pass, whose solid entries read the flat draws' page) leaves the
+    /// solid quads in the compact layout; one with `[displacement]`, which copies the quads'
+    /// vertices, does not (#16127).
+    #[test]
+    fn only_a_pack_with_displacement_reads_terrain_vertices() {
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+        let (globals, empty) = terrain_layouts(&device);
+        // The flat draws' group 1 (`Flat::new`): block slots, origins and the page.
+        let read = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let flat = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[read(0), read(1), read(super::super::flat::ARENA_BINDING)],
+        });
+        // Height maps, without which there is no `[displacement]`.
+        let pbr = [0; 2].map(|_| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 16,
+                    height: 16,
+                    depth_or_array_layers: 2,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        });
+        // The entities' atlas, which the shadow pass's entity draw samples.
+        let atlas = |binding, ty| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty,
+            count: None,
+        };
+        let entities = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                atlas(
+                    1,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                atlas(
+                    2,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+            ],
+        });
+        let reads = |stages: &str| {
+            let shape = TerrainShape {
+                flat: Some(&flat),
+                pbr: Some(&pbr),
+                entities: &entities,
+                ..terrain_shape(&globals, &empty)
+            };
+            let report = pack("0.2", stages);
+            let (pack, _) =
+                NativePack::new(&device, &queue, &shape, report, &[], Default::default()).unwrap();
+            assert!(pack.post.is_some() && pack.sky.is_some());
+            pack.reads_terrain_vertices()
+        };
+        let material = "[material]\nfile = \"material.wgsl\"\n";
+        assert!(!reads(""));
+        assert!(!reads(&format!("{material}[shadow]\n")));
+        assert!(reads(&format!("{material}[displacement]\n")));
+    }
+
+    /// A pack of API `api` with a sky stage and the manifest's `stages` after it.
+    fn pack(api: &str, stages: &str) -> horizon_shader_api::Report {
+        use horizon_shader_api::{MANIFEST, Pack, check};
+        let manifest = format!(
+            "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"{api}\"\n\
+             [sky]\nfile = \"sky.wgsl\"\n{stages}"
+        );
+        let mut files = vec![
+            (MANIFEST, manifest.as_str()),
+            (
+                "sky.wgsl",
+                "fn sky(input: SkyInput) -> vec4<f32> { return input.color; }\n",
+            ),
+        ];
+        // `[displacement]` takes its function from the material's file.
+        let material = format!(
+            "fn material(input: MaterialInput) -> Surface {{ return Surface(input.albedo); }}\n{}",
+            if stages.contains("[displacement]") {
+                "fn displacement(input: DisplacementInput) -> f32 { return 0.0; }\n"
+            } else {
+                ""
+            }
+        );
+        if stages.contains("[material]") {
+            files.push(("material.wgsl", &material));
+        }
+        let files = files
+            .into_iter()
+            .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+            .collect();
+        check(&Pack::from_files(files).unwrap()).unwrap()
+    }
+
+    /// The terrain's group 0 as the renderer makes it (`Renderer::new`), and an empty layout
+    /// for the other groups.
+    fn terrain_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
+        // Its uniform, the 10 sampled textures (_terrain.wgsl_'s 8 sprite arrays, the
+        // lightmap and the emission thresholds) and two samplers.
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty,
             count: None,
         };
-        let mut entries = vec![entry(
-            0,
-            wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-        )];
-        entries.extend((1..=10).map(|binding| {
-            entry(
-                binding,
-                wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-            )
-        }));
+        let texture = |view_dimension| wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension,
+            multisampled: false,
+        };
+        let sampler = wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering);
+        let uniform = wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let array = texture(wgpu::TextureViewDimension::D2Array);
+        let plain = texture(wgpu::TextureViewDimension::D2);
+        let entries = [
+            (0, uniform),
+            (1, array),
+            (2, sampler),
+            (3, plain),
+            (4, sampler),
+        ]
+        .into_iter()
+        .chain((5..=11).map(|binding| (binding, array)))
+        .chain([(12, plain)])
+        .map(|(binding, ty)| entry(binding, ty))
+        .collect::<Vec<_>>();
         let globals = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &entries,
@@ -356,32 +585,25 @@ mod tests {
             label: None,
             entries: &[],
         });
-        let terrain = TerrainShape {
-            globals: &globals,
+        (globals, empty)
+    }
+
+    fn terrain_shape<'a>(
+        globals: &'a wgpu::BindGroupLayout,
+        empty: &'a wgpu::BindGroupLayout,
+    ) -> TerrainShape<'a> {
+        TerrainShape {
+            globals,
             flat: None,
             sprites: [1.0, 2048.0],
             format: wgpu::TextureFormat::Rgba8Unorm,
             linear: false,
             sprite_tags: &[],
             sprite_materials: &[],
-            entities: &empty,
-            weather_groups: [&empty, &empty],
+            entities: empty,
+            weather_groups: [empty, empty],
             pbr: None,
-        };
-        let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.1\"\n\
-            [sky]\nfile = \"sky.wgsl\"\n";
-        let files = [
-            (MANIFEST, manifest),
-            (
-                "sky.wgsl",
-                "fn sky(input: SkyInput) -> vec4<f32> { return input.color; }\n",
-            ),
-        ]
-        .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
-        .into();
-        let report = check(&Pack::from_files(files).unwrap()).unwrap();
-        let built = NativePack::new(&device, &queue, &terrain, report, &[], Default::default());
-        assert!(built.is_err(), "the pack should be refused");
+        }
     }
 
     fn option(id: &str, kind: OptionKind) -> PackOption {

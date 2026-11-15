@@ -151,6 +151,7 @@ fn an_empty_slot_clicked_as_occupied_still_plays_the_pickup() {
             pos: POS,
             face: [0, 0, 1],
             point: [8.8, 64.75, 9.0],
+            inside: false,
         };
         game.audio.capture = Some(Vec::new());
         let posted = record(|| {

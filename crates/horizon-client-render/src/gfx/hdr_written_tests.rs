@@ -2,6 +2,7 @@ use super::{
     Hdr, Output,
     tests::{gpu, legacy_light, texel, writers_lift},
 };
+use std::{cell::RefCell, collections::HashMap};
 use wgpu::TextureFormat as F;
 use wgpu::util::DeviceExt;
 
@@ -80,6 +81,23 @@ struct Draw<'a> {
     raw: bool,
     hdr_lighting: bool,
     material_frame: Option<super::super::native_post::NativeFrame>,
+    uniform: wgpu::Buffer,
+    pipelines: RefCell<HashMap<PipelineKey, wgpu::RenderPipeline>>,
+}
+/// Everything that changes a pipeline built by `Draw::render`: the entry point
+/// and its mark pass, the override constants, and the draw's own flags. The
+/// shader and layout only change in `material`, which empties the cache.
+#[derive(PartialEq, Eq, Hash)]
+struct PipelineKey {
+    entry: String,
+    mark: bool,
+    written: bool,
+    tier: u32,
+    overlay: u32,
+    terrain: bool,
+    raw: bool,
+    hdr_lighting: bool,
+    material: bool,
 }
 impl<'a> Draw<'a> {
     fn render_oit(
@@ -395,7 +413,7 @@ impl<'a> Draw<'a> {
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::bytes_of(globals),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let texture = |layers, data: &[u8]| {
             device.create_texture_with_data(
@@ -461,7 +479,15 @@ impl<'a> Draw<'a> {
             raw: false,
             hdr_lighting: true,
             material_frame: None,
+            uniform,
+            pipelines: RefCell::default(),
         }
+    }
+
+    /// Replaces the globals without rebuilding the shader, bindings or pipelines.
+    fn set_globals(&self, globals: &super::super::Globals) {
+        self.queue
+            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(globals));
     }
 
     fn material(&mut self, api: horizon_shader_api::Api) {
@@ -494,6 +520,7 @@ impl<'a> Draw<'a> {
             });
         self.material_frame = Some(frame);
         self.raw = true;
+        self.pipelines.borrow_mut().clear();
     }
     fn render(
         &self,
@@ -548,7 +575,7 @@ impl<'a> Draw<'a> {
         } else {
             F::Rgba16Float
         };
-        let pipeline = |entry, mark| {
+        let build = |entry: &str, mark: bool| {
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: None,
@@ -591,6 +618,25 @@ impl<'a> Draw<'a> {
                     multiview_mask: None,
                     cache: None,
                 })
+        };
+        let pipeline = |fragment: &str, mark: bool| {
+            let key = PipelineKey {
+                entry: entry.to_owned(),
+                mark,
+                written,
+                tier,
+                overlay,
+                terrain: self.terrain,
+                raw: self.raw,
+                hdr_lighting: self.hdr_lighting,
+                material: self.material_frame.is_some(),
+            };
+            if let Some(cached) = self.pipelines.borrow().get(&key) {
+                return cached.clone();
+            }
+            let built = build(fragment, mark);
+            self.pipelines.borrow_mut().insert(key, built.clone());
+            built
         };
         let color = pipeline(entry, false);
         let mark = (!self.raw && !self.terrain && !written && entry == "fs_entity").then(|| {
@@ -925,23 +971,33 @@ fn actual_opaque_writers_match_the_legacy_non_float_oracle() {
     let mut hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
     (hdr.paper_white, hdr.peak) = (203.0, 1000.0);
     let (settings, gains) = hdr.draw_params(true);
+    let windows = hdr.windows();
+    let globals = |fog: f32, visibility: f32| super::super::Globals {
+        fog_color: [0.2, 0.3, 0.4, 1.0],
+        fog: [0.0, 1.0, 0.0, 1.0],
+        fog_ends: [100.0, 100.0, 0.0, 0.0],
+        misc: [fog, visibility, 0.0, 0.0],
+        filtering: [0.0, 1.0, 0.0, 0.0],
+        hdr_windows: windows,
+        hdr_light: [0.8, 0.8, 1.0, 1.0],
+        hdr_settings: settings,
+        hdr_gains: gains,
+        ..bytemuck::Zeroable::zeroed()
+    };
+    // Fog and visibility only change the globals uniform, so each draw and its
+    // pipelines are built once and the uniform is rewritten per pair.
+    let draws = [true, false].map(|terrain| {
+        (
+            terrain,
+            Draw::new(&device, &queue, terrain, &globals(0.0, 1.0), 255),
+        )
+    });
     let mut count = 0;
     for fog in [0.0, 0.5, 1.0] {
         for visibility in [1.0, 0.4] {
-            let globals = super::super::Globals {
-                fog_color: [0.2, 0.3, 0.4, 1.0],
-                fog: [0.0, 1.0, 0.0, 1.0],
-                fog_ends: [100.0, 100.0, 0.0, 0.0],
-                misc: [fog, visibility, 0.0, 0.0],
-                filtering: [0.0, 1.0, 0.0, 0.0],
-                hdr_windows: hdr.windows(),
-                hdr_light: [0.8, 0.8, 1.0, 1.0],
-                hdr_settings: settings,
-                hdr_gains: gains,
-                ..bytemuck::Zeroable::zeroed()
-            };
-            for terrain in [true, false] {
-                let draw = Draw::new(&device, &queue, terrain, &globals, 255);
+            for (terrain, draw) in &draws {
+                let terrain = *terrain;
+                draw.set_globals(&globals(fog, visibility));
                 for tier in 0..=4 {
                     for overlay in if terrain {
                         vec![0, 1]

@@ -249,6 +249,7 @@ mod tests {
             pos,
             face: [0, 1, 0],
             point: [0.5, 65.0, 0.5],
+            inside: false,
         };
 
         // Fire charge on TNT: returns true, leaves consumption and sound to server.

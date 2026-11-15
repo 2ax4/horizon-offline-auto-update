@@ -2,11 +2,16 @@
 //! egg's entity data on the mob it spawned.
 use super::*;
 
+#[cfg(test)]
+#[path = "spawn_egg_mob_tests.rs"]
+mod spawn_egg_mob_tests;
+
 impl Game<'_> {
     /// `Mob.checkAndHandleImportantInteractions` with a spawn egg of mob
     /// `index`'s own kind (`SpawnEggItem.spawnOffspringFromSpawnEgg`): a baby
-    /// at the mob's feet, taking the parent's variant as `getBreedOffspring`
-    /// does, and one egg used. False (PASS) when the mob has no baby form.
+    /// at the mob's feet, with the variant and colour `getBreedOffspring`
+    /// gives it (the parent's, but a mooshroom's colour rolled 1 in 1024), and
+    /// one egg used. False (PASS) when the mob has no baby form.
     pub(super) fn spawn_egg_offspring(&mut self, index: usize) -> bool {
         let Some(stack) = self.held().cloned() else {
             return false;
@@ -27,6 +32,21 @@ impl Game<'_> {
         );
         let (species, variant, color) =
             (parent.species(), parent.extra.variant, parent.extra.color);
+        // `MushroomCow.getBreedOffspring(level, this)`: the egg's mate is the
+        // parent itself, so the colour always rolls `nextInt(1024) == 0` to
+        // flip, and every other roll spends the coin flip that can only pick
+        // that same colour again. Both come from the parent's own random.
+        let variant = if species == Species::Mooshroom {
+            let random = &mut self.mobs[index].random;
+            if random.next_int_bound(1024).unwrap_or(1) == 0 {
+                if variant == 1 { 0 } else { 1 }
+            } else {
+                let _ = random.next_boolean();
+                variant
+            }
+        } else {
+            variant
+        };
         let target = self.mob_entity(&self.mobs[index]);
         // SpawnEggItem.spawnOffspringFromSpawnEgg: `type.create(level, SPAWN_ITEM_USE)`
         // creates the baby without finalizeSpawn, and `snapTo(pos, 0, 0)` faces
@@ -50,6 +70,10 @@ impl Game<'_> {
         }
         self.trigger_item_entity("minecraft:player_interacted_with_entity", &stack, &target);
         self.consume_held();
+        // `Mob.interact`: the egg's `SUCCESS_SERVER` consumes the click, so the
+        // interaction posts `ENTITY_INTERACT` with the player, at the mob.
+        let ctx = self.who_context(Some(Who::Player), None);
+        self.post_game_event("minecraft:entity_interact", at, ctx);
         true
     }
     /// `SpawnEggItem.use`: the SOURCE_ONLY ray must hit a liquid block.

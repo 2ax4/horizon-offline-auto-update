@@ -1444,7 +1444,7 @@ impl Game<'_> {
     }
     /// `DistanceTrigger`: the player's `player` condition, `start_position`
     /// at `start`, and the `distance` from `start` to the player.
-    fn trigger_distance(&mut self, name: &str, start: [f64; 3]) {
+    pub(super) fn trigger_distance(&mut self, name: &str, start: [f64; 3]) {
         let me = self.player_entity_for(name);
         self.trigger(name, move |c, w| {
             let pctx = adv::Entities {

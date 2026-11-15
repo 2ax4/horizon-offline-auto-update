@@ -2,6 +2,10 @@
 //! what a hit on a target that is not a mob does.
 use super::*;
 
+#[cfg(test)]
+#[path = "melee_hit_tests.rs"]
+mod hit_tests;
+
 impl Game<'_> {
     /// `Player.attack`'s damage against `target_kind` (with the attack
     /// strength and whether it is a critical hit): the weapon and effects
@@ -250,10 +254,18 @@ impl Game<'_> {
         let _attacker = self.knockback_scope(self.player.as_ref().map_or(0, |p| p.entity_id));
         let target_kind = self.mobs[index].kind.id.clone();
         let target_kind = format!("minecraft:{}", target_kind.trim_start_matches("minecraft:"));
-        let (amount, scale, crit, magic) = self.melee_damage(&target_kind, true);
+        let ((amount, scale, crit, magic), admitted) =
+            self.melee_damage_with_admission(&target_kind, true);
+        // Player.onAttack: the hit starts the attack strength again, hurt or not.
+        self.attack_ticks = 0;
+        if !admitted {
+            // Player.attack skips the hurt and its whole tail when the hit has neither
+            // base nor enchantment damage (`baseDamage > 0.0F || magicBoost > 0.0F`):
+            // no hurt, no `causeExtraKnockback`, no `setLastHurtMob`, no exhaustion.
+            return;
+        }
         let sweep = self.sweep_attack_position(scale, crit);
         let (knockback, knockback_attack) = self.extra_knockback(&target_kind, scale);
-        self.attack_ticks = 0;
         let player = self.player.as_ref();
         let from = player.map(|p| [p.position.x, p.position.y, p.position.z]);
         if knockback_attack {

@@ -175,11 +175,18 @@ impl Game<'_> {
             base,
         )
     }
-    /// `Player.attack`'s extra knockback: `getKnockback` (the weapon's knockback
-    /// enchantment, halved) plus 0.5 for a sprinting full-strength hit, and
-    /// whether the hit is that knockback attack.
+    /// `Player.attack`'s extra knockback: `getKnockback` (the ATTACK_KNOCKBACK
+    /// attribute, plus the weapon's knockback enchantment, halved) plus 0.5 for a
+    /// sprinting full-strength hit, and whether the hit is that knockback attack.
     pub(super) fn extra_knockback(&mut self, target_kind: &str, scale: f32) -> (f32, bool) {
         let sprinting = self.player.as_ref().is_some_and(|p| p.sprinting);
+        // LivingEntity.getKnockback: `(float)getAttributeValue(ATTACK_KNOCKBACK)`, which
+        // the weapon's knockback enchantment then adds to (EnchantmentHelper.modifyKnockback).
+        let base = self
+            .player
+            .as_mut()
+            .and_then(|p| p.attribute("minecraft:attack_knockback").ok())
+            .unwrap_or(0.0) as f32;
         let enchanted = match self.held().cloned() {
             Some(held) => {
                 let ctx = EffectContext {
@@ -195,10 +202,10 @@ impl Game<'_> {
                     "minecraft:knockback",
                     &ctx,
                     &mut self.world.random,
-                    0.0,
+                    base,
                 )
             }
-            None => 0.0,
+            None => base,
         };
         horizon_client::attack_strength::extra_knockback(enchanted, scale, sprinting)
     }

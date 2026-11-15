@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+mod loot_conditions;
+
 fn tool_number(value: &horizon_world::nbt::Tag) -> Option<f32> {
     horizon_world::datafix::dynamic::as_number(value).map(|n| n.float_value())
 }
@@ -389,6 +391,9 @@ pub struct Items {
     /// place, first occurrence kept), the order `TagSlotDisplay` resolves.
     pub item_tag_order: HashMap<String, Vec<String>>,
     loot: Arc<horizon_world::loot::LootTables>,
+    /// `Registries.PREDICATE`: what a table's string condition names, which a
+    /// pack replaces or adds to (`LootItemCondition.CODEC`).
+    predicates: Arc<HashMap<String, Value>>,
     /// The `jukebox_song` registry.
     pub songs: HashMap<String, Song>,
     /// The `instrument` registry (goat horns).
@@ -1059,6 +1064,7 @@ impl Items {
         // (content mods' tables, docs/modpacks.md), with the packs' over the
         // game's own: one map with the loot data of the same root and packs.
         let loot = horizon_world::loot::shared_tables(root, overlay)?;
+        let predicates = horizon_world::loot::load_predicates(root, overlay)?;
         let registry_order = registry_order(root, &order);
         set_villager_food(&items);
         Ok(Self {
@@ -1070,6 +1076,7 @@ impl Items {
             item_tags: load_tags(root, "item", overlay)?,
             item_tag_order: load_tag_lists(root, "item", overlay)?,
             loot,
+            predicates: Arc::new(predicates),
             songs: load_songs(root),
             instruments: load_instruments(root),
             enchantments: Arc::new(crate::enchant::Enchantments::load_with_defaults(
@@ -1124,6 +1131,7 @@ impl Items {
             item_tags: load_tags(root, "item", overlay)?,
             item_tag_order: load_tag_lists(root, "item", overlay)?,
             loot: Default::default(),
+            predicates: Default::default(),
             songs: HashMap::new(),
             instruments: HashMap::new(),
             enchantments: Arc::new(crate::enchant::Enchantments::load_with(root, overlay)),
@@ -1144,6 +1152,7 @@ impl Items {
                 .collect(),
             item_tags,
             loot: Default::default(),
+            predicates: Default::default(),
             songs: HashMap::new(),
             instruments: HashMap::new(),
             enchantments: Arc::new(crate::enchant::Enchantments::default()),
@@ -2049,7 +2058,8 @@ impl LootContext<'_> {
         let (kind, c) = match c {
             Value::Null => return true,
             Value::Array(list) => return list.iter().all(|c| self.condition(c, random)),
-            Value::String(s) => (s.as_str(), &Value::Null),
+            // A string names a `Registries.PREDICATE` id (`LootItemCondition.CODEC`).
+            Value::String(id) => return self.named_condition(id, random),
             Value::Object(o) => (o.get("type").and_then(Value::as_str).unwrap_or(""), c),
             _ => return false,
         };
@@ -2058,8 +2068,6 @@ impl LootContext<'_> {
             "minecraft:survives_explosion" => self
                 .explosion_radius
                 .is_none_or(|r| random.next_float() <= 1.0 / r),
-            "minecraft:tool/can_silk_touch" => self.enchantment_level("minecraft:silk_touch") > 0,
-            "minecraft:tool/can_shear" => self.held.is_some_and(|h| &*h.item == "minecraft:shears"),
             "minecraft:inverted" => !self.condition(&c["term"], random),
             "minecraft:any_of" => c["terms"]
                 .as_array()
@@ -2170,18 +2178,6 @@ impl LootContext<'_> {
             }
             _ => false,
         }
-    }
-    fn conditions<R: RandomSource>(&self, o: &Value, random: &mut R) -> bool {
-        if let Some(c) = o.get("condition")
-            && !self.condition(c, random)
-        {
-            return false;
-        }
-        o.get("conditions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .all(|c| self.condition(c, random))
     }
     /// Expand entries; returns whether an entry succeeded (for alternatives).
     /// The last candidate field distinguishes emitted items from empty/deferred

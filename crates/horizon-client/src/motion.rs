@@ -2482,16 +2482,7 @@ impl EntityMoveWorld for MotionWorld<'_, '_, '_> {
         emission::apply_movement_emission(self, kind, movement, position, state)
     }
     fn block_speed_factor(&mut self) -> Result<f32> {
-        let efficiency = self.player.attribute("minecraft:movement_efficiency")? as f32;
-        let location = self.location();
-        let block = movement_support::block_speed_factor(
-            &mut RegistryMovementWorld {
-                properties: &self.resources.blocks,
-                world: self,
-            },
-            location,
-        )?;
-        Ok(block + efficiency * (1.0 - block))
+        self.player_block_speed_factor()
     }
 }
 // The player's footsteps and swim sounds. Flapping and the step game event
@@ -5943,5 +5934,48 @@ mod tests {
                 "client_side={client_side} flying={flying} sneaking={sneaking}"
             );
         }
+    }
+
+    /// `Player.getBlockSpeedFactor`: `!abilities.flying && !isFallFlying() ?
+    /// super.getBlockSpeedFactor() : 1.0F` (#16176). A creative player flying
+    /// at y -59.8 over soul sand (its top at -60.125) or gliding there moves as
+    /// it does over grass; walking on the soul sand it keeps 0.4 of its speed.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_flying_or_gliding_player_is_not_slowed_by_soul_sand() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+        );
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 2).unwrap();
+        // How much of a 0.1 step east the move leaves in the velocity.
+        let mut kept = |floor: &str, y: f64, flying: bool, gliding: bool| {
+            let state = assets.registry.default_state(floor).unwrap();
+            scene.set(20, -61, 20, state).unwrap();
+            let mut player = PlayerMotion::new(&resources, Vec3::new(20.5, y, 20.5)).unwrap();
+            (player.may_fly, player.flying) = (flying, flying);
+            (player.glider, player.fall_flying) = (gliding, gliding);
+            player.velocity = Vec3::new(0.1, 0.0, 0.0);
+            let mut w = MotionWorld {
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+                health: &resources.health,
+            };
+            w.move_self(Vec3::new(0.1, 0.0, 0.0)).unwrap();
+            w.player.velocity.x / 0.1
+        };
+        let (soul_sand, grass) = ("minecraft:soul_sand", "minecraft:grass_block");
+        assert_eq!(kept(grass, -59.8, true, false), 1.0);
+        assert_eq!(kept(soul_sand, -59.8, true, false), 1.0, "flying");
+        assert_eq!(kept(soul_sand, -59.8, false, true), 1.0, "gliding");
+        let walking = kept(soul_sand, -60.125, false, false);
+        assert!((walking - 0.4).abs() < 1.0e-6, "walking: {walking}");
     }
 }

@@ -434,7 +434,8 @@ impl Kept {
             (g.game_mode, g.flying, g.flying_speed) = (mode, flying, speed);
         }
         if let Some((position, previous, yaw, pitch, head, ground, vehicle)) = self.position {
-            (g.position, g.previous_position) = (position, previous);
+            g.place(position); // loaded before `addEntity`: the tickets start there
+            g.previous_position = previous;
             (g.yaw, g.pitch, g.head_yaw, g.on_ground) = (yaw, pitch, head, ground);
             // The vehicle the player rode goes with where it stands.
             g.saved_vehicle = vehicle;
@@ -559,8 +560,7 @@ pub fn import_player(hub: &mut Hub, uuid: u128, request: &Value) -> Result<Impor
         let g = &mut hub.guests[i];
         let a = &request.arrival;
         if let Some(p) = a.position {
-            g.position = p;
-            g.previous_position = p;
+            g.place(p);
         }
         if let Some([yaw, pitch]) = a.rotation {
             g.yaw = yaw;

@@ -715,10 +715,10 @@ pub fn mob_to_nbt(
         map.remove(&"CustomNameVisible".into());
     }
     // A styled name from the save stays unless the name changed.
-    if custom_name(&tag) != m.custom_name
-        && let Some(name) = &m.custom_name
+    if m.custom_name_changed(tag.get("CustomName"))
+        && let Some(name) = m.custom_name_tag()
     {
-        put(&mut tag, "CustomName", Tag::String(name.as_str().into()));
+        put(&mut tag, "CustomName", name);
     }
     let Tag::Compound(map) = &mut tag else {
         return tag;
@@ -1816,7 +1816,7 @@ fn put_sulfur_attributes(map: &mut Compound, m: &Mob) {
 }
 /// `Brain.Packed`: the memories finalizeSpawn set, over the saved ones.
 /// `CustomName`: a text component saved as a string or a `{text: ..}` compound.
-fn custom_name(tag: &Tag) -> Option<String> {
+pub(crate) fn custom_name(tag: &Tag) -> Option<String> {
     match tag.get("CustomName")? {
         Tag::String(s) => Some(s.to_string_lossy()),
         t @ Tag::Compound(_) => match t.get("text") {
@@ -2565,21 +2565,15 @@ pub fn mob_from_nbt_with_random(
         }
         restore_warden_owned_memories(&mut m, tag);
     }
-    // Armadillo.readAdditionalSaveData: the saved state through `switchToState`
-    // (`onSyncedDataUpdated` then restarts the time in that state), idle for a
-    // save that names none; then the time to the next scute, the constructor's
-    // when absent.
     if m.species() == crate::mobs::Species::Armadillo {
-        crate::mobs::armadillo::set_state(
+        let state = text(tag.get("state"));
+        let scute_time = number(tag.get("scute_time")).map(|t| t as i32);
+        crate::mobs::armadillo::load(
             &mut m,
-            crate::mobs::armadillo::state_by_name(text(tag.get("state")).as_deref()),
+            tag.get("Brain").is_some(),
+            state.as_deref(),
+            scute_time,
         );
-        if let Some(t) = number(tag.get("scute_time")) {
-            m.extra.egg_time = t as i32;
-        } else {
-            // Armadillo(): scuteTime = pickNextScuteDropTime().
-            m.extra.egg_time = crate::mobs::ai::next_scute_time(&mut m);
-        }
     }
     if m.species() == crate::mobs::Species::Ravager {
         m.extra.counter = number(tag.get("AttackTick")).unwrap_or(0) as i32;
@@ -5976,6 +5970,44 @@ mod tests {
         assert_eq!(back[0].count, 3);
         // Entity.load keeps the saved Air; the orb writes it back unchanged.
         assert_eq!(tag.get("Air"), Some(&Tag::Short(32767)));
+    }
+    /// `Entity.saveWithoutId` writes `Fire` for every entity and `Entity.load`
+    /// reads it back with `getShortOr("Fire", 0)`: a summon's `Fire:40s` and the
+    /// `-1s` an entity carries after leaving water both survive, an absent key
+    /// is 0, and the short wraps like `(short) remainingFireTicks`.
+    #[test]
+    fn orbs_save_and_load_their_fire() {
+        let mut o = ExperienceOrb {
+            rotation: [0.0, 0.0],
+            join: Default::default(),
+            no_gravity: false,
+            id: 0,
+            position: Vec3::new(1.0, 2.0, 3.0),
+            previous: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            value: 7,
+            age: 3,
+            on_ground: false,
+            count: 1,
+            ticks: 0,
+            health: 5,
+            air: 300,
+            following: None,
+            fall_distance: 0.0,
+            fire_ticks: 0,
+        };
+        for (ticks, saved) in [(0, 0), (40, 40), (-1, -1), (300, 300), (40_000, -25_536)] {
+            o.fire_ticks = ticks;
+            let tag = orb_to_nbt(&o, [0; 4]);
+            assert_eq!(tag.get("Fire"), Some(&Tag::Short(saved)), "saved {ticks}");
+            assert_eq!(orbs_from_nbt(&tag)[0].fire_ticks, i32::from(saved));
+        }
+        let mut tag = orb_to_nbt(&o, [0; 4]);
+        let Tag::Compound(map) = &mut tag else {
+            unreachable!()
+        };
+        map.remove(&"Fire".into());
+        assert_eq!(orbs_from_nbt(&tag)[0].fire_ticks, 0);
     }
 }
 

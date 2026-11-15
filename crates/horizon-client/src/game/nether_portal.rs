@@ -604,27 +604,23 @@ impl Game<'_> {
         )
     }
     /// `LocalPlayer.handlePortalTransitionEffect`: whether the confusion
-    /// effect grows this tick. Entering a portal closes screens other than
-    /// the chat and death screens and plays `block.portal.trigger` when the
-    /// effect starts from nothing.
+    /// effect grows this tick. Entering a portal closes the screen only when
+    /// it does not allow it (`Screen.isAllowedInPortal`), and plays
+    /// `block.portal.trigger` when the effect starts from nothing.
     pub(super) fn client_portal_effect(&mut self) -> bool {
         let inside = std::mem::take(&mut self.portals.client_inside);
         self.portals.client_was_inside = inside;
         if !inside {
             return false;
         }
-        match self.screen {
-            Screen::Playing | Screen::Chat | Screen::Dead => {}
-            Screen::Inventory | Screen::Creative => {
+        // No screen at all (`screen() == null`) is nothing to close.
+        if self.screen != Screen::Playing && !self.screen.allowed_in_portal() {
+            if matches!(self.screen, Screen::Creative | Screen::Inventory) {
                 self.close_container();
                 self.carried = None;
-                self.screen = Screen::Playing;
-                self.capture(true);
             }
-            _ => {
-                self.screen = Screen::Playing;
-                self.capture(true);
-            }
+            self.screen = Screen::Playing;
+            self.capture(true);
         }
         if self.screen_fx.portal == 0.0 {
             let pitch = self.world.random.next_float() * 0.4 + 0.8;
@@ -1258,6 +1254,27 @@ impl Game<'_> {
             self.detach_entity(id);
             self.portals.arrivals.push(Arrival::new(plan, tag, false));
             self.portals.dirty = true;
+        } else if let Some(i) = self.armor_stands.iter().position(|a| a.id == id) {
+            let a = &self.armor_stands[i];
+            // Its `getDimensions`: the box the exit is placed by, and
+            // `LivingEntity.getRelativePortalPosition` resets the forward offset.
+            let Some((width, height)) = a.portal_size() else {
+                return;
+            };
+            let plan = self.entity_plan(entry, a.position, width, height, true);
+            if !self.may_enter(plan.dim) {
+                return;
+            }
+            let uuid = self.uuid_for(id);
+            let tag = horizon_client::entity_nbt::armor_stand_to_nbt(
+                &self.armor_stands[i],
+                uuid,
+                self.persist_raw(id),
+            );
+            self.armor_stands.remove(i);
+            self.detach_entity(id);
+            self.portals.arrivals.push(Arrival::new(plan, tag, false));
+            self.portals.dirty = true;
         } else if let Some(i) = self
             .creatures
             .projectiles
@@ -1787,3 +1804,7 @@ mod tests {
 #[cfg(test)]
 #[path = "portal_cooldown_tests.rs"]
 mod cooldown_tests;
+
+#[cfg(test)]
+#[path = "nether_portal_stand_tests.rs"]
+mod stand_tests;

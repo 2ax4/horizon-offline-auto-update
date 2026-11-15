@@ -114,6 +114,7 @@ const REAPPLICATION_DELAY: i32 = 20;
 mod cloud_nbt;
 mod cloud_particle;
 pub(in crate::game) use cloud_nbt::{potion_cloud_from_nbt, potion_cloud_to_nbt};
+pub(in crate::game) use cloud_particle::particle_options;
 /// An entity a cloud has affected (`AreaEffectCloud.victims`).
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Victim {

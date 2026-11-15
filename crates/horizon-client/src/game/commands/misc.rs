@@ -91,12 +91,13 @@ impl Game<'_> {
                 Ok(rate as i32)
             }
             "tick.query" => {
+                // TickCommand.tickQuery: every line passes `broadcast` false.
                 let rate = self.clock.rate();
                 let busy = millis(self.clock.average_nanos());
                 let rate_text = format_fixed(f64::from(rate), 1);
                 if self.clock.sprinting() {
-                    self.feedback(t("commands.tick.status.sprinting", &[]));
-                    self.feedback(t(
+                    self.feedback_unbroadcast(t("commands.tick.status.sprinting", &[]));
+                    self.feedback_unbroadcast(t(
                         "commands.tick.query.rate.sprinting",
                         &[lit(rate_text), lit(busy)],
                     ));
@@ -109,8 +110,8 @@ impl Game<'_> {
                     } else {
                         "commands.tick.status.running"
                     };
-                    self.feedback(t(status, &[]));
-                    self.feedback(t(
+                    self.feedback_unbroadcast(t(status, &[]));
+                    self.feedback_unbroadcast(t(
                         "commands.tick.query.rate.running",
                         &[lit(rate_text), lit(busy), lit(millis(target))],
                     ));
@@ -125,7 +126,7 @@ impl Game<'_> {
                         .copied()
                         .unwrap_or(0)
                 };
-                self.feedback(t(
+                self.feedback_unbroadcast(t(
                     "commands.tick.query.percentiles",
                     &[
                         lit(millis(at(0.5))),
@@ -358,6 +359,10 @@ impl Game<'_> {
         Ok(1)
     }
 }
+
+#[cfg(test)]
+#[path = "tick_status_broadcast_tests.rs"]
+mod tick_status_broadcast_tests;
 
 #[cfg(test)]
 mod random_command_tests;
