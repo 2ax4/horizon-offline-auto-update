@@ -5805,7 +5805,7 @@ impl Game<'_> {
         };
         let at = Vec3::new(p[0], p[1], p[2]);
         // ItemEntity's constructor draws bobOffs from the item's own random.
-        let mut random = (*horizon_client::mobs::entity_random(id as u32, at)).clone();
+        let mut random = horizon_client::mobs::entity_random(id as u32, at);
         let bob = super::item_entities::bob_offset(at, random.next_float(), self.clock.still());
         self.dropped.push(ItemEntity {
             random,
@@ -7205,7 +7205,7 @@ impl Game<'_> {
             let mut items = std::mem::take(&mut self.dropped);
             items.retain_mut(|item| {
                 // The server decides entity collisions. This copy predicts block movement.
-                let (_, discarded) =
+                let (_, discarded, _) =
                     self.tick_item_with_block_contacts(item, None, &[], true, &mut |splash| {
                         entered.push(splash);
                     });

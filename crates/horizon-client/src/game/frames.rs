@@ -221,7 +221,7 @@ impl Game<'_> {
             check_interval: 0,
             // `applyComponentsFromItemStack` sets `CUSTOM_NAME`.
             custom_name: stack.data().and_then(|d| d.custom_name.clone()),
-            random: horizon_client::random_source::entity(),
+            random: horizon_core::random::EntityRandom::own(horizon_client::random_source::entity()),
         };
         // `EntityType.createDefaultStackConfig`: the item's `custom_data`, then its
         // `entity_data` merged over the frame (`TypedEntityData.loadInto`), before
@@ -739,7 +739,7 @@ impl Game<'_> {
                     );
                 }
             }
-            // HDR output: a glow frame shines softly (entity.wgsl fs_hdr_mark); the item in it
+            // HDR output: a glow frame shines softly (entity.wgsl hdr_entity_mark); the item in it
             // is only lit, as vanilla draws it.
             if f.glow {
                 for v in &mut out[frame_start..] {
@@ -747,6 +747,8 @@ impl Game<'_> {
                 }
             }
             self.finish_entity_occlusion(culling, f, out, entity_start);
+            // The frame; what it shows is an item or a map, Horizon's to light.
+            self.lit_entity(entity_start..out.len());
             let cull_contents = culling.checks_vertices();
             if let Some(stack) = &f.item {
                 let mut canceled = false;
@@ -877,7 +879,9 @@ mod map_limit_tests {
             invisible: false,
             check_interval: 0,
             custom_name: None,
-            random: horizon_core::random::LegacyRandom::new(0),
+            random: horizon_core::random::EntityRandom::own(
+                horizon_core::random::LegacyRandom::new(0),
+            ),
         }
     }
     /// A map whose `count` frame markers all count toward the limit.
@@ -951,7 +955,9 @@ mod game_event_tests {
             invisible: false,
             check_interval: 0,
             custom_name: None,
-            random: horizon_core::random::LegacyRandom::new(0),
+            random: horizon_core::random::EntityRandom::own(
+                horizon_core::random::LegacyRandom::new(0),
+            ),
         }
     }
     fn at(id: u32) -> Option<InteractTarget> {

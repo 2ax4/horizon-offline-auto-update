@@ -25,7 +25,7 @@ use horizon_client::{
 };
 use horizon_core::{
     geometry::{Aabb, Axis, Direction, Vec3},
-    random::{LegacyRandom, RandomSource},
+    random::{EntityRandom, LegacyRandom, RandomSource},
 };
 use horizon_world::nbt::Tag;
 
@@ -74,7 +74,7 @@ pub(super) struct ThrownPotion {
     last_deflected_by: Option<u32>,
     /// `Entity.random`: `ProjectileDeflection.REVERSE` draws from the
     /// projectile's own source, not the level's.
-    random: LegacyRandom,
+    random: EntityRandom,
 }
 /// The player (not one of `skip`, the thrower and who rides with them before
 /// it has left them) whose box, grown by `margin` (`ProjectileUtil.computeMargin`),
@@ -481,7 +481,7 @@ impl PotionState {
             guest: None,
             left_owner: false,
             last_deflected_by: None,
-            random: LegacyRandom::new(i64::from(id)),
+            random: EntityRandom::own(LegacyRandom::new(i64::from(id))),
         });
     }
     /// ThrowableItemProjectile.DATA_ITEM_STACK: the potion it shows.
@@ -2914,10 +2914,11 @@ mod mob_health_boost_tests {
         });
     }
 
-    /// Existing-behavior preservation, not parity: a sulfur cube's size and a
-    /// tame wolf write their maximum straight into the cache, outside the
-    /// attribute model. Health Boost leaves those caches (and Health) as they
-    /// are; the attribute model's own refresh never replaces them.
+    /// Existing-behavior preservation, not parity: a sulfur cube's size
+    /// writes its maximum straight into the cache, outside the attribute
+    /// model, and a tame wolf's cache is kept apart from Health Boost too
+    /// (`finalize::health_boost_changed`). Health Boost leaves those caches
+    /// (and Health) as they are.
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES and a scratch HORIZON_HOME"]
     fn health_boost_keeps_a_size_or_tame_maximum_owned_outside_the_attributes() {
@@ -2928,9 +2929,9 @@ mod mob_health_boost_tests {
                 ("h205_cube", 20, "sulfur_cube 4.5 200 8.5 {Size:2", 1),
                 // size 5: cache 20 = the model's 20 by coincidence
                 ("h205_cube_equal", 22, "sulfur_cube 6.5 200 8.5 {Size:4", 1),
-                // tame: cache 40, model 8; Health Boost II
+                // tame: cache 40, the model's base 40; Health Boost II
                 ("h205_wolf", 21, "wolf 8.5 200 8.5 {", 1),
-                // tame: Health Boost VIII (+32) makes the model 40 = the cache
+                // tame: Health Boost VIII (+32) makes the model 72
                 ("h205_wolf_equal", 23, "wolf 10.5 200 8.5 {", 7),
             ];
             let mut ids = Vec::new();
@@ -2967,8 +2968,8 @@ mod mob_health_boost_tests {
             }
             assert_eq!(
                 horizon_client::mobs::finalize::max_health(&game.mobs[ids[3]]),
-                40.0,
-                "the coincidence: the boosted model equals the tame cache"
+                72.0,
+                "the boosted model is above the tame cache"
             );
             assert_eq!(
                 state(game),

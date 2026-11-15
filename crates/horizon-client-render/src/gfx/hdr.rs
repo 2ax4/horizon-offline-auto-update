@@ -1,15 +1,13 @@
-//! HDR output (Horizon setting, off by default): the frame renders exactly as
-//! without it, in vanilla's gamma space, into a 16-bit target when HDR output
-//! was on when the renderer was made, else an 8-bit one
-//! (`Renderer::frame_format`), and one pass (`hdr.wgsl`) writes it to an HDR10
-//! or scRGB swapchain at the player's paper white, expanding the world's
-//! highlights towards their peak brightness. The world is copied aside before
-//! the hand and HUD so only it is expanded.
+//! HDR output (Horizon setting, off by default): the world is drawn as light into a float
+//! frame, in vanilla's gamma space, the HUD on a layer of its own, and the last pass
+//! (`hdr.wgsl`) writes the picture to an HDR10 or scRGB swapchain at the player's paper white.
+//! Under a `shaders/` pack the frame is the pack's 8-bit SDR picture, shown at paper white.
 //!
-//! On the float frame Horizon's world light is the same on every display (`TIERS`,
-//! `SUNLIT_GAIN`, up to `SCENE_PEAK`), and the tone curve alone fits it to the display's
-//! peak (docs/design/hdr-linear-light.md, step 6a). The sun's disc alone follows the display
-//! past the scene's peak (`SUN_CAP`).
+//! On the float frame Horizon's world light is the same on every display (`TIERS`, up to
+//! `SCENE_PEAK`), and the tone curve alone fits it to the display's peak
+//! (docs/design/hdr-linear-light.md, step 6a). Lit surfaces get no gain: diffuse white stays at
+//! paper white, and HDR's range above it is the light sources' and the sun's. The sun's disc
+//! alone follows the display past the scene's peak (`SUN_CAP`).
 
 /// The swapchain HDR output presents to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,13 +90,13 @@ fn named(name: Option<&str>) -> Option<Output> {
 struct Targets {
     size: [u32; 2],
     frame: wgpu::Texture,
-    /// The world as `keep_world` kept it; also the tone curve's input scratch on a layered frame.
-    world: wgpu::Texture,
+    /// The layered frame's tone curve's input: the frame as the post effects left it.
+    world: Option<wgpu::Texture>,
     coverage: Option<wgpu::Texture>,
     /// The layered frame's HUD target: what the HUD draws on.
     hud: Option<wgpu::Texture>,
     group: wgpu::BindGroup,
-    /// The layered frame's bindings for `tonemap`, `keep_world` and `composite`.
+    /// The layered frame's bindings for `tonemap`, `hud_backdrop` and `composite`.
     passes: Option<[wgpu::BindGroup; 3]>,
 }
 
@@ -106,7 +104,7 @@ struct Targets {
 /// "The HUD and menus"): the default world draws write light directly; the tone curve eases
 /// it into the peak after the post effects (`tonemap`); the
 /// camera overlays draw on that light; the HUD draws on a target of its own,
-/// the world clipped to white (`keep_world`); and the last pass composites the HUD over the
+/// the world clipped to white (`hud_backdrop`); and the last pass composites the HUD over the
 /// world's light by its coverage (`fs_hdr_layered`), as the menu blur does before it blurs
 /// (`composite`).
 struct Layered {
@@ -160,17 +158,11 @@ pub const TIERS: [Tier; 4] = [
 /// into its peak (BT.2390's EETF), and a brighter one shows it as at 1000, but for the sun's
 /// disc (`SUN_CAP`).
 pub const SCENE_PEAK: f32 = 1000.0 / 203.0;
-/// HDR lighting: what the strongest light multiplies a surface by (`hdr_light.wgsl`).
-pub const SUNLIT_GAIN: f32 = 3.0;
 /// How far the sun's disc may pass the scene's peak, in multiples of paper white: on a display
 /// above `SCENE_PEAK` its white is the display's peak, up to this, 2000 nits at a paper white of
 /// 203. Nothing else the world writes passes the scene's peak, so a brighter display shows a
 /// brighter sun and the same world.
 pub const SUN_CAP: f32 = 2000.0 / 203.0;
-/// The compatibility frame's tiers (the 16-bit or 8-bit frame, until step 5 removes it): each
-/// one's share of the display's headroom, as before one peak, so the look HDR has by default
-/// changes once, when the float frame replaces it.
-const COMPAT_SHARES: [f32; 4] = [0.2, 0.5, 0.6, 1.0];
 
 /// Which pixels of a light source's sprite may shine (`hdr_stats.wgsl`), as a fraction of
 /// the way from its darkest to its brightest opaque pixel: `parts` for one whose bright parts
@@ -202,12 +194,6 @@ pub struct Hdr {
     /// Horizon's logo as a 1-bit mask, for calibration's test pictures.
     logo: wgpu::TextureView,
     pipeline: wgpu::RenderPipeline,
-    /// Zeroes the frame's alpha once the world is kept (`keep_world`): what draws after,
-    /// the hand, HUD and menus, raises it, so HDR output knows where they cover the world.
-    clear_alpha: wgpu::RenderPipeline,
-    /// Scales the frame's alpha down to 1/255 where the hand drew (`mark_hand`), so HDR
-    /// output keeps the hand at the world's brightness.
-    hand_mark: wgpu::RenderPipeline,
     params: wgpu::Buffer,
     /// The same pass drawing HDR10 for a screenshot (`capture`), with its own parameters,
     /// so it can differ from the swapchain's in one frame, and without the swapchain's dither:
@@ -267,7 +253,7 @@ impl Hdr {
         debug: Option<&str>,
     ) -> Self {
         let coverage_debug = coverage && debug == Some("coverage");
-        // The layered frame's last pass, else today's.
+        // The layered frame's last pass, else the one over a `shaders/` pack's picture.
         let entry_point = if coverage { "fs_hdr_layered" } else { "fs_hdr" };
         let mut source = shader();
         if coverage_debug {
@@ -365,14 +351,14 @@ impl Hdr {
                 cache: None,
             })
         };
-        let layout_bindings: &[u32] = if coverage { &[0, 3, 4, 5] } else { &[0, 1, 3] };
+        let layout_bindings: &[u32] = if coverage { &[0, 3, 4, 5] } else { &[0, 3] };
         let display = layout("Horizon HDR bindings", layout_bindings, true);
         let pipeline_for =
             |format, dither| pass("Horizon HDR", &display, entry_point, format, dither);
         let params = || {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Horizon HDR parameters"),
-                size: 80,
+                size: 48,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -398,55 +384,11 @@ impl Hdr {
                 params: params(),
             }
         });
-        let alpha_pass = |label, blend| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&device.create_pipeline_layout(&Default::default())),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_hdr"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_clear_alpha"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALPHA,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let clear_alpha = alpha_pass("Horizon HDR UI mask", None);
-        // Alpha times the blend constant (1/255): the hand's 1 becomes 1/255, the world's 0
-        // stays 0.
-        let scale_alpha = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::Zero,
-            dst_factor: wgpu::BlendFactor::Constant,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let hand_mark = alpha_pass(
-            "Horizon HDR hand mark",
-            Some(wgpu::BlendState {
-                color: scale_alpha,
-                alpha: scale_alpha,
-            }),
-        );
         Self {
             logo: logo_mask(device, queue),
             pipeline: pipeline_for(output.format(), output == Output::Pq),
             capture_pipeline: pipeline_for(Output::Pq.format(), false),
             layout: display,
-            clear_alpha,
-            hand_mark,
             params: params(),
             capture_params: params(),
             output,
@@ -510,12 +452,14 @@ impl Hdr {
                 self.format,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             );
-            let world = texture(
-                "Horizon HDR world",
-                self.format,
-                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            );
             let layered = self.layered.is_some();
+            let world = layered.then(|| {
+                texture(
+                    "Horizon HDR world",
+                    self.format,
+                    wgpu::TextureUsages::COPY_DST,
+                )
+            });
             let coverage = layered.then(|| {
                 texture(
                     "HUD coverage",
@@ -534,7 +478,6 @@ impl Hdr {
             let group = self.group(
                 device,
                 &frame,
-                &world,
                 coverage.as_ref(),
                 hud.as_ref(),
                 &self.params,
@@ -542,11 +485,12 @@ impl Hdr {
             let passes = self
                 .layered
                 .as_ref()
+                .zip(world.as_ref())
                 .zip(coverage.as_ref().zip(hud.as_ref()))
-                .map(|(l, (coverage, hud))| {
+                .map(|((l, world), (coverage, hud))| {
                     let view = |t: &wgpu::Texture| t.create_view(&Default::default());
                     let (frame, world, coverage, hud) =
-                        (view(&frame), view(&world), view(coverage), view(hud));
+                        (view(&frame), view(world), view(coverage), view(hud));
                     let entry = |binding, view| wgpu::BindGroupEntry {
                         binding,
                         resource: wgpu::BindingResource::TextureView(view),
@@ -600,15 +544,15 @@ impl Hdr {
     }
 
     /// The layered frame's HUD target, which the HUD and menus draw on instead of the frame
-    /// once `keep_world` made it.
+    /// once `hud_backdrop` made it.
     pub fn hud(&self) -> Option<&wgpu::Texture> {
         self.targets.as_ref()?.hud.as_ref()
     }
 
     /// The layered frame's SDR screenshot, directly in the readback's texture; the icon
-    /// maps only the world. Where Horizon lifted nothing (`lighting` off: HDR Lighting off,
-    /// or under a shader pack) nothing is mapped. Neither the display's targets nor its
-    /// parameters are changed.
+    /// maps only the world. Light above white keeps its hue; where Horizon lifted nothing
+    /// (`lighting` off: HDR Lighting off, or under a shader pack) each channel clips as SDR's
+    /// does. Neither the display's targets nor its parameters are changed.
     pub fn sdr_screenshot(
         &mut self,
         device: &wgpu::Device,
@@ -616,11 +560,11 @@ impl Hdr {
         format: wgpu::TextureFormat,
         world_only: bool,
     ) -> Option<wgpu::Texture> {
-        let shoulder = self.lighting;
+        let keeps_hue = self.lighting;
         let (l, t) = (self.layered.as_mut()?, self.targets.as_ref()?);
         if l.screenshot
             .as_ref()
-            .is_none_or(|(f, w, s, _)| (*f, *w, *s) != (format, world_only, shoulder))
+            .is_none_or(|(f, w, s, _)| (*f, *w, *s) != (format, world_only, keeps_hue))
         {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("HDR SDR screenshot"),
@@ -644,7 +588,7 @@ impl Hdr {
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: &[
                             ("screenshot_world_only", f64::from(u8::from(world_only))),
-                            ("screenshot_shoulder", f64::from(u8::from(shoulder))),
+                            ("screenshot_keeps_hue", f64::from(u8::from(keeps_hue))),
                         ],
                         ..Default::default()
                     },
@@ -653,7 +597,7 @@ impl Hdr {
                 multiview_mask: None,
                 cache: None,
             });
-            l.screenshot = Some((format, world_only, shoulder, pipeline));
+            l.screenshot = Some((format, world_only, keeps_hue, pipeline));
         }
         let pipeline = &l.screenshot.as_ref()?.3;
         let views = [
@@ -715,12 +659,12 @@ impl Hdr {
         let (Some(l), Some(t)) = (&self.layered, &self.targets) else {
             return;
         };
-        let Some([group, ..]) = &t.passes else {
+        let (Some([group, ..]), Some(world)) = (&t.passes, &t.world) else {
             return;
         };
         encoder.copy_texture_to_texture(
             t.frame.as_image_copy(),
-            t.world.as_image_copy(),
+            world.as_image_copy(),
             t.frame.size(),
         );
         let view = t.frame.create_view(&Default::default());
@@ -735,7 +679,7 @@ impl Hdr {
     }
 
     /// On the layered frame: the picture so far (`fs_composite`), as the frame stores light,
-    /// into `target`, for the menu blur to blur it and make it the world (`keep_world` after).
+    /// into `target`, for the menu blur to blur it and make it the world (`hud_backdrop` after).
     pub fn composite(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -781,109 +725,40 @@ impl Hdr {
         }
     }
 
-    /// Keeps the world as drawn so far, before the hand and HUD cover it, then zeroes the
-    /// frame's alpha: the world's marks live on in the copy, and whatever draws from here
-    /// on raises the alpha where it covers the world.
-    ///
-    /// On the layered frame the frame keeps the world, the hand and the camera overlays, as
-    /// light, and this makes the HUD's backdrop from it: clipped to white, alpha 0 (`fs_keep`).
-    pub fn keep_world(
+    /// On the layered frame, which holds the world, the hand and the camera overlays as light:
+    /// makes the HUD's backdrop from it, clipped to white, alpha 0 (`fs_keep`). The HUD and the
+    /// menus draw on it from here on.
+    pub fn hud_backdrop(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
-        let Some(t) = &self.targets else {
-            return;
-        };
-        if let (Some(l), Some(hud), Some([_, group, _])) = (&self.layered, &t.hud, &t.passes) {
+        if let (
+            Some(l),
+            Some(Targets {
+                hud: Some(hud),
+                passes: Some([_, group, _]),
+                ..
+            }),
+        ) = (&self.layered, &self.targets)
+        {
             let view = hud.create_view(&Default::default());
             Self::draw(encoder, &l.keep.1, group, &view, "HDR HUD backdrop", timing);
-            return;
         }
-        encoder.copy_texture_to_texture(
-            t.frame.as_image_copy(),
-            t.world.as_image_copy(),
-            t.frame.size(),
-        );
-        let view = t.frame.create_view(&Default::default());
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: &view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Horizon HDR UI mask"),
-            timestamp_writes: timing.and_then(|t| t.writes("HDR UI mask")),
-            color_attachments: &attachments,
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.clear_alpha);
-        pass.draw(0..3, 0..1);
     }
 
-    /// After the hand: its pixels' alpha goes down to 1/255, below anything the HUD and
-    /// menus leave, so HDR output tells the hand (the world's brightness, never lifted)
-    /// from the UI (UI Brightness). The layered frame keeps the hand before `keep_world`,
-    /// so it needs no mark there.
-    pub fn mark_hand(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        timing: Option<&mut super::pack_timing::PassTiming>,
-    ) {
-        let Some(t) = self.targets.as_ref().filter(|_| self.layered.is_none()) else {
-            return;
-        };
-        let view = t.frame.create_view(&Default::default());
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: &view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Horizon HDR hand mark"),
-            timestamp_writes: timing.and_then(|t| t.writes("HDR hand mark")),
-            color_attachments: &attachments,
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.hand_mark);
-        let a = 1.0 / 255.0;
-        pass.set_blend_constant(wgpu::Color {
-            r: a,
-            g: a,
-            b: a,
-            a,
-        });
-        pass.draw(0..3, 0..1);
-    }
-
-    /// The world as `keep_world` kept it: where the hand's marks go (its alpha, which HDR output
-    /// reads for it too), and what tints the world rather than covering it. None on the
-    /// layered frame, where both draw on the frame before `keep_world`.
-    pub fn hand_light_view(&self) -> Option<wgpu::TextureView> {
-        let t = self.targets.as_ref().filter(|_| self.layered.is_none())?;
-        Some(t.world.create_view(&Default::default()))
-    }
-
-    /// Writes the finished frame to the swapchain image `target`.
-    /// The tiers' windows for the shaders that mark the frame (`Globals::hdr_windows`):
-    /// where each starts, then where each is full.
+    /// The tiers' windows for the world's writers (`Globals::hdr_windows`): where each starts,
+    /// then where each is full.
     pub fn windows(&self) -> [[f32; 4]; 2] {
         [self.tiers.map(|t| t.start), self.tiers.map(|t| t.full)]
     }
+
+    /// Writes the finished frame to the swapchain image `target`.
     pub fn present(
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::Texture,
-        world: bool,
         timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
         let Some(t) = &self.targets else {
@@ -892,7 +767,7 @@ impl Hdr {
         queue.write_buffer(
             &self.params,
             0,
-            bytemuck::cast_slice(&self.params(world, self.output == Output::Pq)),
+            bytemuck::cast_slice(&self.params(false, self.output == Output::Pq)),
         );
         let view = target.create_view(&Default::default());
         Self::draw(
@@ -912,7 +787,6 @@ impl Hdr {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        world: bool,
     ) -> Option<wgpu::Texture> {
         let t = self.targets.as_ref()?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -928,7 +802,6 @@ impl Hdr {
         let group = self.group(
             device,
             &t.frame,
-            &t.world,
             t.coverage.as_ref(),
             t.hud.as_ref(),
             &self.capture_params,
@@ -936,7 +809,7 @@ impl Hdr {
         queue.write_buffer(
             &self.capture_params,
             0,
-            bytemuck::cast_slice(&self.params(world, true)),
+            bytemuck::cast_slice(&self.params(false, true)),
         );
         let view = texture.create_view(&Default::default());
         Self::draw(
@@ -954,13 +827,12 @@ impl Hdr {
         &self,
         device: &wgpu::Device,
         frame: &wgpu::Texture,
-        world: &wgpu::Texture,
         coverage: Option<&wgpu::Texture>,
         hud: Option<&wgpu::Texture>,
         params: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         let view = |t: &wgpu::Texture| t.create_view(&Default::default());
-        let (frame, world) = (view(frame), view(world));
+        let frame = view(frame);
         let layered = coverage.zip(hud).map(|(c, h)| (view(c), view(h)));
         let texture = |binding, view| wgpu::BindGroupEntry {
             binding,
@@ -974,9 +846,8 @@ impl Hdr {
             },
             texture(3, &self.logo),
         ];
-        match &layered {
-            Some((coverage, hud)) => entries.extend([texture(4, coverage), texture(5, hud)]),
-            None => entries.push(texture(1, &world)),
+        if let Some((coverage, hud)) = &layered {
+            entries.extend([texture(4, coverage), texture(5, hud)]);
         }
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Horizon HDR bindings"),
@@ -992,48 +863,44 @@ impl Hdr {
     }
 
     /// What the world's writers read (`hdr_written`): the sun's disc's peak (`fs_sky_sun`, the
-    /// only writer that reads a peak: the others leave theirs to the tone curve), HDR lighting's
-    /// gain, world/look and debug, then the tiers' gains. Of the display only the sun's peak
+    /// only writer that reads a peak: the others leave theirs to the tone curve), an unused
+    /// lane, world/look and debug, then the tiers' gains. Of the display only the sun's peak
     /// reaches them.
     pub(super) fn draw_params(&self, world: bool) -> ([f32; 4], [f32; 4]) {
-        let p = self.params(world, false);
-        let sunlit = if self.lighting { SUNLIT_GAIN } else { 1.0 };
+        let shows = f32::from(u8::from(world && self.look));
+        let debug = f32::from(u8::from(self.debug));
         (
-            [self.sun_peak(), sunlit, p[2], p[3]],
+            [self.sun_peak(), 0.0, shows, debug],
             self.tiers.map(|t| t.gain),
         )
     }
 
     /// hdr.wgsl's `Params`.
-    fn params(&self, world: bool, pq: bool) -> [f32; 20] {
+    fn params(&self, world: bool, pq: bool) -> [f32; 12] {
         let paper = self.paper_white.max(1.0);
-        let c = self.calibration;
-        let mut params = [0.0; 20];
-        params[..5].copy_from_slice(&[
-            paper / 80.0,
-            (self.peak / paper).max(1.0),
-            f32::from(u8::from(world && self.look)),
-            f32::from(u8::from(self.debug)),
-            f32::from(u8::from(pq)),
-        ]);
-        params[5] = self.black.clamp(0.0, paper);
-        params[6] = self.ui;
-        params[7] = if self.lighting {
-            scene_gain(self.peak, self.paper_white)
-        } else {
-            1.0
-        };
-        params[8..12].copy_from_slice(&COMPAT_SHARES);
-        params[12] = c.map_or(0.0, |c| c.step as f32);
-        params[13] = c.map_or(0.0, |c| c.nits);
-        params[14] = c.map_or(0.0, |c| c.band);
         // Only Horizon's lifted world is known to end at the scene's peak; elsewhere (HDR
         // Lighting off, a pack's own light, the title) the curve's source follows the display.
-        if world && self.lighting {
-            params[16] = SCENE_PEAK;
-            params[17] = self.sun_peak();
-        }
-        params
+        let (scene_peak, sun_peak) = if world && self.lighting {
+            (SCENE_PEAK, self.sun_peak())
+        } else {
+            (0.0, 0.0)
+        };
+        let c = self.calibration;
+        [
+            paper / 80.0,
+            (self.peak / paper).max(1.0),
+            f32::from(u8::from(pq)),
+            self.black.clamp(0.0, paper),
+            self.ui,
+            scene_peak,
+            sun_peak,
+            // Pads `calibration` to its 16-byte alignment.
+            0.0,
+            c.map_or(0.0, |c| c.step as f32),
+            c.map_or(0.0, |c| c.nits),
+            c.map_or(0.0, |c| c.band),
+            0.0,
+        ]
     }
 
     /// One full-screen pass of `pipeline` into `view`.
@@ -1109,13 +976,6 @@ fn logo_mask(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
         .create_view(&Default::default())
 }
 
-/// The compatibility frame's HDR lighting (`fs_hdr`): what the strongest light multiplies a
-/// surface by, 4, which looked right across biomes; less only where there is little headroom
-/// to ease into. The float frame's is `SUNLIT_GAIN`.
-fn scene_gain(peak: f32, paper_white: f32) -> f32 {
-    (peak / paper_white.max(1.0) * 1.75).clamp(1.0, 4.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Hdr, Output, named, pick};
@@ -1128,12 +988,12 @@ mod tests {
             eprintln!("HDR equivalence GPU unavailable");
             return;
         };
-        // All 8-bit marks, both easing policies, non-grey and over-white colours, look,
-        // debug, headroom and tier shares; half-float neighbours straddle mark boundaries. The
-        // writers take the gain that a share gives.
+        // All 8-bit marks, non-grey and over-white colours, look, debug, headroom, tier shares
+        // and the unused lane; half-float neighbours straddle mark boundaries. The writers take
+        // the gain that a share gives.
         let source = include_str!("../hdr_light.wgsl").to_owned()
             + r#"
-struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: vec4<f32> }
+struct ReferenceParams { peak: f32, unused: f32, world: f32, debug: f32, share: vec4<f32> }
 var<private> params: ReferenceParams;
 @group(0) @binding(0) var<storage, read_write> errors: array<u32>;
 "# + include_str!("hdr_light_reference.txt")
@@ -1142,27 +1002,27 @@ var<private> params: ReferenceParams;
     let i = id.x;
     let mark = f32(i % 256u) / 255.0;
     let mode = i / 256u;
-    let eased = (mode & 1u) != 0u;
-    let shows = (mode & 2u) != 0u;
-    params = ReferenceParams(select(1.0, 1000.0 / 203.0, (mode & 4u) != 0u),
-        select(1.0, 4.0, (mode & 8u) != 0u), select(0.0, 1.0, (mode & 16u) != 0u),
-        select(0.0, 1.0, (mode & 32u) != 0u), vec4(0.2, 0.5, 0.6, 1.0));
-    let color = select(vec3(0.9, 0.4, 0.02), vec3(1.4, 0.8, 0.2), (mode & 64u) != 0u);
-    let expected = reference_lit(color, mark, shows, eased);
+    let shows = (mode & 1u) != 0u;
+    params = ReferenceParams(select(1.0, 1000.0 / 203.0, (mode & 2u) != 0u),
+        select(1.0, 4.0, (mode & 4u) != 0u), select(0.0, 1.0, (mode & 8u) != 0u),
+        select(0.0, 1.0, (mode & 16u) != 0u), vec4(0.2, 0.5, 0.6, 1.0));
+    let color = select(vec3(0.9, 0.4, 0.02), vec3(1.4, 0.8, 0.2), (mode & 32u) != 0u);
+    let expected = reference_lit(color, mark, shows);
     let gains = 1.0 + (params.peak - 1.0) * params.share;
-    let actual = hdr_mark_light(color, mark, shows, eased,
-        vec4(params.peak, params.scene, params.world, params.debug), (params.peak - 1.0) * params.share);
+    let actual = hdr_mark_light(color, mark, shows,
+        vec4(params.peak, params.unused, params.world, params.debug), (params.peak - 1.0) * params.share);
     errors[i] = select(0u, 1u, any(abs(expected.light - actual.light) > vec3(1e-6)) || expected.lifted != actual.lifted);
-    // Gain stays above the tone knee until the separate tone curve runs.
-    let gain = 1.0 + 3.0 * (1.0 - 194.0 / 255.0) / 0.24;
+    // From 0.75 up nothing is lifted: a lit surface's white stays white.
     let white = hdr_written(vec3(1.0), 0.76, vec4(5.0, 4.0, 1.0, 0.0), gains);
-    errors[i] |= select(0u, 4u, any(abs(pow(white, vec3(2.2)) - vec3(gain)) > vec3(1e-5)));
+    errors[i] |= select(0u, 4u, any(white != vec3(1.0)));
+    // An unlifted texel sheds no shading: scaled by exactly 1.
+    errors[i] |= select(0u, 8u, hdr_unshade(color, 0.0, 0.3) != 1.0);
     let boundary = (f32(i % 255u) + 0.5) / 255.0;
     for (var step = -1; step <= 1; step++) {
         let stored = unpack2x16float(pack2x16float(vec2(boundary + f32(step) / 65536.0))).x;
         let quantized = round(saturate(stored) * 255.0) / 255.0;
-        let want = pow(reference_lit(color, quantized, params.world > 0.5, false).light, vec3(1.0 / 2.2));
-        let got = hdr_written(color, stored, vec4(params.peak, params.scene, params.world, params.debug), gains);
+        let want = pow(reference_lit(color, quantized, params.world > 0.5).light, vec3(1.0 / 2.2));
+        let got = hdr_written(color, stored, vec4(params.peak, params.unused, params.world, params.debug), gains);
         errors[i] |= select(0u, 2u, any(abs(want - got) > vec3(1e-6)));
     }
 }
@@ -1179,7 +1039,7 @@ var<private> params: ReferenceParams;
             compilation_options: Default::default(),
             cache: None,
         });
-        let count = 256 * 128;
+        let count = 256 * 64;
         let output = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: &vec![0; count * 4],
@@ -1249,7 +1109,7 @@ var<private> params: ReferenceParams;
                     color_attachments: &[Some(color)],
                     ..Default::default()
                 });
-                hdr.keep_world(&mut encoder, None);
+                hdr.hud_backdrop(&mut encoder, None);
                 if let Some(view) = hdr.coverage_view() {
                     super::super::hud_coverage::clear(&mut encoder, &view);
                     let mut color = super::super::hud_coverage::attachment(&view);
@@ -1259,7 +1119,7 @@ var<private> params: ReferenceParams;
                         ..Default::default()
                     });
                 }
-                let capture = hdr.capture(&device, &queue, &mut encoder, false).unwrap();
+                let capture = hdr.capture(&device, &queue, &mut encoder).unwrap();
                 let buffer = super::super::copy_frame(&device, &mut encoder, &capture, [4, 2]);
                 queue.submit([encoder.finish()]);
                 buffer.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
@@ -1310,13 +1170,7 @@ var<private> params: ReferenceParams;
         let instance = crate::gfx::test_gpu::instance();
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         eprintln!("HDR GPU {:?}", adapter.get_info());
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: adapter.features()
-                & (wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
-                    | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
-            ..Default::default()
-        }))
-        .ok()
+        pollster::block_on(adapter.request_device(&Default::default())).ok()
     }
 
     /// Clears all of `texture` to `color`.
@@ -1379,191 +1233,6 @@ var<private> params: ReferenceParams;
         std::array::from_fn(|i| half::f16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]).to_f32())
     }
 
-    // Independent pre-refactor light arithmetic applied to a compatibility attachment.
-    // Float targets in these tests only receive the resulting colour and coverage.
-    // `lift`: the reference's peak, HDR lighting gain, world and debug, then the tiers' shares
-    // of the headroom up to that peak (`writers_lift`, `display_lift`).
-    pub(super) fn legacy_light(
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        lift: [[f32; 4]; 2],
-        source: &wgpu::Texture,
-        target: &wgpu::Texture,
-    ) {
-        use wgpu::util::DeviceExt;
-        assert_eq!(source.format(), F::Rgba16Unorm);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("legacy non-float light oracle"),
-            source: wgpu::ShaderSource::Wgsl(
-                (r#"
-struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: vec4<f32> }
-@group(0) @binding(0) var<uniform> params: ReferenceParams;
-@group(0) @binding(1) var source: texture_2d<f32>;
-"#
-                .to_owned()
-                    + include_str!("hdr_light_reference.txt")
-                    + r#"
-@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    return vec4(vec2(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0, 0.0, 1.0);
-}
-@fragment fn fs() -> @location(0) vec4<f32> {
-    let c = textureLoad(source, vec2(0), 0);
-    let mark = round(saturate(c.a) * 255.0) / 255.0;
-    let light = reference_lit(c.rgb, mark, params.world > 0.5, false).light;
-    return vec4(pow(light, vec3(1.0 / 2.2)), 1.0);
-}
-"#)
-                .into(),
-            ),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(F::Rgba16Float.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&lift),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let view = source.create_view(&Default::default());
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-            ],
-        });
-        Hdr::draw(
-            encoder,
-            &pipeline,
-            &group,
-            &target.create_view(&Default::default()),
-            "legacy oracle",
-            None,
-        );
-    }
-
-    /// The float frame's writers' light as `legacy_light` takes it: each tier's gain as a share
-    /// of the headroom up to the scene's peak.
-    pub(super) fn writers_lift(hdr: &Hdr) -> [[f32; 4]; 2] {
-        let (settings, gains) = hdr.draw_params(true);
-        [settings, gains.map(|g| (g - 1.0) / (settings[0] - 1.0))]
-    }
-
-    /// The compatibility frame's display pass's light (`fs_hdr`) as `legacy_light` takes it.
-    fn display_lift(hdr: &Hdr) -> [[f32; 4]; 2] {
-        let p = hdr.params(true, false);
-        [[p[1], p[7], p[2], p[3]], p[8..12].try_into().unwrap()]
-    }
-
-    #[test]
-    fn direct_light_matches_the_legacy_non_float_display_below_the_tone_knee() {
-        let Some((device, queue)) = gpu() else {
-            return;
-        };
-        if !device.features().contains(
-            wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
-                | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
-        ) {
-            eprintln!("legacy display GPU skipped: 16-bit UNORM unavailable");
-            return;
-        }
-        // Compare the compatibility display lift with direct colour under the layered HUD:
-        // the frozen oracle turns the marks into the light that display gives them, and the
-        // layered display, whose curve is the identity at 1000 nits, must show it the same.
-        let shown = |layered: bool, world: [f64; 4]| {
-            let mut hdr = Hdr::with_debug(
-                &device,
-                &queue,
-                if layered {
-                    F::Rgba16Float
-                } else {
-                    F::Rgba16Unorm
-                },
-                Output::Pq,
-                layered,
-                None,
-            );
-            let frame = hdr.frame(&device, [1, 1]);
-            let mut encoder = device.create_command_encoder(&Default::default());
-            if layered {
-                let mut legacy =
-                    Hdr::with_debug(&device, &queue, F::Rgba16Unorm, Output::Pq, false, None);
-                let marked = legacy.frame(&device, [1, 1]);
-                fill(&mut encoder, &marked, world);
-                if world[3] == 1.0 {
-                    fill(&mut encoder, &frame, world);
-                } else {
-                    // The light the compatibility frame shows: its own lift, not the writers'.
-                    legacy_light(
-                        &device,
-                        &mut encoder,
-                        display_lift(&legacy),
-                        &marked,
-                        &frame,
-                    );
-                }
-                hdr.begin(&queue, true);
-                hdr.tonemap(&mut encoder, None);
-                hdr.keep_world(&mut encoder, None);
-                super::super::hud_coverage::clear(&mut encoder, &hdr.coverage_view().unwrap());
-            } else {
-                fill(&mut encoder, &frame, world);
-                hdr.keep_world(&mut encoder, None);
-            }
-            let capture = hdr.capture(&device, &queue, &mut encoder, true).unwrap();
-            texel(&device, &queue, encoder, &capture)
-        };
-        // Unmarked, HDR lighting and light sources of each tier: all up to
-        // the tone curve's knee, which the curve leaves as they are.
-        for world in [
-            [0.5, 0.4, 0.3, 1.0],
-            [0.8, 0.7, 0.6, 0.88],
-            [0.9, 0.8, 0.4, 0.05],
-            [0.9, 0.8, 0.4, 0.2],
-            [0.9, 0.8, 0.4, 0.4],
-            [0.9, 0.8, 0.4, 0.6],
-        ] {
-            let (today, layered) = (shown(false, world), shown(true, world));
-            // Half floats round the light apart by a step at most.
-            assert!(
-                today.iter().zip(layered).all(|(a, b)| (a - b).abs() <= 1.0),
-                "{world:?}: {today:?} {layered:?}"
-            );
-            if world[3] < 1.0 {
-                assert!(layered[0] > shown(true, [world[0], world[1], world[2], 1.0])[0]);
-            }
-        }
-        // Above-white unmarked colour belongs to float storage, not the UNORM oracle.
-        let above = shown(true, [1.5, 1.2, 0.6, 1.0]);
-        let white = shown(true, [1.0, 1.0, 0.6, 1.0]);
-        assert!(above[0] > white[0] && above[1] > white[1]);
-    }
-
     /// The world's writers read the same gains at any paper white and peak
     /// (docs/design/hdr-linear-light.md, step 6a). Of the display only the sun's disc's peak
     /// reaches them: the scene's up to a display at it, so there nothing differs; above it the
@@ -1589,18 +1258,17 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
             (hdr.paper_white, hdr.peak) = (paper, peak);
             assert_eq!(
                 hdr.draw_params(true),
-                ([sun, super::SUNLIT_GAIN, 1.0, 0.0], [1.6, 2.4, 2.8, 4.0]),
+                ([sun, 0.0, 1.0, 0.0], [1.6, 2.4, 2.8, 4.0]),
                 "{paper}/{peak}"
             );
             let params = hdr.params(true, false);
-            assert_eq!((params[16], params[17]), (scene, sun), "{paper}/{peak}");
+            assert_eq!((params[5], params[6]), (scene, sun), "{paper}/{peak}");
         }
         // The title, and frames Horizon doesn't light (HDR Lighting off, a pack drawing):
         // nothing says where their light ends, so the curve's source follows the display.
-        assert_eq!(hdr.params(false, false)[16], 0.0);
+        assert_eq!(hdr.params(false, false)[5], 0.0);
         hdr.lighting = false;
-        assert_eq!(hdr.draw_params(true).0[1], 1.0);
-        assert_eq!(hdr.params(true, false)[16], 0.0);
+        assert_eq!(hdr.params(true, false)[5], 0.0);
     }
 
     /// The tone curve maps the scene's peak S onto the display's peak T with ITU-R BT.2390's
@@ -1841,10 +1509,10 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
             let g = 2f64.powf(1.0 / 2.2);
             fill(&mut encoder, &frame, [g, g, g, 1.0]);
             hdr.begin(&queue, true);
-            hdr.keep_world(&mut encoder, None);
+            hdr.hud_backdrop(&mut encoder, None);
             super::super::hud_coverage::clear(&mut encoder, &hdr.coverage_view().unwrap());
             let target = if capture {
-                hdr.capture(&device, &queue, &mut encoder, true).unwrap()
+                hdr.capture(&device, &queue, &mut encoder).unwrap()
             } else {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
@@ -1858,7 +1526,7 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
                 })
             };
             if !capture {
-                hdr.present(&queue, &mut encoder, &target, true, None);
+                hdr.present(&queue, &mut encoder, &target, None);
             }
             texel(&device, &queue, encoder, &target)
         };
@@ -1968,14 +1636,14 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
                     let frame = hdr.frame(&device, [1, 1]);
                     let mut encoder = device.create_command_encoder(&Default::default());
                     fill(&mut encoder, &frame, [r, g, b, 1.0]);
-                    hdr.keep_world(&mut encoder, None);
+                    hdr.hud_backdrop(&mut encoder, None);
                     super::super::hud_coverage::clear(&mut encoder, &hdr.coverage_view().unwrap());
                     hdr.begin(&queue, true);
-                    hdr.present(&queue, &mut encoder, &target, true, None);
+                    hdr.present(&queue, &mut encoder, &target, None);
                     // HDR10's exact codes are a screenshot's copy: the swapchain's own get a
                     // code of dither either way.
                     let exact = (output == Output::Pq)
-                        .then(|| hdr.capture(&device, &queue, &mut encoder, true).unwrap());
+                        .then(|| hdr.capture(&device, &queue, &mut encoder).unwrap());
                     let presented = texel(&device, &queue, encoder, &target);
                     let exact = exact.map(|copy| {
                         let encoder = device.create_command_encoder(&Default::default());
@@ -2025,7 +1693,7 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
         let sdr = hdr
             .sdr_screenshot(&device, &mut encoder, F::Bgra8Unorm, false)
             .unwrap();
-        let pq = hdr.capture(&device, &queue, &mut encoder, true).unwrap();
+        let pq = hdr.capture(&device, &queue, &mut encoder).unwrap();
         queue.submit([encoder.finish()]);
         assert_eq!((extent(&sdr), extent(&pq)), ([8, 4], [8, 4]));
         hdr.release_targets();
@@ -2036,7 +1704,7 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
     }
 
     #[test]
-    fn sdr_screenshots_roll_off_the_world_and_keep_the_hud_as_drawn() {
+    fn sdr_screenshots_keep_the_world_up_to_white_and_the_hud_as_drawn() {
         let Some((device, queue)) = gpu() else {
             eprintln!("SDR screenshot GPU unavailable");
             return;
@@ -2061,28 +1729,8 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
                 .unwrap();
             texel(&device, &queue, encoder, &copy)
         };
-        // Below the linear knee, through the last half-float below it, the stored
-        // channels survive exactly. All inputs here are exactly representable.
-        for gamma in [0.0f32, 0.25, 0.5, 0.75, 0.79248047] {
-            let w = [gamma, gamma / 2.0, 0.0];
-            let got = shoot(&mut hdr, w.map(f64::from), w.map(f64::from), 0.0, false);
-            assert_eq!(got[..3], w.map(|v| half::f16::from_f32(v).to_f32()));
-        }
-        // Independent numeric checkpoints in linear light, not a CPU copy of the shader.
-        for (light, expected) in [
-            (1.0f32, 0.8),
-            (2.0, 0.9111111),
-            (4.0, 0.9578947),
-            (8.0, 0.9794872),
-        ] {
-            let g = f64::from(light.powf(1.0 / 2.2));
-            let got = shoot(&mut hdr, [g; 3], [1.0; 3], 0.0, false);
-            assert!(
-                (got[0].powf(2.2) - expected).abs() < 0.002,
-                "{light}: {got:?}"
-            );
-            assert!(got[0] < 1.0);
-        }
+        // The world rises to white and stays there (within the division's rounding), its
+        // channels in step.
         let mut last = 0.0;
         for i in 0..65 {
             let g = f64::from(i) / 16.0;
@@ -2093,7 +1741,8 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
                 0.0,
                 false,
             );
-            assert!(got[0] >= last && got[0] <= 1.0, "{g}: {got:?}");
+            assert!(got[0] >= last - 0.001 && got[0] <= 1.0, "{g}: {got:?}");
+            assert_eq!(got[0] > 0.999, g >= 1.0, "{g}: {got:?}");
             assert!((got[0] - 2.0 * got[1]).abs() < 0.002 && got[2] == 0.0);
             last = got[0];
         }
@@ -2107,8 +1756,8 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
         // At zero coverage the mapped world; the icon also ignores a fully opaque HUD.
         for (hud, c, icon) in [([1.0, 1.0, 0.5], 0.0, false), ([0.25; 3], 1.0, true)] {
             let got = shoot(&mut hdr, [2.0, 1.0, 0.5], hud, c, icon);
-            for (g, expected) in got.into_iter().zip([0.983284, 0.491642, 0.245821, 1.0]) {
-                assert!((g - expected).abs() < 0.002, "{got:?}");
+            for (g, expected) in got.into_iter().zip([1.0, 0.5, 0.25, 1.0]) {
+                assert!((g - expected).abs() < 0.001, "{got:?}");
             }
         }
         // R8's 128/255 coverage: recover the HUD against the clipped backdrop, then
@@ -2120,7 +1769,7 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
             128.0 / 255.0,
             false,
         );
-        for (g, expected) in got.into_iter().zip([0.741675, 0.62182, 0.31091, 1.0]) {
+        for (g, expected) in got.into_iter().zip([0.75, 0.626961, 0.31348, 1.0]) {
             assert!((g - expected).abs() < 0.002, "{got:?}");
         }
         let t = hdr.targets.as_ref().unwrap();
@@ -2157,6 +1806,77 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
             got.map(|v| (v * 255.0).round()),
             [191.0, 223.0, 112.0, 255.0]
         );
+    }
+
+    /// The SDR screenshot's world for `world` in the frame, with nothing of the HUD over it,
+    /// read as half-floats so 8 bits can't hide a difference.
+    fn sdr_world(
+        hdr: &mut Hdr,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world: [f32; 3],
+    ) -> [f32; 4] {
+        let [r, g, b] = world.map(f64::from);
+        let frame = hdr.frame(device, [1, 1]);
+        let t = hdr.targets.as_ref().unwrap();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        fill(&mut encoder, &frame, [r, g, b, 1.0]);
+        fill(
+            &mut encoder,
+            t.hud.as_ref().unwrap(),
+            [r.min(1.0), g.min(1.0), b.min(1.0), 0.0],
+        );
+        fill(&mut encoder, t.coverage.as_ref().unwrap(), [0.0; 4]);
+        let copy = hdr
+            .sdr_screenshot(device, &mut encoder, F::Rgba16Float, false)
+            .unwrap();
+        texel(device, queue, encoder, &copy)
+    }
+
+    #[test]
+    fn an_sdr_screenshot_returns_white_and_below_exactly() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("SDR screenshot GPU unavailable");
+            return;
+        };
+        let mut hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
+        // Every half-float the frame can hold from 0.99 to white, and every 8-bit step below:
+        // each comes back bit for bit, on every channel.
+        let white = half::f16::from_f32(1.0).to_bits();
+        let near = (half::f16::from_f32(0.99).to_bits()..=white).map(half::f16::from_bits);
+        let below = (0..=252u16).map(|i| half::f16::from_f32(f32::from(i) / 255.0));
+        for top in near.chain(below).map(half::f16::to_f32) {
+            for w in [[top; 3], [top / 4.0, top, top / 2.0]] {
+                let got = sdr_world(&mut hdr, &device, &queue, w);
+                assert_eq!(got[..3], w, "{w:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_sdr_screenshot_keeps_the_hue_of_light_above_white_within_0_to_1() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("SDR screenshot GPU unavailable");
+            return;
+        };
+        let mut hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
+        // Stored colours with their brightest channel from just above white to far above the
+        // scene's peak: the brightest lands on white and the others keep their share of it,
+        // which is the hue in gamma as in linear light.
+        for shares in [
+            [1.0f32, 0.5, 0.0],
+            [0.3, 1.0, 0.6],
+            [0.05, 0.2, 1.0],
+            [1.0; 3],
+        ] {
+            for top in [1.001f32, 1.25, 2.0, 4.0, 16.0, 64.0] {
+                let got = sdr_world(&mut hdr, &device, &queue, shares.map(|s| s * top));
+                assert!(got.iter().all(|c| (0.0..=1.0).contains(c)), "{got:?}");
+                for (g, share) in got.iter().zip(shares) {
+                    assert!((g - share).abs() < 0.001, "{shares:?} at {top}: {got:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2213,15 +1933,15 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
         }
     }
 
-    /// On the frame without the HUD's layer, the HUD at UI Brightness reaches its nits, and
-    /// above the peak stops there, as on the layered frame.
+    /// The frame without the HUD's layer, a `shaders/` pack's SDR picture: all of it shows at
+    /// paper white, the HUD it drew included, whatever its alpha and UI Brightness.
     #[test]
-    fn the_hud_at_ui_brightness_stops_at_the_peak() {
+    fn a_frame_without_the_huds_layer_shows_at_paper_white() {
         let Some((device, queue)) = gpu() else {
             return;
         };
         let mut hdr = Hdr::with_debug(&device, &queue, F::Rgba8Unorm, Output::ScRgb, false, None);
-        (hdr.paper_white, hdr.peak) = (200.0, 300.0);
+        (hdr.paper_white, hdr.peak, hdr.ui) = (200.0, 300.0, 2.0);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -2236,23 +1956,21 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        // UI Brightness (a share of paper white) and the white HUD's nits.
-        for (ui, want) in [(0.5, 100.0), (1.25, 250.0), (2.0, 300.0)] {
-            hdr.ui = ui;
-            let frame = hdr.frame(&device, [1, 1]);
-            let mut encoder = device.create_command_encoder(&Default::default());
-            fill(&mut encoder, &frame, [0.2, 0.2, 0.2, 1.0]);
-            hdr.keep_world(&mut encoder, None);
-            // Opaque white HUD over the world: alpha 1 is full coverage.
-            fill(&mut encoder, &frame, [1.0; 4]);
-            hdr.begin(&queue, true);
-            hdr.present(&queue, &mut encoder, &target, true, None);
-            let got = texel(&device, &queue, encoder, &target);
-            for c in &got[..3] {
-                assert!(
-                    (c * 80.0 - want).abs() < 0.5,
-                    "UI {ui}: {got:?}, not {want} nits"
-                );
+        // White and a mid grey (128 of 255), in nits.
+        let grey = 128.0 / 255.0;
+        for (colour, want) in [(1.0, 200.0), (grey, 200.0 * f64::powf(grey, 2.2))] {
+            for alpha in [0.0, 0.3, 1.0] {
+                let frame = hdr.frame(&device, [1, 1]);
+                let mut encoder = device.create_command_encoder(&Default::default());
+                fill(&mut encoder, &frame, [colour, colour, colour, alpha]);
+                hdr.present(&queue, &mut encoder, &target, None);
+                let got = texel(&device, &queue, encoder, &target);
+                for c in &got[..3] {
+                    assert!(
+                        (f64::from(*c) * 80.0 - want).abs() < 0.5,
+                        "{colour} alpha {alpha}: {got:?}, not {want} nits"
+                    );
+                }
             }
         }
     }
@@ -2267,7 +1985,7 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
         let frame = hdr.frame(&device, size);
         let mut encoder = device.create_command_encoder(&Default::default());
         fill(&mut encoder, &frame, [4.0, 4.0, 4.0, 1.0]);
-        hdr.keep_world(&mut encoder, None);
+        hdr.hud_backdrop(&mut encoder, None);
         super::super::hud_coverage::clear(&mut encoder, &hdr.coverage_view().unwrap());
         let mut blur = crate::menu_blur::MenuBlur::new(&device, F::Rgba16Float, false);
         let (_, source) = blur.source(&device, size);
@@ -2275,7 +1993,7 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
         hdr.composite(&mut encoder, &source, None);
         let view = frame.create_view(&Default::default());
         blur.blur(&device, &queue, &mut encoder, &view, size, 3.0, None);
-        hdr.keep_world(&mut encoder, None);
+        hdr.hud_backdrop(&mut encoder, None);
         let hud = hdr.hud().unwrap().clone();
         // The blurred world keeps its light, and the HUD's backdrop starts again from it.
         let [r, ..] = texel(&device, &queue, encoder, &frame);
@@ -2338,21 +2056,6 @@ struct ReferenceParams { peak: f32, scene: f32, world: f32, debug: f32, share: v
         assert_eq!(named(Some("scrgb")), Some(Output::ScRgb));
         assert_eq!(named(Some("hdr10")), None);
         assert_eq!(named(None), None);
-    }
-}
-
-#[cfg(test)]
-mod lighting_tests {
-    use super::scene_gain;
-
-    #[test]
-    fn the_lighting_scales_with_the_headroom() {
-        // Enough headroom: the full strength, whatever the paper white.
-        assert_eq!(scene_gain(1000.0, 430.0), 4.0);
-        assert_eq!(scene_gain(1060.0, 203.0), 4.0);
-        // Little headroom, and none.
-        assert_eq!(scene_gain(600.0, 400.0), 2.625);
-        assert_eq!(scene_gain(200.0, 480.0), 1.0);
     }
 }
 

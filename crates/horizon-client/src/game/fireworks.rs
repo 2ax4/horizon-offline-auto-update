@@ -359,9 +359,8 @@ impl Game<'_> {
         }
         if r.on_ground {
             if r.fall_distance > 0.0 {
-                // Block.fallOn (farmland's random draw, honey's slide) is not
-                // run for a rocket yet, nor for the other entities that are
-                // not living.
+                // Block.fallOn, then HIT_GROUND.
+                self.non_living_fall_on(r.id, r.position, r.bounds(), r.fall_distance);
                 let p = r.position;
                 let state = self.landing_state(p, r.bounds());
                 let at = [p.x, p.y, p.z];
@@ -489,9 +488,9 @@ impl Game<'_> {
         at: Vec3,
         stack: &ItemStack,
         owner: Option<Who>,
-        shoot: impl FnOnce(&mut horizon_core::random::LegacyRandom) -> Vec3,
+        shoot: impl FnOnce(&mut horizon_core::random::EntityRandom) -> Vec3,
     ) {
-        let mut own = random_source::entity();
+        let mut own = horizon_core::random::EntityRandom::own(random_source::entity());
         let mut rocket = self.new_rocket(at, stack, false, &mut own);
         rocket.velocity = shoot(&mut own);
         rocket.turn_to_shot();

@@ -695,10 +695,7 @@ impl Game<'_> {
                 let Some(Arg::Resource(kind)) = c.get("entity").cloned() else {
                     return Ok(vec![s]);
                 };
-                let target = self.summon_with_nbt(&kind, s.pos, "{}")?;
-                let Some(t) = target else {
-                    return Err(err("commands.summon.failed", &[]));
-                };
+                let t = self.summon_for_execute(&kind, s.pos)?;
                 vec![Source {
                     entity: Some(t),
                     ..s
@@ -828,17 +825,14 @@ impl Game<'_> {
                     .collect(),
                 _ => Vec::new(),
             },
-            Some("vehicle") => self.ride_vehicle(entity).into_iter().collect(),
+            Some("vehicle") => self.passenger_vehicle_target(entity).into_iter().collect(),
             Some("passengers") => {
                 let mut passengers = self.player_passengers(entity);
-                // Direct runtime children only. Complete mount insertion order is
-                // not modeled; retain the existing mob collection order here.
-                if let Target::Mob(id) | Target::Boat(id) = entity {
+                if let Some(id) = super::super::native_entities::target_id(entity) {
                     passengers.extend(
-                        self.mobs
-                            .iter()
-                            .filter(|m| m.extra.mount == Some(id) && m.alive() && !m.removed)
-                            .map(|m| Target::Mob(m.id)),
+                        self.ordered_live_passengers(id)
+                            .into_iter()
+                            .filter_map(|id| self.level_entity(id as i32)),
                     );
                 }
                 passengers
@@ -1133,7 +1127,7 @@ impl Game<'_> {
         if c.has("blocks") {
             return self.condition_blocks(c);
         }
-        if c.has("range") && c.has("id") {
+        if c.has("stopwatch") {
             return self.condition_stopwatch(c).map(flag);
         }
         if c.has("predicate") {
@@ -1727,6 +1721,65 @@ mod score_condition_tests {
             let (ok, said) = say(
                 &mut game,
                 &format!("execute {sign} score zero a = zero nope run say hi"),
+            );
+            assert!(ok, "{sign}: {said:?}");
+            assert!(said.is_empty(), "{sign}: {said:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod stopwatch_condition_tests {
+    use super::*;
+    use crate::game::native_machines::tests::server_game;
+
+    fn game() -> Game<'static> {
+        let mut game = server_game();
+        game.build_registries();
+        game.set_allow_commands(true);
+        game
+    }
+
+    fn say(game: &mut Game<'_>, command: &str) -> (bool, Vec<String>) {
+        game.chat_capture = Some(Vec::new());
+        let ok = game.run_command(command);
+        let said = game.chat_capture.take().unwrap_or_default();
+        (
+            ok,
+            said.iter().map(horizon_client::text::Text::plain).collect(),
+        )
+    }
+
+    /// `ExecuteCommand.checkStopwatch` reads the id, throws when the stopwatch
+    /// is missing and tests the elapsed seconds against the range. The
+    /// condition is recognised by its `stopwatch` literal, not by the argument
+    /// names `id` and `range`.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn an_existing_stopwatch_matches_its_range_and_a_missing_one_errors() {
+        let mut game = game();
+        assert!(game.run_command("stopwatch create foo"));
+        let (ok, said) = say(&mut game, "execute if stopwatch foo 0.. run say in-range");
+        assert!(
+            ok && said.len() == 1 && said[0].ends_with("in-range"),
+            "{said:?}"
+        );
+        let (ok, said) = say(
+            &mut game,
+            "execute unless stopwatch foo 0.. run say not-range",
+        );
+        assert!(ok && said.is_empty(), "{said:?}");
+        // The range is read too: a minute has not passed since the creation.
+        let (ok, said) = say(&mut game, "execute if stopwatch foo 60.. run say early");
+        assert!(ok && said.is_empty(), "{said:?}");
+        // A terminal condition throws; a fork drops its source silently.
+        let (ok, said) = say(&mut game, "execute if stopwatch nope 0..");
+        assert!(!ok, "a missing stopwatch is an error: {said:?}");
+        assert!(said.iter().any(|m| m.contains("nope")), "{said:?}");
+        for sign in ["if", "unless"] {
+            let (ok, said) = say(
+                &mut game,
+                &format!("execute {sign} stopwatch nope 0.. run say hi"),
             );
             assert!(ok, "{sign}: {said:?}");
             assert!(said.is_empty(), "{sign}: {said:?}");

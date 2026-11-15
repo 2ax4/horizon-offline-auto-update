@@ -31,6 +31,8 @@ HORIZON_CLIENT = [
     "docs/api/launch-reference.md", "docs/horizon-ctl-commands.md", "docs/parity/random-chance-seeded.jsonl",
     "native-hooks.json", "tools/native-hook-fragments", "packaging/windows/exe.rs", "research-lock.json",
     "tests/fixtures",
+    # shader_packs.rs tests load the sample pack.
+    "crates/horizon-shader-api/packs/traced_shadows",
 ]
 MOD_API_GEN = [
     "native-hooks.json", "tools/native-hook-fragments",
@@ -56,7 +58,7 @@ READERS = {
     ],
     "horizon-release-sign": ["tools/ci/sign_native_build.sh", "tools/ci/sign_release.sh"],
     "horizon-server": ["crates/horizon-theme/fonts", "crates/horizon-theme/icons", "docs/api/server-reference.md"],
-    "horizon-shader-api": ["docs/api/shaders-reference.md", "docs/api/shaders-reference-0.2.md"],
+    "horizon-shader-api": ["docs/api/shaders-reference-0.2.md"],
     "horizon-world": ["crates/horizon-core", "Cargo.lock"],
     # Commands (tokens, icons, package), not tests: listed so the scan finds nothing unexplained.
     "xtask": [

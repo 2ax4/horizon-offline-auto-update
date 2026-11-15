@@ -1006,6 +1006,52 @@ def item_command_damage():
     return ops + setup('/kill @e[tag=item_hurt_actor]', '/scoreboard objectives remove item_hurt', '/tick unfreeze')
 
 
+def spawn_egg_stack_config():
+    """SpawnEggItem.useOn and the dispenser's spawn egg behaviour spawn through
+    EntityType.spawn with createDefaultStackConfig: the egg's custom name (as text, styled) and
+    custom data (Entity.applyImplicitComponent, saved as `data`), then minecraft:entity_data merged
+    over the mob."""
+    ops = setup('/forceload add 0 0 15 15', '/fill 0 199 0 15 199 15 stone', '/fill 0 200 0 15 203 15 air',
+                '/gamemode creative', '/tp @s 4.5 200 4.5 0 0')
+    ops += [{'op': 'settle'}]
+    near = '@e[type=minecraft:pig,x={x}.5,y=200,z={z}.5,distance=..1.5,limit=1]'
+    for i, (item, reads) in enumerate((
+        ('pig_spawn_egg[custom_name={text:"Egg",color:"red"},custom_data={e:1b}]', ('CustomName', 'data')),
+        ('pig_spawn_egg[custom_name="Kept",entity_data={id:"minecraft:pig",Tags:["egg"]}]', ('CustomName', 'Tags')),
+        ('pig_spawn_egg[custom_data={a:1b},entity_data={id:"minecraft:pig",data:{b:2b}}]', ('data',)),
+    )):
+        x, z = 1 + i * 3, 7
+        ops += setup(f'/item replace entity @s weapon.mainhand with minecraft:{item}')
+        ops += [{'op': 'use_block', 'pos': [x, 199, z], 'face': 1}]
+        sel = near.format(x=x, z=z)
+        ops += [cmd(f'/execute if entity {sel}')]
+        ops += [cmd(f'/data get entity {sel} {r}') for r in reads]
+    # Dispensed: no user.
+    ops += setup('/setblock 12 200 3 dispenser[facing=south]',
+                 '/item replace block 12 200 3 container.0 with minecraft:pig_spawn_egg[custom_name={text:"Disp",'
+                 'color:"blue"},custom_data={d:1b}]',
+                 '/setblock 12 201 3 redstone_block')
+    ops += [{'op': 'tick', 'n': 6}]
+    sel = near.format(x=12, z=4)
+    ops += [cmd(f'/execute if entity {sel}')]
+    ops += [cmd(f'/data get entity {sel} {r}') for r in ('CustomName', 'data')]
+    # MobBucketItem.spawn from a dispenser: the same config, the bucket's name and custom data.
+    ops += setup('/setblock 8 200 3 dispenser[facing=south]', '/setblock 8 199 4 water', '/setblock 8 200 4 water',
+                 '/item replace block 8 200 3 container.0 with minecraft:axolotl_bucket[custom_name={text:"Axo",'
+                 'color:"gold"},custom_data={b:1b}]',
+                 '/setblock 8 201 3 redstone_block')
+    ops += [{'op': 'tick', 'n': 6}]
+    sel = '@e[type=minecraft:axolotl,x=8.5,y=200,z=4.5,distance=..2,limit=1]'
+    ops += [cmd(f'/execute if entity {sel}')]
+    ops += [cmd(f'/data get entity {sel} {r}') for r in ('CustomName', 'data')]
+    # Entity.getDisplayName in a command reply: the custom name's whole text, style included.
+    ops += setup('/summon pig 13.5 200 10.5 {NoAI:1b,CustomName:{text:"Sum",color:"green",bold:true}}')
+    ops += [cmd('/data get entity @e[type=minecraft:pig,x=13.5,y=200,z=10.5,distance=..1,limit=1] NoAI')]
+    ops += setup('/kill @e[type=minecraft:pig]', '/kill @e[type=minecraft:axolotl]', '/setblock 8 199 4 stone', '/fill 0 200 0 15 203 15 air',
+                 '/gamemode survival', '/forceload remove 0 0 15 15')
+    return ops
+
+
 def vehicle_item_stack_config():
     """MinecartItem.useOn, BoatItem.use and the dispenser's MinecartDispenseItemBehavior /
     BoatDispenseItemBehavior apply EntityType.createDefaultStackConfig: the item's custom name
@@ -2015,11 +2061,11 @@ def aquatic_from_bucket():
 def noai_tadpole_age():
     """`Tadpole.aiStep` counts the age up and grows the tadpole into a frog at
     24000; `NoAI` skips only `serverAiStep`, so a NoAI tadpole ages too. An
-    age-locked one doesn't (#14615)."""
+    age-locked one doesn't (#14615). A negative age counts up like any other (#16691)."""
     box = 'x=8,y=218,z=8,dx=10,dy=6,dz=4'
     # (tag, x, saved Age, AgeLocked)
     tadpoles = [('h14615_young', 10, 0, False), ('h14615_due', 13, 23998, False),
-                ('h14615_locked', 16, 0, True)]
+                ('h14615_locked', 16, 0, True), ('h16691_negative', 18, -100, False)]
     ops = []
     for tag, x, age, locked in tadpoles:
         lock = ',AgeLocked:1b' if locked else ''
@@ -7269,6 +7315,100 @@ def item_fall_distance():
 
 
 
+def loaded_health_above_max():
+    """#16654: `LivingEntity.readAdditionalSaveData` reads `Health` through `setHealth`, which clamps it
+    to the max health the saved `attributes` leave. A saved Health Boost doesn't raise that bound: its
+    modifier comes back after the read. A slime's saved attributes replace its size's
+    (`AbstractCubeMob.readAdditionalSaveData` sets the size first). Read after summoning, after a tick,
+    after an unload and reload (frozen, so only the save and the load count), and two ticks later."""
+    x0, y0, z0 = 3840, 260, 3776
+    chunk = [[x0 >> 4, z0 >> 4]]
+    leader = '{id:"minecraft:leader_zombie_bonus",amount:50.0d,operation:"add_value"}'
+    boost = 'active_effects:[{id:"minecraft:health_boost",amplifier:4b,duration:100000}]'
+    # Husks, not zombies: a zombie burns in daylight, and takes its first damage at a varying tick.
+    subjects = [('cow', 'Health:100.0f'),
+                ('husk', 'Health:100.0f'),
+                ('husk', 'Health:15.5f'),
+                ('husk', 'Health:100.0f,attributes:[{id:"minecraft:max_health",base:100.0d}]'),
+                ('husk', f'Health:100.0f,attributes:[{{id:"minecraft:max_health",base:20.0d,modifiers:[{leader}]}}]'),
+                ('husk', f'Health:40.0f,{boost}'),
+                ('iron_golem', 'Health:500.0f'),
+                ('slime', 'Size:3,Health:100.0f'),
+                ('magma_cube', 'Health:2.5f'),
+                ('sulfur_cube', 'Health:100.0f'),
+                ('slime', 'Size:1,Health:20.0f,attributes:[{id:"minecraft:max_health",base:20.0d},'
+                          '{id:"minecraft:movement_speed",base:0.9d},{id:"minecraft:attack_damage",base:9.0d}]')]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
+    uuids = []
+    for n, (kind, fields) in enumerate(subjects, 1):
+        uuids.append(f'0000410e-0000-0000-0000-{n:04x}00000001')
+        x, z = x0 + 1 + 5 * ((n - 1) % 3), z0 + 2 + 4 * ((n - 1) // 3)
+        ops.append(cmd(f'/summon {kind} {x}.5 {y0} {z}.5 '
+                       f'{{UUID:[I;16654,0,{n},1],NoAI:1b,PersistenceRequired:1b,{fields}}}', expect_result=1))
+
+    def reads():
+        for uuid in uuids:
+            ops.append(cmd(f'/data get entity {uuid} Health'))
+        for name in ('max_health', 'movement_speed', 'attack_damage'):
+            ops.append(cmd(f'/data get entity {uuids[-1]} attributes[{{id:"minecraft:{name}"}}].base'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 1})
+    reads()
+    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}]
+    reads()
+    box = f'x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16'
+    # A big cube mob killed here would split 20 ticks later, inside the next group.
+    shrink = [f'/execute as @e[type={kind},{box}] run data merge entity @s {{Size:0}}'
+              for kind in ('slime', 'magma_cube', 'sulfur_cube')]
+    return ops + setup(*shrink, f'/kill @e[type=!player,{box}]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def loaded_wolf_taming():
+    """#16709: `TamableAnimal.readAdditionalSaveData` calls `setTame(true, false)` for a wolf with an
+    owner, the flag alone, so its max health stays what the save says (the type's 8 when it says
+    nothing). Without an owner it calls `setTame(false, true)`, and `Wolf.applyTamingSideEffects`
+    sets the base to 8. Read after summoning and after an unload and reload. The reload is not
+    frozen: under `/tick freeze` vanilla can unload the chunk and keep its entities (it did for
+    this group), so nothing would be loaded again. The `if entity` read shows the wolves gone
+    before the chunk comes back. The wolf with a saved base of 40
+    and no owner has Health 40 over a max of 8 until that reload's `setHealth` clamps it."""
+    x0, y0, z0 = 3968, 260, 3776
+    chunk = [[x0 >> 4, z0 >> 4]]
+    owner = 'Owner:[I;1,2,3,4],'
+    subjects = [owner, owner + 'attributes:[{id:"minecraft:max_health",base:80.0d}],', '',
+                'attributes:[{id:"minecraft:max_health",base:40.0d}],']
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
+    uuids = []
+    for n, fields in enumerate(subjects, 1):
+        uuids.append(f'00004145-0000-0000-0000-{n:04x}00000001')
+        ops.append(cmd(f'/summon wolf {x0 + 4 * n - 2}.5 {y0} {z0 + 8}.5 '
+                       f'{{UUID:[I;16709,0,{n},1],{fields}NoAI:1b,PersistenceRequired:1b}}', expect_result=1))
+
+    def reads():
+        for uuid in uuids:
+            ops.append(cmd(f'/data get entity {uuid} attributes[{{id:"minecraft:max_health"}}].base'))
+            ops.append(cmd(f'/data get entity {uuid} Health'))
+
+    reads()
+    ops += [cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 400},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/execute if entity {uuids[0]}'),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
 def loaded_dead_mob():
     """#13199: `LivingEntity.readAdditionalSaveData` reads `Health` through `setHealth`, which
     clamps a negative value to 0 and keeps the body: a mob summoned dead is there, `/data` reads
@@ -7497,6 +7637,37 @@ def ominous_spawner_loaded_entity_fields():
             *setup(f'/forceload add {x0} {z0}'), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]}]
     return ops + reads() + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
                                  f'/forceload remove {x0} {z0}')
+
+
+def thrown_item_kept():
+    """#16698: `ThrowableItemProjectile` keeps the stack it was loaded with in its entity data and
+    saves it back as `Item`, wherever it has flown to since. Read after summoning, after a tick of
+    flight, and after an unload and reload (frozen, so only the save and the load count)."""
+    x0, y0, z0 = 3904, 260, 3776
+    chunk = [[x0 >> 4, z0 >> 4]]
+    subjects = [('egg', 'diamond_pickaxe'), ('snowball', 'diamond_pickaxe'), ('egg', 'blue_egg'),
+                ('experience_bottle', 'stick'), ('ender_pearl', 'stick'), ('egg', None)]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    uuids = []
+    for n, (kind, item) in enumerate(subjects, 1):
+        uuids.append(f'0000413a-0000-0000-0000-{n:04x}00000001')
+        held = f'Item:{{id:"minecraft:{item}",count:1}},' if item else ''
+        ops.append(cmd(f'/summon {kind} {x0 + 2}.5 {y0 + 2 * n} {z0 + 8}.5 '
+                       f'{{UUID:[I;16698,0,{n},1],{held}Motion:[0.6d,0.0d,0.0d],NoGravity:1b}}', expect_result=1))
+
+    def reads():
+        for uuid in uuids:
+            ops.append(cmd(f'/data get entity {uuid} Item.id'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 1})
+    reads()
+    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]', '/tick unfreeze',
+                       f'/forceload remove {x0} {z0}')
 
 
 def thrown_projectile_rotation():
@@ -8134,6 +8305,43 @@ def rocket_fall_distance():
                        f'/forceload remove {x0} {z0}')
 
 
+def falling_block_fall_on():
+    """A falling block lands through `Entity.checkFallDamage`: the block under it runs `Block.fallOn`,
+    whose `causeFallDamage` distance `FallingBlockEntity.causeFallDamage` hurts by. Anvils fall 10 blocks
+    onto stone, a bed (half the fall), hay (its multiplier changes nothing for a falling block), powder
+    snow (no causeFallDamage) and a stalagmite's tip (the fall plus 2.5), each through a husk standing
+    there (no sunburn); its health is read once they have landed.
+    """
+    x0, y0, z0 = 4928, 250, 4928
+    # Entities tick once every chunk within 2 columns is loaded (ChunkMap.prepareEntityTickingChunk).
+    chunk = [[(x0 >> 4) + dx, (z0 >> 4) + dz] for dx in range(-2, 3) for dz in range(-2, 3)]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd('/tick freeze', False),
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    cases = [('stone', None), ('bed', 'red_bed[part=foot,facing=south]'), ('hay', 'hay_block'),
+             ('snow', 'powder_snow'), ('tip', 'pointed_dripstone[vertical_direction=up,thickness=tip]')]
+    for n, (name, block) in enumerate(cases, 1):
+        x = x0 + 1 + (n - 1) * 3
+        top = y0
+        if block:
+            ops.append(cmd(f'/setblock {x} {y0} {z0 + 8} {block}', expect_result=1))
+            top = y0 + 1
+        # Leather boots keep the husk on powder snow; it stands still and lives through the blow.
+        ops.append(cmd(f'/summon husk {x}.5 {top} {z0 + 8}.5 {{UUID:[I;19000,0,{n},1],NoAI:1b,Silent:1b,'
+                       'PersistenceRequired:1b,attributes:[{id:"minecraft:max_health",base:100d}],Health:100f,'
+                       'equipment:{feet:{id:"minecraft:leather_boots",count:1}}}', expect_result=1))
+        ops.append(cmd(f'/summon falling_block {x}.5 {y0 + 10} {z0 + 8}.5 {{BlockState:{{id:"minecraft:anvil"}},'
+                       'Time:1,HurtEntities:1b,FallHurtAmount:2f,FallHurtMax:40}', expect_result=1))
+    ops.append(cmd('/tick unfreeze', False))
+    ops.append({'op': 'tick', 'n': 40})
+    ops.append(cmd('/tick freeze', False))
+    for n, _ in enumerate(cases, 1):
+        ops.append(cmd(f'/data get entity 00004a38-0000-0000-0000-{n:04x}00000001 Health'))
+    return ops + setup('/tick unfreeze', f'/kill @e[x={x0},y={y0 - 8},z={z0},dx=16,dy=48,dz=16,type=!player]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 20} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
 
 def boat_float_height():
     """#13022: `AbstractBoat.checkInWater` and `isUnderwater` sum a block's y and its water height
@@ -8491,11 +8699,14 @@ def groups():
         ('projectile fall distance', projectile_fall_distance()),
         ('ominous spawner loaded fields', ominous_spawner_loaded_entity_fields()),
         ('thrown projectile rotation', thrown_projectile_rotation()),
+        ('thrown item kept', thrown_item_kept()),
         ('item frame rotation', item_frame_rotation()),
         ('item fall distance', item_fall_distance()),
         ('beacon levels load', beacon_levels_load()),
         ('zombie villager summoned data', zombie_villager_summoned_data()),
         ('loaded dead mob', loaded_dead_mob()),
+        ('loaded health above max', loaded_health_above_max()),
+        ('loaded wolf taming', loaded_wolf_taming()),
         ('falling block fall float', falling_block_fall_float()),
         ('explosion infested blocks', explosion_infested_blocks()),
         ('jigsaw default joint', jigsaw_default_joint()),
@@ -8520,6 +8731,7 @@ def groups():
         ('mannequin pose anchors', mannequin_pose_anchors()),
         ('item command damage', item_command_damage()),
         ('dragon command damage', dragon_command_damage()),
+        ('spawn egg stack config', spawn_egg_stack_config()),
         ('vehicle item stack config', vehicle_item_stack_config()),
         ('hanging item stack config', hanging_item_stack_config()),
         ('minecart numeric fields', minecart_numeric_fields()),
@@ -8602,6 +8814,7 @@ def groups():
         ('rocket data merge', rocket_data_merge()),
         ('mob fall clip', mob_fall_clip()),
         ('armadillo scute time', armadillo_scute_time()),
+        ('falling block fall on', falling_block_fall_on()),
         ('orb fall distance', orb_fall_distance()),
         ('rocket fall distance', rocket_fall_distance()),
         ('vehicle ground and fall', vehicle_ground_and_fall()),

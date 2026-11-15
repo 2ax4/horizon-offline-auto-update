@@ -24,7 +24,7 @@ use horizon_client::{
 };
 use horizon_core::{
     geometry::{Aabb, Vec3, trig},
-    random::{LegacyRandom, RandomSource},
+    random::{EntityRandom, RandomSource},
 };
 use horizon_world::registry::BlockStateId;
 use std::{collections::HashMap, sync::Arc};
@@ -191,7 +191,7 @@ pub(super) struct Minecart {
     pub custom_display: Option<horizon_world::nbt::Tag>,
     /// `AbstractMinecart.customDisplayOffset` (`DisplayOffset`), in sixteenths.
     pub custom_offset: Option<i32>,
-    pub random: LegacyRandom,
+    pub random: EntityRandom,
 }
 /// `EntityType.MINECART`'s `sized(0.98F, 0.7F)`: float dimensions, widened.
 pub(super) const WIDTH: f64 = 0.98_f32 as f64;
@@ -398,7 +398,7 @@ impl Minecart {
             synced_output: String::new(),
             custom_display: None,
             custom_offset: None,
-            random: random_source::entity(),
+            random: EntityRandom::own(random_source::entity()),
         }
     }
     pub fn bounds(&self) -> Aabb {
@@ -2862,9 +2862,9 @@ impl Game<'_> {
         light: u8,
         out: &mut Vec<Vertex>,
     ) {
-        let lid = |_: [i32; 3]| 0.0;
         let scene = horizon_client::block_entity_render::Scene {
             camera: glam::DVec3::ZERO,
+            spyglass_outline: self.camera_type.first_person() && self.scoping(),
             orientation: glam::Quat::IDENTITY,
             anim: &|_| horizon_client::block_entity_render::BlockAnim::default(),
             texts: None,
@@ -2877,7 +2877,7 @@ impl Game<'_> {
             translucent_sprites: &self.gui.atlas.translucent,
             atlas_revision: self.gui.atlas.revision,
             nether: self.nether_lighting(),
-            lid: &lid,
+            lid: &|_: [i32; 3]| 0.0,
             sign: &|_| None,
             banner: &|_| Vec::new(),
             skull: &|_| None,

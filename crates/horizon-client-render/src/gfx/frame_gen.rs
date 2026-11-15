@@ -15,7 +15,7 @@
 #[cfg(test)]
 mod hdr_tests;
 mod interpolation;
-mod motion;
+pub(in crate::gfx) mod motion;
 mod optical_flow;
 
 use glam::{DMat4, DVec3, Mat4};
@@ -205,7 +205,7 @@ impl FrameGen {
         camera: DVec3,
     ) {
         self.motion
-            .get_or_insert_with(|| motion::ObjectMotion::new(device, atlas.clone()))
+            .get_or_insert_with(|| motion::ObjectMotion::new(device, Some(atlas.clone()), false))
             .track(entities, spans, camera);
     }
 
@@ -345,20 +345,19 @@ impl FrameGen {
         let gpu = self.gpu.as_mut().expect("world() ran this frame");
         let reset = gpu.reset || camera.reproject.is_none();
         let reproject = camera.reproject.unwrap_or(Mat4::IDENTITY);
-        let object_motion = self
+        let motion = self
             .motion
             .as_mut()
-            .expect("track_entities() ran this frame")
-            .draw(
-                device,
-                queue,
-                encoder,
-                &camera.depth,
-                camera.render_size,
-                camera.jittered,
-                camera.view_proj,
-                reproject * camera.view_proj,
-            );
+            .expect("track_entities() ran this frame");
+        motion.prepare(
+            device,
+            queue,
+            camera.render_size,
+            camera.jittered,
+            camera.view_proj,
+            reproject * camera.view_proj,
+        );
+        let object_motion = motion.draw(device, encoder, &camera.depth);
         gpu.flow
             .dispatch(device, queue, encoder, &gpu.world, peak, reset);
         gpu.interpolation.dispatch(
@@ -463,7 +462,6 @@ impl super::Renderer {
         camera: &Camera,
         overlay: &super::Overlay,
         (view_target, target, generated): (&wgpu::TextureView, &wgpu::Texture, &wgpu::Texture),
-        lifts_world: bool,
     ) -> bool {
         let format = self.output.frame.format;
         let world = self
@@ -501,7 +499,7 @@ impl super::Renderer {
         if made || peak.is_some() && generated_only() {
             self.draw_overlay(encoder, frame, made_onto.0, made_onto.1, overlay);
             if let Some(hdr) = &self.hdr {
-                hdr.present(&self.queue, encoder, generated, lifts_world, None);
+                hdr.present(&self.queue, encoder, generated, None);
             }
         }
         if peak.is_some() {

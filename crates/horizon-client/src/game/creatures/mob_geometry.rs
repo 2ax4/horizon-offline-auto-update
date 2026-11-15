@@ -196,6 +196,7 @@ impl Game<'_> {
                 if outline.is_none() {
                     self.cull_entity_vertices(out, entity_start);
                 }
+                self.lit_entity(entity_start..out.len());
                 continue;
             }
             if mob.species() == Species::SulfurCube
@@ -268,7 +269,7 @@ impl Game<'_> {
                 );
             }
             // HDR output: mobs that are light shine by their kind, as blocks do (entity.wgsl
-            // fs_hdr_mark); a tier's window lifts only their bright texels.
+            // hdr_entity_mark); a tier's window lifts only their bright texels.
             if let Some(tier) = match mob.species() {
                 Species::Blaze => Some(horizon_client::mesher::BRIGHT),
                 Species::MagmaCube | Species::GlowSquid => Some(horizon_client::mesher::LOW),
@@ -346,6 +347,9 @@ impl Game<'_> {
                 // What the GPU draws of the mob counts by its bounds' corners.
                 self.cull_skinned(out, entity_start, skinned);
             }
+            // The mob with what it holds and wears, once nothing more can drop it. Its beam,
+            // next, is no surface of it: Horizon's to draw.
+            self.lit_entity(entity_start..out.len());
             // GuardianRenderer: the laser to the locked target.
             if let Some((time, scale)) = beam
                 && let Some(target) = self.beam_target(mob.ai.target, alpha)
@@ -401,6 +405,9 @@ impl Game<'_> {
             }
             let p = glam::DVec3::from_array(at) - camera;
             let c = p.as_vec3();
+            // A projectile with a model is the `[entity]` stage's (`lit_entity`); one drawn as
+            // an item, and the fire on any, is Horizon's.
+            let start = out.len();
             // EntityRenderer.getPackedLightCoords: the block its light probe
             // (the eye) is in, at the position this frame draws rather than
             // this tick's, and not the one under its feet.
@@ -467,6 +474,7 @@ impl Game<'_> {
                     0,
                     out,
                 );
+                self.lit_entity(start..out.len());
                 if a.arrow.as_ref().is_some_and(|s| s.on_fire()) {
                     flame_geometry(atlas, c, 0.5, 0.5, self.yaw, light, out);
                 }
@@ -494,6 +502,7 @@ impl Game<'_> {
                     0,
                     out,
                 );
+                self.lit_entity(start..out.len());
                 continue;
             }
             // WindChargeRenderer.
@@ -502,6 +511,7 @@ impl Game<'_> {
                 ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge
             ) {
                 self.wind_charge_geometry(a, c, packed, alpha as f32, out);
+                self.lit_entity(start..out.len());
                 continue;
             }
             // ShulkerBulletRenderer: the tumbling bullet model, then a larger
@@ -555,6 +565,7 @@ impl Game<'_> {
                     );
                     horizon_client::gfx::mark_oit(&mut out[shell..]);
                 }
+                self.lit_entity(start..out.len());
                 continue;
             }
             // WitherSkullRenderer: the skull model facing its flight.
@@ -582,6 +593,7 @@ impl Game<'_> {
                         out,
                     );
                 }
+                self.lit_entity(start..out.len());
                 continue;
             }
             if let Some(stack) = a.drawn_item() {
@@ -604,7 +616,9 @@ impl Game<'_> {
             // returns (a fire charge until `setItem` gave it another), its model
             // at the renderer's scale for the kind. `packed` is already 15, the
             // renderer's full bright.
-            if let Some(stack) = a.item.as_ref() {
+            // (A thrown item's own stack is only saved so far; it is drawn
+            // as its kind's sprite below.)
+            if let Some(stack) = a.item.as_ref().filter(|_| a.kind.is_item_fireball()) {
                 let owner = super::super::item_draw::owner_at(at, 0.0, a.kind.id());
                 let state = self.resolve_item(stack, DisplayContext::Ground, Some(&owner), 0);
                 let pose = glam::Mat4::from_translation(c)
