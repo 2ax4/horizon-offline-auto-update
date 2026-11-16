@@ -1,7 +1,8 @@
-From bbade21949f84cdb02e548ee902538fadb2e91b3 Mon Sep 17 00:00:00 2001
+From ec47e64742da6180ce3daa9c461076812a19b1ab Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH] Offline build: the glass look keeps only the offline account
+Subject: [PATCH 6/9] Offline build: the glass look keeps only the offline
+ account
 
 ---
  launcher/src/frame.rs         |  48 ++----
@@ -10,10 +11,10 @@ Subject: [PATCH] Offline build: the glass look keeps only the offline account
  3 files changed, 198 insertions(+), 166 deletions(-)
 
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 75c9110..3783975 100644
+index ae452dad92..42389116f8 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
-@@ -669,38 +669,13 @@ impl Launcher {
+@@ -661,38 +661,13 @@ impl Launcher {
                      }
                      cx.notify();
                  }));
@@ -54,7 +55,7 @@ index 75c9110..3783975 100644
          let settings = ui::icon_button(
              "nav-Settings",
              "sliders-horizontal",
-@@ -757,7 +732,6 @@ impl Launcher {
+@@ -749,7 +724,6 @@ impl Launcher {
                      .gap(px(6.))
                      .children(build_log)
                      .child(account)
@@ -62,7 +63,7 @@ index 75c9110..3783975 100644
                      .child(settings),
              )
      }
-@@ -806,12 +780,18 @@ impl Launcher {
+@@ -798,12 +772,18 @@ impl Launcher {
                                  .size(px(30.))
                                  .rounded(px(8.))
                                  .overflow_hidden()
@@ -88,7 +89,7 @@ index 75c9110..3783975 100644
                          .child(
                              div()
 diff --git a/launcher/src/glass_account.rs b/launcher/src/glass_account.rs
-index d00857f..40d799b 100644
+index d00857fde1..40d799b544 100644
 --- a/launcher/src/glass_account.rs
 +++ b/launcher/src/glass_account.rs
 @@ -1,48 +1,50 @@
@@ -435,10 +436,10 @@ index d00857f..40d799b 100644
      }
  }
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 8d14706..43337c5 100644
+index b342a3b31e..982952b3bb 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -3498,7 +3498,7 @@ impl Launcher {
+@@ -3508,7 +3508,7 @@ impl Launcher {
                  &t,
              )),
              // The glass look's Overview ends with the screenshots and the patch log: Prepare is in
@@ -447,7 +448,7 @@ index 8d14706..43337c5 100644
              None if t.glass => rows,
              None => rows
                  .child(index_row(
-@@ -3520,9 +3520,8 @@ impl Launcher {
+@@ -3530,9 +3530,8 @@ impl Launcher {
                  &t,
              )),
          };

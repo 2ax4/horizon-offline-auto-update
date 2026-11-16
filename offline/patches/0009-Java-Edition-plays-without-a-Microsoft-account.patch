@@ -1,7 +1,7 @@
-From fcf97622dd1765137a4170f35ad8afe7e817fcc7 Mon Sep 17 00:00:00 2001
+From 9a8f88b146bb2ae49ba86dd624dfb46efe50fb52 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH] Java Edition plays without a Microsoft account
+Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
 
 ---
  launcher/Cargo.lock     |   1 +
@@ -12,10 +12,10 @@ Subject: [PATCH] Java Edition plays without a Microsoft account
  5 files changed, 112 insertions(+), 85 deletions(-)
 
 diff --git a/launcher/Cargo.lock b/launcher/Cargo.lock
-index 3113f57..a268ba8 100644
+index 23fa3d48c8..49349df0e1 100644
 --- a/launcher/Cargo.lock
 +++ b/launcher/Cargo.lock
-@@ -2791,6 +2791,7 @@ dependencies = [
+@@ -2821,6 +2821,7 @@ dependencies = [
   "horizon-mods",
   "horizon-platform",
   "horizon-port-pack",
@@ -24,10 +24,10 @@ index 3113f57..a268ba8 100644
   "horizon-shader-api",
   "horizon-telemetry",
 diff --git a/launcher/Cargo.toml b/launcher/Cargo.toml
-index 8af6563..9aaaf13 100644
+index c000f0fd06..b9268ce221 100644
 --- a/launcher/Cargo.toml
 +++ b/launcher/Cargo.toml
-@@ -51,6 +51,7 @@ horizon-mcp = { path = "../crates/horizon-mcp" }
+@@ -55,6 +55,7 @@ horizon-mcp = { path = "../crates/horizon-mcp" }
  horizon-friends = { path = "../crates/horizon-friends" }
  # Import modpack: the porting pipeline, run on the player's own files (docs/modpacks.md).
  horizon-port-pack = { path = "../crates/horizon-port-pack" }
@@ -36,7 +36,7 @@ index 8af6563..9aaaf13 100644
  horizon-mods = { path = "../crates/horizon-mods", features = ["index"] }
  # Use the game's manifest validation for native shader identities.
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index b1569ba..9192923 100644
+index b1569ba486..91929232cc 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -2382,7 +2382,10 @@ pub struct GameSession {
@@ -111,7 +111,7 @@ index b1569ba..9192923 100644
  #[cfg(test)]
  mod tests;
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 590a464..59e540b 100644
+index e6830e0b03..1f167338fa 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -2115,9 +2115,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
@@ -334,10 +334,10 @@ index 590a464..59e540b 100644
          assert_eq!(backend.matches("download_for(").count(), 2);
          assert!(body("download_for_owner").contains("download_for("));
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 43337c5..b311cf8 100644
+index 982952b3bb..8f350b5084 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -2497,10 +2497,7 @@ fn segments<T: Copy + PartialEq + 'static>(
+@@ -2507,10 +2507,7 @@ fn segments<T: Copy + PartialEq + 'static>(
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  enum PlayPress {
      Play,
@@ -348,7 +348,7 @@ index 43337c5..b311cf8 100644
      Nothing,
  }
  
-@@ -3370,8 +3367,6 @@ impl Launcher {
+@@ -3380,8 +3377,6 @@ impl Launcher {
          let left = self.download_left();
          let steps = self.preparing.then(|| self.steps(&version, left));
  
@@ -357,7 +357,7 @@ index 43337c5..b311cf8 100644
          let first = (!prepared && !self.preparing)
              .then_some(self.owner)
              .flatten();
-@@ -3388,7 +3383,7 @@ impl Launcher {
+@@ -3398,7 +3393,7 @@ impl Launcher {
                  &[("version", &version)],
              ),
              Some(false) => trf(
@@ -366,7 +366,7 @@ index 43337c5..b311cf8 100644
                  &[("version", &version)],
              ),
              None => backend::resources_summary(prepared, !silent, &version),
-@@ -3447,12 +3442,25 @@ impl Launcher {
+@@ -3457,12 +3452,25 @@ impl Launcher {
                          cx.notify();
                      })),
                  ),

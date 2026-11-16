@@ -1,7 +1,7 @@
-From 909210458cde578596fae3602dbefddf10b54bbe Mon Sep 17 00:00:00 2001
+From 70b29dd7c6c2117b474c5c89c04ea74e88ba33b7 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH] Play the glass home button without the ownership check
+Subject: [PATCH 5/9] Play the glass home button without the ownership check
 
 ---
  launcher/src/glass_home.rs |  2 +-
@@ -9,10 +9,10 @@ Subject: [PATCH] Play the glass home button without the ownership check
  2 files changed, 10 insertions(+), 21 deletions(-)
 
 diff --git a/launcher/src/glass_home.rs b/launcher/src/glass_home.rs
-index 6bb8d5b..f008603 100644
+index c4aeb2581c..3b25287207 100644
 --- a/launcher/src/glass_home.rs
 +++ b/launcher/src/glass_home.rs
-@@ -446,7 +446,7 @@ impl Launcher {
+@@ -444,7 +444,7 @@ impl Launcher {
                      Some(_) => (tr("Update"), "download-04"),
                      None => (tr("Play"), "play"),
                  };
@@ -22,10 +22,10 @@ index 6bb8d5b..f008603 100644
                  let main = match (&update, press) {
                      (Some(_), _) => main.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 09fb744..8d14706 100644
+index 57a535d9b6..b342a3b31e 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -2547,13 +2547,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
+@@ -2557,13 +2557,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
      Some(next)
  }
  
@@ -42,7 +42,7 @@ index 09fb744..8d14706 100644
      }
  }
  
-@@ -2561,7 +2559,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+@@ -2571,7 +2569,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
  /// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
  /// the game would open on half-written files.
  fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
@@ -51,7 +51,7 @@ index 09fb744..8d14706 100644
  }
  
  /// Whether `tag` can start being deleted now: it is installed, no install is writing it, and it
-@@ -5884,22 +5882,13 @@ mod tests {
+@@ -5902,22 +5900,13 @@ mod tests {
          );
      }
  

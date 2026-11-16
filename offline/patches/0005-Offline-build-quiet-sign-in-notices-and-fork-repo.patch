@@ -1,14 +1,14 @@
-From c9dc2d089cdf642c9283ea042aa99943d7540434 Mon Sep 17 00:00:00 2001
+From 83cb47bc9596afbb63560f45d972150fd546655e Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH] Offline build: quiet sign-in notices and fork repo
+Subject: [PATCH 4/9] Offline build: quiet sign-in notices and fork repo
 
 ---
  launcher/src/backend.rs | 1 +
  1 file changed, 1 insertion(+)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 19c5a4f..590a464 100644
+index 75249bebd6..e6830e0b03 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -11,6 +11,7 @@ use std::sync::mpsc::Sender;

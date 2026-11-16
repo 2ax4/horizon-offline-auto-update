@@ -1,14 +1,14 @@
-From 1213588d2c067b437f67fc5c2f01ca3df610a4b1 Mon Sep 17 00:00:00 2001
+From 5b6f2aee2e557e84560941a591796a3565cebd73 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH] The Wardrobe and the Shop work for an offline name
+Subject: [PATCH 9/9] The Wardrobe and the Shop work for an offline name
 
 ---
  launcher/src/wardrobe_page.rs | 128 ++++++++++++++++++++++++++++++++--
  1 file changed, 122 insertions(+), 6 deletions(-)
 
 diff --git a/launcher/src/wardrobe_page.rs b/launcher/src/wardrobe_page.rs
-index cb9d2d4..a369a72 100644
+index cb9d2d451c..a369a72234 100644
 --- a/launcher/src/wardrobe_page.rs
 +++ b/launcher/src/wardrobe_page.rs
 @@ -18,7 +18,9 @@ use crate::glass_ui as ui;

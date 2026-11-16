@@ -1,7 +1,7 @@
-From e4fa8bd7621d51c0f063f8179a4b86d3b7630b1e Mon Sep 17 00:00:00 2001
+From 4d032aac7d01f2a4d537a2d272615d470375e170 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH] Ad-free: remove the partner banners
+Date: Mon, 16 Nov 2026 11:44:12 +0000
+Subject: [PATCH 3/9] Ad-free: remove the partner banners
 
 ---
  launcher/src/backend.rs       |  7 -----
@@ -12,7 +12,7 @@ Subject: [PATCH] Ad-free: remove the partner banners
  5 files changed, 4 insertions(+), 163 deletions(-)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index e46e6fb..19c5a4f 100644
+index 8bce637ed9..75249bebd6 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -4479,13 +4479,6 @@ pub struct Settings {
@@ -30,7 +30,7 @@ index e46e6fb..19c5a4f 100644
      #[serde(default)]
      pub while_playing: WhilePlaying,
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 77ab6f1..75c9110 100644
+index 25d468fdfe..ae452dad92 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -476,36 +476,6 @@ impl Launcher {
@@ -71,7 +71,7 @@ index 77ab6f1..75c9110 100644
              let url = self.links.discord.clone();
              foot = foot.child(keyboard(
 diff --git a/launcher/src/glass_servers.rs b/launcher/src/glass_servers.rs
-index 2f1fb53..46b7f3b 100644
+index 2f1fb53ce2..46b7f3bfbf 100644
 --- a/launcher/src/glass_servers.rs
 +++ b/launcher/src/glass_servers.rs
 @@ -66,9 +66,6 @@ impl Launcher {
@@ -132,18 +132,18 @@ index 2f1fb53..46b7f3b 100644
  
  /// The open server's port.
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index e58dbbd..09fb744 100644
+index 3605cb7b82..57a535d9b6 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -55,7 +55,6 @@ mod native_log_page;
- mod new_instance;
+@@ -57,7 +57,6 @@ mod new_instance;
+ mod notes_cache;
  mod owner_page;
  mod packs_page;
 -mod partner;
  mod perf;
  mod picture_cache;
  mod plate;
-@@ -527,30 +526,6 @@ impl Launcher {
+@@ -533,30 +532,6 @@ impl Launcher {
              }
          })
          .detach();
@@ -174,7 +174,7 @@ index e58dbbd..09fb744 100644
          let mut settings = Settings::load();
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
-@@ -2992,7 +2967,6 @@ impl Launcher {
+@@ -3002,7 +2977,6 @@ impl Launcher {
              },
          ));
          let items = self.instance_items(heading, cx);
@@ -182,7 +182,7 @@ index e58dbbd..09fb744 100644
          let list = div()
              .flex()
              .flex_col()
-@@ -3008,8 +2982,6 @@ impl Launcher {
+@@ -3018,8 +2992,6 @@ impl Launcher {
          if !servers.is_empty() {
              list = list.child(heading(tr("SERVERS").into()));
          }
@@ -191,7 +191,7 @@ index e58dbbd..09fb744 100644
          for e in servers {
              let up = self.servers.is_up(&e.dir);
              let open = self.page == Page::Servers && self.servers.open.as_ref() == Some(&e.dir);
-@@ -3156,34 +3128,6 @@ impl Launcher {
+@@ -3166,34 +3138,6 @@ impl Launcher {
              }
              _ => {}
          }
@@ -227,7 +227,7 @@ index e58dbbd..09fb744 100644
              foot = foot.child(link(
                  "sponsor",
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 942e1fe..5c139c6 100644
+index 94d87fb858..c41966793a 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -1450,34 +1450,11 @@ impl Launcher {
