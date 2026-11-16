@@ -241,7 +241,6 @@
   "Peak Brightness": "პიკური სიკაშკაშე",
   "Black Level": "შავი დონე",
   "UI Brightness": "ინტერფეისის სიკაშკაშე",
-  "HDR Lighting": "HDR განათება",
   "Battery Mode": "ბატარეის რეჟიმი",
   "Graphics API": "გრაფიკული API",
   "Translucent Batching": "გამჭვირვალე Batching",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "მარკერის დამატება",
   "horizon.studio.topbar.clear_keyframes": "🗑 საკვანძო კადრების გასუფთავება",
   "horizon.studio.topbar.timeline_hud": "⏱ დროის ხაზი",
-  "horizon.studio.topbar.split_scene": "სცენის გაყოფა"
+  "horizon.studio.topbar.split_scene": "სცენის გაყოფა",
+  "horizon.options.block_vibration": "ჰაპტური უკუკავშირი Bedrock-იდან",
+  "horizon.options.split_vibration": "ვიბრაცია დასტის გაყოფისას",
+  "horizon.options.impulse_triggers": "იმპულსური ტრიგერები",
+  "A tick when you break a block, as in Bedrock.": "როცა ბლოკს ატეხავ, ის ვიბრირებს, როგორც Bedrock-ში.",
+  "A short buzz when you split a stack, as in Bedrock.": "მოკლე ვიბრაცია დასტის გაყოფისას, როგორც Bedrock-ში.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One კონტროლერის ტრიგერები მის სახელურებთან ერთად ვიბრირებს."
 }

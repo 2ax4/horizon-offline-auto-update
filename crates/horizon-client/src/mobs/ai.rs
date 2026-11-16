@@ -560,7 +560,7 @@ fn generic(m: &mut Mob) {
             // activities are not here): panic 2.0, AnimalMakeLove, tempting
             // with goat_food and baby follow at 1.25, then stroll.
             g.add(0, Float);
-            g.add(1, Panic::new(2.0));
+            g.add(1, AnimalPanic::new(2.0));
             g.add(2, Breed::new(1.0));
             g.add(3, Tempt::new(1.25, m.kind.food.clone(), false));
             g.add(4, FollowParent::new(1.25));
@@ -784,6 +784,7 @@ pub fn tick(
         ai_step(m, w, level_random, events);
     }
     count_fall_fly_ticks(m);
+    super::finalize::refresh_dirty_attributes(m); // LivingEntity.tick: refreshDirtyAttributes
     effects_from_blocks(m, w, level_random, events);
     if m.alive() {
         freeze_tick(m, w, events);
@@ -798,8 +799,7 @@ pub fn tick(
     if m.species() == Species::Rabbit {
         super::rabbit::post_tick(m);
     }
-    // Mob.tickHeadTurn -> BodyRotationControl.clientTick (a frozen
-    // creaking's waits).
+    // Mob.tickHeadTurn -> BodyRotationControl.clientTick (a frozen creaking's waits).
     if m.alive()
         && (!super::creaking::is_creaking(m) || super::creaking::can_move(m))
         && !super::armadillo::scared(m)

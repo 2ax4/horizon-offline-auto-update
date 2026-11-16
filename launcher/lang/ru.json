@@ -1226,6 +1226,8 @@
   "In the last build, on {horizon}": "В последней сборке — на {horizon}",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
   "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "The server gets a copy: your single-player world stays as it is.": "The server gets a copy: your single-player world stays as it is.",
+  "You have no single-player world yet: play one first, or choose New world.": "You have no single-player world yet: play one first, or choose New world.",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Не подготовлено. Horizon может подготовить Minecraft {version} из вашей собственной установки; войдите, чтобы скачать его с Mojang.",
   "Couldn't load patch notes. {error}": "Не удалось загрузить список изменений. {error}",
   "Loading patch notes…": "Загрузка описания изменений…",

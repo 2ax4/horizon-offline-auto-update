@@ -1226,6 +1226,8 @@
   "In the last build, on {horizon}": "ಕೊನೆಯ ಬಿಲ್ಡ್‌ನಲ್ಲಿ, {horizon} ನಲ್ಲಿ",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
   "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "The server gets a copy: your single-player world stays as it is.": "The server gets a copy: your single-player world stays as it is.",
+  "You have no single-player world yet: play one first, or choose New world.": "You have no single-player world yet: play one first, or choose New world.",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.",
   "Couldn't load patch notes. {error}": "ಪ್ಯಾಚ್ ಟಿಪ್ಪಣಿಗಳನ್ನು ಲೋಡ್ ಮಾಡಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ. {error}",
   "Loading patch notes…": "ಪ್ಯಾಚ್ ಟಿಪ್ಪಣಿಗಳನ್ನು ಲೋಡ್ ಮಾಡಲಾಗುತ್ತಿದೆ...",

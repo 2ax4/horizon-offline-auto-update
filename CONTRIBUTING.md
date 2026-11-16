@@ -100,6 +100,18 @@ exact random calls. It has to work together with normal Minecraft:
   default. The game may offer to turn it on when it finds a Java mod; the player decides. It is promoted out of beta
   only after MSPT and RAM benchmarks against the Java client with the same mods ([#13914](https://github.com/horizon-rust/horizon/issues/13914)).
 
+## Licence
+
+Horizon is under the GNU Lesser General Public License, version 3 or any later version ([LICENSE](LICENSE)). The
+LGPL adds permissions to the GNU GPL version 3, whose text is in [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt). What
+you contribute is under the same licence. Code merged before the move from MIT stays available under the MIT licence
+([LICENSES/MIT.txt](LICENSES/MIT.txt)).
+
+Code taken from another project must be under a licence the LGPL-3.0 accepts, such as MIT, BSD, ISC, zlib,
+Apache-2.0, MPL-2.0, LGPL-3.0 or LGPL-2.1-or-later. It keeps its copyright line and licence notice, and gets an entry
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Code under the GPL or the AGPL can't go in: it would put all of
+Horizon under that licence. If you aren't sure, ask on Discord first.
+
 ## Before asking for review
 
 Run the self-check and paste the block it prints into your pull request:
@@ -133,7 +145,8 @@ Work is tracked in GitHub issues, and an issue that is assigned is taken (so is 
 claimed on Discord with Kira's `/claim`): pick another, or ask its holder in the thread. Before you start, comment
 **`/claim`** on the issue; you are assigned at once, no role needed. No issue for your work yet? Open one (a line is
 enough), then claim it. `/unclaim` gives it back. Issues labelled `tracker`, `proposal` or `not claimable` aren't
-claimed whole: claim one of the issues a tracker lists, or open one for the part you take.
+claimed whole: claim one of the issues a tracker lists, or open one for the part you take. For the first hour after
+an issue is filed only its author can claim it, so whoever found a problem gets to fix it (issues filed by bots have no such hour).
 
 A claim with no open pull request linking the issue (`Fixes #123` in the description, or a draft) is released after
 5 days, with a comment: open a draft early. You can hold 8 open issues at a time, not counting the ones your

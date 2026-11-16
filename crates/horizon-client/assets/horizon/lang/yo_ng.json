@@ -241,7 +241,6 @@
   "Peak Brightness": "Imọlẹ tente oke",
   "Black Level": "Black Ipele",
   "UI Brightness": "UI Imọlẹ",
-  "HDR Lighting": "Ìmọ́lẹ̀ HDR",
   "Battery Mode": "Ipo Batiri",
   "Graphics API": "API eya aworan",
   "Translucent Batching": "Ìkójọpọ̀ ohun tí a lè rí kọjá",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Fi àmì kún",
   "horizon.studio.topbar.clear_keyframes": "🗑 Nu àwọn kọ́kọ́rọ́",
   "horizon.studio.topbar.timeline_hud": "⏱ Àkókò ìlà",
-  "horizon.studio.topbar.split_scene": "Pín ìríran"
+  "horizon.studio.topbar.split_scene": "Pín ìríran",
+  "horizon.options.block_vibration": "Ìdáhùn ìfọwọ́kàn láti Bedrock",
+  "horizon.options.split_vibration": "Gbigbọn nígbà pínpín àkójọ",
+  "horizon.options.impulse_triggers": "Awọn titẹ impulsu",
+  "A tick when you break a block, as in Bedrock.": "Nigbati o ba fọ bulọọki kan, o ngbọn, bii ni Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Gbigbọn kúkúrú nígbà tí o bá pín àkójọ kan, bíi ti Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Awọn titẹ Xbox One controller n gbọn pẹlu awọn ọwọ rẹ."
 }

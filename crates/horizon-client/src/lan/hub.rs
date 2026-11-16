@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex, atomic::Ordering};
 
 mod accept_teleport;
 mod acknowledgements;
+mod activity;
 /// GameEvent types (ClientboundGameEventPacket).
 pub mod chat;
 pub mod chat_filter;
@@ -1044,32 +1045,31 @@ impl Hub {
     }
     /// PlayerList.broadcastSystemMessage.
     pub fn system_message(&self, content: Tag) {
-        self.broadcast(&C::SystemChat(play::SystemChat {
-            content,
-            overlay: false,
-        }));
+        self.system_message_to(content, |_| true);
     }
     /// A system message for the guests `hears` picks by name
     /// (`PlayerList.broadcastSystemToTeam` and its kin).
     pub fn system_message_to(&self, content: Tag, hears: impl Fn(&str) -> bool) {
-        let body = C::SystemChat(play::SystemChat {
-            content,
-            overlay: false,
-        })
-        .encode();
-        for g in self.guests.iter().filter(|g| g.placed && hears(&g.name)) {
-            g.sender.send(body.clone());
-        }
+        self.send_system(content, |g| hears(&g.name));
     }
     /// `ServerPlayer.sendSystemMessage` to the guest with `uuid`, in any
     /// dimension.
     pub fn system_message_to_player(&self, uuid: u128, content: Tag) {
+        self.send_system(content, |g| g.uuid == uuid);
+    }
+    /// `ServerPlayer.sendSystemMessage(Component, false)` to the placed guests `to` picks: not to one whose
+    /// chat is hidden (`acceptsSystemMessages`: HIDDEN, 2, takes only an overlay).
+    fn send_system(&self, content: Tag, to: impl Fn(&Guest) -> bool) {
         let body = C::SystemChat(play::SystemChat {
             content,
             overlay: false,
         })
         .encode();
-        for g in self.guests.iter().filter(|g| g.placed && g.uuid == uuid) {
+        for g in self
+            .guests
+            .iter()
+            .filter(|g| g.placed && g.info.chat_visibility != 2 && to(g))
+        {
             g.sender.send(body.clone());
         }
     }
@@ -3256,6 +3256,7 @@ impl Hub {
             head_yaw: rot.2,
             on_ground,
             velocity: [0.0; 3],
+            acceleration_power: None,
             data: 0,
             meta,
             // The effect swirls go back to none.
@@ -3273,11 +3274,7 @@ impl Hub {
             stepped: false,
             idle: false,
             bare: false,
-            minecart_steps: None,
-            leash: None,
-            spectator: false,
-            watching: false,
-            hidden: None,
+            ..Default::default()
         }
     }
 
@@ -3641,12 +3638,7 @@ impl Hub {
         // ServerEntity.sendDirtyEntityData reaches the player itself too.
         // Keep the normal standing/crouching pose separate from the shared flags;
         // the existing sleep/wake publishers share this wire-state bookkeeping.
-        let pose = g.pose();
-        if matches!(
-            pose,
-            crate::pose::Pose::Standing | crate::pose::Pose::Crouching
-        ) && pose != g.sent_pose
-        {
+        if let Some(pose) = g.own_pose().filter(|p| *p != g.sent_pose) {
             g.sent_pose = pose;
             g.send(&C::SetEntityData(play::SetEntityData {
                 id: g.entity_id,
@@ -3689,6 +3681,14 @@ impl Hub {
             }));
             g.sent_xp = Some(xp);
         }
+        let g = &mut self.guests[i];
+        if g.score != g.sent_score {
+            g.sent_score = g.score;
+            g.send(&C::SetEntityData(play::SetEntityData {
+                id: g.entity_id,
+                values: vec![(18, serializer::INT, Value::Int(g.score))],
+            }));
+        }
         // AbstractContainerMenu.broadcastChanges for the inventory menu.
         let mut changes = Vec::new();
         for slot in 0..46 {
@@ -3710,7 +3710,6 @@ impl Hub {
             g.menu_sent[slot] = now;
         }
     }
-
     /// `ServerRecipeBook.sendInitialRecipeBook`: each book's open and
     /// filtering flags, then every known recipe.
     fn send_initial_recipe_book(&self, i: usize) {
@@ -3725,7 +3724,6 @@ impl Hub {
             self.sync.advancements.initial_recipe_book(book, &self.sync),
         ));
     }
-
     /// `PlayerList.reloadResources` (`/reload`): every player's advancements
     /// reload against the new data, then everyone gets the tags, and each
     /// player the recipes and their recipe book again.
@@ -3777,7 +3775,6 @@ impl Hub {
             self.send_initial_recipe_book(i);
         }
     }
-
     /// `PlayerAdvancements.flushDirty` and the recipes the player unlocked
     /// since (`ServerRecipeBook.addRecipes`), once the player's first tick
     /// has sent their advancements.
@@ -3812,7 +3809,6 @@ impl Hub {
             g.send(&raw(ids::UPDATE_ADVANCEMENTS, update));
         }
     }
-
     /// ClientboundAwardStatsPacket (`ServerStatsCounter.sendStats`): each
     /// statistic as its type and value by network id (`Stat.STREAM_CODEC`),
     /// then its count. Statistics the registries don't know are left out.
@@ -3842,16 +3838,13 @@ impl Hub {
         }
         self.send_to(conn, &raw(ids::AWARD_STATS, w.data));
     }
-
     // ---- incoming ------------------------------------------------------
-
     /// The squared movement past 1.0E-5F (handlePlayerKnownMovement).
     fn moved_far(&self, i: usize, to: [f64; 3]) -> bool {
         let from = self.guests[i].position;
         let d: f64 = (0..3).map(|k| (to[k] - from[k]).powi(2)).sum();
         d > f64::from(1.0E-5_f32)
     }
-
     /// A move still queued for guest `i`, which a packet the game handles
     /// after this pass must not overtake.
     fn move_queued(&self, i: usize) -> bool {
@@ -3865,7 +3858,6 @@ impl Hub {
             )
         })
     }
-
     /// handlePlayerCommand's START_SPRINTING and STOP_SPRINTING: `setSprinting`, whose movement
     /// speed modifier the attributes then sync to the client (which takes the modifiers as sent:
     /// one without it would slow a sprinting client to a walk).
@@ -3877,7 +3869,6 @@ impl Hub {
             let _ = m.set_sprint_modifier(sprinting);
         }
     }
-
     fn process_inbox(&mut self, i: usize, ctx: &mut TickCtx, events: &mut Vec<HostEvent>) {
         // ServerGamePacketListenerImpl.tickPlayer ran between the last
         // tick's packets and these: resetPosition, and the moves it counted.
@@ -3905,25 +3896,12 @@ impl Hub {
             // ServerPlayer.resetLastActionTime: every handler of a player's
             // own action resets it, movement only when it moved
             // (handlePlayerKnownMovement), PlayerInput once loaded.
-            let acted = match &packet {
-                S::AcceptTeleportation(_)
-                | S::PlayerAbilities(_)
-                | S::MovePlayerStatus(_)
-                | S::MovePlayerRot(_)
-                | S::PlayerLoaded(_)
-                | S::ChunkBatchReceived(_)
-                | S::ClientInformation(_)
-                | S::RecipeBookChangeSettings(_)
-                | S::RecipeBookSeenRecipe(_)
-                | S::ClientTickEnd(_)
-                | S::KeepAlive(_)
-                | S::Pong(_)
-                | S::PingRequest(_) => false,
-                S::MovePlayerPos(p) => self.moved_far(i, [p.x, p.y, p.z]),
-                S::MovePlayerPosRot(p) => self.moved_far(i, [p.x, p.y, p.z]),
-                S::PlayerInput(_) => self.guests[i].client_loaded(),
-                _ => true,
-            };
+            let acted = activity::counts_as_activity(
+                &packet,
+                self.guests[i].client_loaded(),
+                self.guests[i].vehicle_good,
+                |to| self.moved_far(i, to),
+            );
             if acted {
                 self.guests[i].last_action_tick = self.ticks;
             }
@@ -5069,6 +5047,7 @@ impl Hub {
         // player starts with the default air and no absorption.
         g.sent_health = None;
         g.sent_xp = None;
+        g.sent_score = 0;
         g.sent_air = (300, 0.0);
         g.sent_frozen = 0;
         // Not the shared flags: KEEP_ALL_DATA copies the old player's (on fire, invisible,
@@ -5197,7 +5176,7 @@ fn ticking_state(rate: f32, frozen: bool) -> C {
 pub fn guest_body(g: &Guest) -> BodyFlags {
     let m = g.motion.as_deref();
     BodyFlags {
-        gliding: g.fall_flying,
+        gliding: g.fall_flying || g.glide_end_unsent,
         swimming: m.is_some_and(|m| m.swimming),
         crawling: m.is_some_and(|m| m.pose == crate::pose::Pose::Swimming && !m.swimming),
         crouching: m.is_some_and(|m| m.pose == crate::pose::Pose::Crouching),

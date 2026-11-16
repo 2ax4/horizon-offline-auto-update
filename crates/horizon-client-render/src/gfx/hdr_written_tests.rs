@@ -6,6 +6,9 @@ use std::{cell::RefCell, collections::HashMap};
 use wgpu::TextureFormat as F;
 use wgpu::util::DeviceExt;
 
+/// The look's gains, low to very bright (hdr_look.wgsl `HDR_GAIN`).
+const GAINS: [f32; 4] = [1.6, 2.4, 2.8, 4.0];
+
 const TERRAIN_VERTEX: &str = r#"
 override TEST_TIER: u32 = 0u;
 override TEST_OVERLAY: u32 = 0u;
@@ -48,6 +51,28 @@ override TEST_OVERLAY: u32 = 0u;
     o.wrap = vec2(0.0, 1.0);
     o.proj = vec4(0.4, 0.6, 0.0, 1.0);
     o.fog_distance = vec2(globals.misc.x);
+    return o;
+}
+"#;
+
+/// A quad the entity stage lights as an entity (kind 0), unshaded, at full light.
+const ENTITY_STAGE_VERTEX: &str = r#"
+override TEST_TIER: u32 = 0u;
+override TEST_OVERLAY: u32 = 0u;
+override test_layer_alpha: f32 = 1.0;
+@vertex fn test_vertex(@builtin(vertex_index) i: u32) -> horizon_entity_out {
+    let p = vec2(f32((i << 1u) & 2u), f32(i & 2u));
+    var o: horizon_entity_out;
+    o.clip = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = vec2(0.5);
+    o.color = vec4(1.0, 1.0, 1.0, test_layer_alpha);
+    o.back_color = vec4(1.0, 1.0, 0.0, 0.0);
+    o.light_color = vec4(240.0, 240.0, 0.0, 0.0);
+    o.overlay_color = vec4(1.0);
+    o.overlay = TEST_OVERLAY;
+    o.wrap = vec2(0.0, 1.0);
+    o.glint_uv = vec2(0.5);
+    o.flags = (1u << 3u) | (TEST_TIER << 8u);
     return o;
 }
 "#;
@@ -366,15 +391,16 @@ impl<'a> Draw<'a> {
         globals: &super::super::Globals,
         alpha: u8,
     ) -> Self {
-        Self::with_lightmap(device, queue, terrain, globals, alpha, 255)
+        Self::with_lightmap(device, queue, terrain, globals, [200, 100, 50], alpha, 255)
     }
-    /// `new` with the terrain's lightmap at `full` in every channel at full light (sky 15,
-    /// block 15), where `new` has white. Every other light level is black.
+    /// `new` with the sprite's `texel`, and the terrain's lightmap at `full` in every channel at
+    /// full light (sky 15, block 15), where `new` has white. Every other light level is black.
     fn with_lightmap(
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
         terrain: bool,
         globals: &super::super::Globals,
+        [r, g, b]: [u8; 3],
         alpha: u8,
         full: u8,
     ) -> Self {
@@ -455,12 +481,12 @@ impl<'a> Draw<'a> {
                 data,
             )
         };
-        let array = texture(2, &[200, 100, 50, alpha, 240, 210, 80, 128]);
+        let array = texture(2, &[r, g, b, alpha, 240, 210, 80, 128]);
         let array = array.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        let image = texture(1, &[200, 100, 50, alpha]).create_view(&Default::default());
+        let image = texture(1, &[r, g, b, alpha]).create_view(&Default::default());
         let threshold = texture(1, &[0, 0, 0, 0]).create_view(&Default::default());
         let mut levels = [0u8; 16 * 16 * 4];
         levels[16 * 16 * 4 - 4..].copy_from_slice(&[full, full, full, 255]);
@@ -527,11 +553,22 @@ impl<'a> Draw<'a> {
     }
 
     fn material(&mut self) {
-        let source = super::super::native_material::coverage_test_shader(false);
+        self.pack_stage(super::super::native_material::coverage_test_shader(false));
+    }
+    /// The entity stage's wrapper around a pack's `entity` that returns alpha `test_alpha`,
+    /// lighting a quad as an entity with the vertex alpha `test_layer_alpha` (the layer's
+    /// opacity).
+    fn entity_stage(&mut self) {
+        let entity = "override test_alpha: f32 = 0.7;\n\
+            fn entity(input: EntityInput) -> Surface { return Surface(vec4(1.4, 0.3, 0.1, test_alpha)); }\n";
+        self.pack_stage(super::super::native_entity::tests::shader(entity) + ENTITY_STAGE_VERTEX);
+    }
+    /// Draws through the pack wrapper `source` with the pack's frame, as the pack runs.
+    fn pack_stage(&mut self, source: String) {
         self.shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("actual assembled material wrappers"),
+                label: Some("actual assembled pack wrappers"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
         let frame = super::super::native_post::NativeFrame::new(
@@ -568,10 +605,10 @@ impl<'a> Draw<'a> {
     ) -> [f32; 4] {
         let mut constants = vec![
             (
-                if self.material_frame.is_some() {
-                    "horizon_terrain_HDR_WRITE_LIGHT"
-                } else {
-                    "HDR_WRITE_LIGHT"
+                match (self.material_frame.is_some(), self.terrain) {
+                    (true, true) => "horizon_terrain_HDR_WRITE_LIGHT",
+                    (true, false) => "horizon_vanilla_HDR_WRITE_LIGHT",
+                    (false, _) => "HDR_WRITE_LIGHT",
                 },
                 f64::from(u8::from(written)),
             ),
@@ -589,7 +626,7 @@ impl<'a> Draw<'a> {
                 f64::from(u8::from(self.hdr_lighting)),
             ));
         }
-        if self.material_frame.is_some() {
+        if self.material_frame.is_some() && self.terrain {
             constants.push((
                 "horizon_displace_distance",
                 if entry == "horizon_material_fs_displaced" {
@@ -716,7 +753,7 @@ fn float_plain_fragments_keep_rgb_and_write_only_coverage() {
         return;
     };
     let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     let mut cases = 0;
     for hdr_on in [false, true] {
         let globals = super::super::Globals {
@@ -728,10 +765,8 @@ fn float_plain_fragments_keep_rgb_and_write_only_coverage() {
             fog_ends: [100.0, 100.0, 0.0, 0.0],
             misc: [0.0, 1.0, 0.0, 0.0],
             filtering: [0.0, 1.0, 0.0, 0.0],
-            hdr_windows: hdr.windows(),
             hdr_light: [0.0, 0.0, f32::from(u8::from(hdr_on)), 0.0],
             hdr_settings: settings,
-            hdr_gains: gains,
             ..bytemuck::Zeroable::zeroed()
         };
         for terrain in [true, false] {
@@ -809,9 +844,9 @@ fn float_stars_keep_the_original_rgb_with_brightness_as_coverage() {
         return;
     };
     let mut hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     // Frozen f030d9c80 fragment: the original written branch and its marked fallback.
-    let source = include_str!("../hdr_light.wgsl").to_owned()
+    let source = super::super::wgsl_prefix::HDR_LIGHT.to_owned()
         + include_str!("stars.wgsl")
         + r#"
 @vertex fn fixture(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -820,7 +855,7 @@ fn float_stars_keep_the_original_rgb_with_brightness_as_coverage() {
 @fragment fn reference() -> @location(0) vec4<f32> {
     let b = stars.color.a;
     if HDR_WRITE_LIGHT && stars.hdr_light.w != 0.0 {
-        return vec4(hdr_written(stars.color.rgb * b, 0.175, stars.hdr_settings, stars.hdr_gains), b);
+        return vec4(hdr_written(stars.color.rgb * b, 0.175, stars.hdr_settings), b);
     }
     return vec4(stars.color.rgb * b, 0.175);
 }
@@ -830,11 +865,10 @@ fn float_stars_keep_the_original_rgb_with_brightness_as_coverage() {
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     for gain in [0.0, 1.0] {
-        let mut data = [0.0_f32; 32];
+        let mut data = [0.0_f32; 28];
         data[16..20].copy_from_slice(&[0.7, 0.8, 0.9, 0.35]);
         data[20..24].copy_from_slice(&settings);
-        data[24..28].copy_from_slice(&gains);
-        data[31] = gain;
+        data[27] = gain;
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&data),
@@ -929,10 +963,8 @@ fn float_material_wrappers_keep_rgb_and_coverage_including_displacement() {
     let Some((device, queue)) = material_gpu() else {
         return;
     };
-    let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
     let globals = super::super::Globals {
         filtering: [0.0, 1.0, 0.0, 0.0],
-        hdr_windows: hdr.windows(),
         ..bytemuck::Zeroable::zeroed()
     };
     let mut draw = Draw::new(&device, &queue, true, &globals, 255);
@@ -965,10 +997,8 @@ fn material_coverage_is_the_texture_s_unless_the_pack_declares_its_own() {
         eprintln!("material coverage GPU unavailable");
         return;
     };
-    let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
     let globals = super::super::Globals {
         filtering: [0.0, 1.0, 0.0, 0.0],
-        hdr_windows: hdr.windows(),
         ..bytemuck::Zeroable::zeroed()
     };
     let background = [0.0, 0.0, 0.25, 0.5];
@@ -1012,22 +1042,70 @@ fn material_coverage_is_the_texture_s_unless_the_pack_declares_its_own() {
 }
 
 #[test]
+fn entity_coverage_is_the_texture_s_and_the_layer_s_unless_the_pack_declares_its_own() {
+    let Some((device, queue)) = material_gpu() else {
+        eprintln!("entity coverage GPU unavailable");
+        return;
+    };
+    let globals = super::super::Globals {
+        filtering: [0.0, 1.0, 0.0, 0.0],
+        ..bytemuck::Zeroable::zeroed()
+    };
+    let background = [0.0, 0.0, 0.25, 0.5];
+    // (coverage = "pack", overlay, the texel's alpha, the vertex alpha, the alpha `entity`
+    // returns, the alpha drawn or None): under "engine" the texture's alpha times the layer's
+    // opacity is cut below 0.1 and blends, as Horizon's own entities; a dissolve mask (overlay
+    // 38, the texel's alpha here) cuts where the vertex alpha is below it and draws the rest
+    // at the texture's alpha. Under "pack" the returned alpha does both.
+    let half = 128.0 / 255.0;
+    for (pack, overlay, texel, layer, returned, drawn) in [
+        (false, 0, 255, 1.0, 0.0, Some(1.0)),
+        (false, 0, 255, 0.5, 1.0, Some(0.5)),
+        (false, 0, 0, 1.0, 1.0, None),
+        (false, 0, 255, 0.05, 1.0, None),
+        (false, 38, 128, 0.6, 0.0, Some(half)),
+        (false, 38, 128, 0.4, 1.0, None),
+        (true, 0, 255, 1.0, 0.0, None),
+        (true, 0, 0, 1.0, 0.7, Some(0.7)),
+        (true, 0, 255, 0.5, 0.7, Some(0.7)),
+        (true, 38, 128, 0.4, 1.0, None),
+    ] {
+        let mut draw = Draw::new(&device, &queue, false, &globals, texel);
+        draw.entity_stage();
+        draw.constants = vec![
+            ("horizon_entity_coverage_pack", f64::from(u8::from(pack))),
+            ("test_alpha", returned),
+            ("test_layer_alpha", layer),
+        ];
+        let case = format!(
+            "pack {pack}, overlay {overlay}, texel alpha {texel}, layer {layer}, returned {returned}"
+        );
+        let got = draw.render(true, "horizon_entity_fs", 0, overlay, background);
+        let Some(alpha) = drawn else {
+            assert_eq!(got, background.map(|c| c as f32), "{case}");
+            continue;
+        };
+        assert!(got[0] > 1.0, "{case}: not drawn: {got:?}");
+        // The test pipeline replaces: the alpha written is what the blend would weigh by.
+        assert!((got[3] - alpha).abs() < 0.001, "{case}: {got:?}");
+    }
+}
+
+#[test]
 fn actual_translucent_writers_blend_their_own_light() {
     let Some((device, queue)) = gpu() else {
         eprintln!("HDR blend GPU unavailable");
         return;
     };
     let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     let globals = super::super::Globals {
         fog: [0.0, 100.0, 0.0, 100.0],
         fog_ends: [100.0, 100.0, 0.0, 0.0],
         misc: [0.0, 1.0, 0.0, 0.0],
         filtering: [0.0, 1.0, 0.0, 0.0],
-        hdr_windows: hdr.windows(),
         hdr_light: [0.0, 0.0, 1.0, 1.0],
         hdr_settings: settings,
-        hdr_gains: gains,
         ..bytemuck::Zeroable::zeroed()
     };
     // Texel alpha 100 is clear glass's kind of texel: it gets its own light too.
@@ -1080,7 +1158,7 @@ fn lit_surfaces_stay_at_their_sdr_light() {
         return;
     };
     let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     let globals = super::super::Globals {
         fog: [0.0, 100.0, 0.0, 100.0],
         fog_ends: [100.0, 100.0, 0.0, 0.0],
@@ -1089,10 +1167,8 @@ fn lit_surfaces_stay_at_their_sdr_light() {
         // The test face lies flat (`TERRAIN_VERTEX`, at light level 15): a noon sun meets it
         // straight on.
         sun: [0.0, 1.0, 0.0, 0.0],
-        hdr_windows: hdr.windows(),
         hdr_light: [0.0, 0.0, 1.0, 1.0],
         hdr_settings: settings,
-        hdr_gains: gains,
         ..bytemuck::Zeroable::zeroed()
     };
     // The texel (200, 100, 50) times the test vertex's colour, and an entity's light, in gamma.
@@ -1122,7 +1198,7 @@ fn lit_surfaces_stay_at_their_sdr_light() {
     let draw = Draw::new(&device, &queue, true, &globals, 255);
     let lifted = draw.render(true, "fs_opaque", 8, 0, [0.0; 4]);
     for i in 0..3 {
-        let want = terrain[i] * gains[3].powf(1.0 / 2.2);
+        let want = terrain[i] * GAINS[3].powf(1.0 / 2.2);
         assert!(
             (lifted[i] - want).abs() < 0.003,
             "{lifted:?}: expected {want}"
@@ -1144,18 +1220,28 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
         return;
     };
     let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
-    let tiers = hdr.windows();
-    // The test texel's brightness before lighting (terrain.wgsl `brightness`), 0.40: past every
-    // tier's window. And its lift in a window from 0.3 to 0.5, about half.
-    let light = [200.0f32, 100.0, 50.0].map(|c| (c / 255.0).powf(2.2));
-    let y = 0.5 * (0.2126 * light[0] + 0.7152 * light[1] + 0.0722 * light[2] + light[0]);
-    let t = (y - 0.3) / 0.2;
-    let half_lift = t * t * (3.0 - 2.0 * t);
+    let settings = hdr.draw_params(true);
+    // The test texels, by their brightness before lighting (hdr_look.wgsl `brightness`): one
+    // past every tier's window (0.40) and one before them all (0.03).
+    const FULL: [u8; 3] = [200, 100, 50];
+    const DIM: [u8; 3] = [60, 40, 20];
+    // And one about halfway through the tier's window, the low tier's (0.08 to 0.09) or the
+    // others' (0.14 to 0.38), with its lift.
+    let half = |emission: u32| {
+        let (texel, start, full) = if matches!(emission, 1 | 5) {
+            ([96u8, 58, 30], 0.08, 0.09)
+        } else {
+            ([170, 85, 40], 0.14, 0.38)
+        };
+        let light = texel.map(|c| (f32::from(c) / 255.0).powf(2.2));
+        let y = 0.5 * (0.2126 * light[0] + 0.7152 * light[1] + 0.0722 * light[2] + light[0]);
+        let t = (y - start) / (full - start);
+        (texel, t * t * (3.0 - 2.0 * t))
+    };
     // `own`: the vertex colour before `shade`, where a is above 0. `full`: the lightmap at full
     // light.
     let lit = |settings: [f32; 4],
-               windows: [[f32; 4]; 2],
+               texel: [u8; 3],
                shade: f32,
                emission: u32,
                entry: &str,
@@ -1166,31 +1252,28 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
             fog_ends: [100.0, 100.0, 0.0, 0.0],
             misc: [0.0, 1.0, 0.0, shade],
             filtering: [0.0, 1.0, 0.0, 0.0],
-            hdr_windows: windows,
             hdr_light: [0.0, 0.0, 1.0, 1.0],
             hdr_settings: settings,
-            hdr_gains: gains,
             ..bytemuck::Zeroable::zeroed()
         };
         globals.colored_lights[0][0] = own;
-        let draw = Draw::with_lightmap(&device, &queue, true, &globals, 255, full);
+        let draw = Draw::with_lightmap(&device, &queue, true, &globals, texel, 255, full);
         draw.render(true, entry, emission, 0, [0.0; 4])
     };
-    let draw = |settings, windows, shade, emission, entry: &str| {
-        lit(settings, windows, shade, emission, entry, [0.0; 4], 255)
+    let draw = |settings, texel, shade, emission, entry: &str| {
+        lit(settings, texel, shade, emission, entry, [0.0; 4], 255)
     };
-    let face =
-        |windows, shade, emission, entry: &str| draw(settings, windows, shade, emission, entry);
+    let face = |texel, shade, emission, entry: &str| draw(settings, texel, shade, emission, entry);
     let texel = [200.0 / 255.0 * 0.8, 100.0 / 255.0, 50.0 / 255.0 * 0.7];
     let near = |a: f32, b: f32| (a - b).abs() < 0.003 * b.max(1.0);
     let shades = [0.8, 0.6, 0.5, 0.2];
     for entry in ["fs_opaque", "fs_solid"] {
         // Each tier, by its bright parts (1 to 4) and all over (5 to 8).
         for emission in 1..=8 {
-            let gain = gains[(emission as usize - 1) % 4].powf(1.0 / 2.2);
-            let top = face(tiers, 1.0, emission, entry);
+            let gain = GAINS[(emission as usize - 1) % 4].powf(1.0 / 2.2);
+            let top = face(FULL, 1.0, emission, entry);
             for shade in shades {
-                let side = face(tiers, shade, emission, entry);
+                let side = face(FULL, shade, emission, entry);
                 for i in 0..3 {
                     // The mark's 8 bits take up to 1% of a lift (`hdr_quantized_mark`).
                     assert!(
@@ -1199,11 +1282,9 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
                     );
                 }
             }
-            // The tier's window around the texel's brightness: about half lifted, so it keeps
-            // about half its shading.
-            let half = [[0.3; 4], [0.5; 4]];
-            // And past it: not lifted, so shaded as any surface.
-            let none = [[0.9; 4], [0.95; 4]];
+            // A texel halfway through the tier's window: about half lifted, so it keeps about
+            // half its shading. And one before it: not lifted, so shaded as any surface.
+            let (half, half_lift) = half(emission);
             for shade in shades {
                 let (lit, unlit) = (
                     face(half, shade, emission, entry),
@@ -1211,8 +1292,8 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
                 );
                 let want = shade + (1.0 - shade) * half_lift;
                 let (dark, bright) = (
-                    face(none, shade, emission, entry),
-                    face(none, 1.0, emission, entry),
+                    face(DIM, shade, emission, entry),
+                    face(DIM, 1.0, emission, entry),
                 );
                 for i in 0..3 {
                     assert!(
@@ -1228,11 +1309,10 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
         // texel is drawn exactly as with any lightmap, since its shade is all it has.
         let dim = 77;
         let dimmed = f32::from(dim) / 255.0;
-        let none = [[0.9; 4], [0.95; 4]];
         for emission in [2, 7] {
-            let top = face(tiers, 1.0, emission, entry);
+            let top = face(FULL, 1.0, emission, entry);
             for shade in [dimmed, 0.5 * dimmed, 0.2 * dimmed] {
-                let lifted = lit(settings, tiers, shade, emission, entry, [0.0; 4], dim);
+                let lifted = lit(settings, FULL, shade, emission, entry, [0.0; 4], dim);
                 for i in 0..3 {
                     assert!(
                         near(lifted[i], top[i] * dimmed),
@@ -1240,28 +1320,28 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
                     );
                 }
                 assert_eq!(
-                    lit(settings, none, shade, emission, entry, [0.0; 4], dim),
-                    face(none, shade, emission, entry),
+                    lit(settings, DIM, shade, emission, entry, [0.0; 4], dim),
+                    face(DIM, shade, emission, entry),
                     "{entry} emission {emission} shade {shade}, dimmed and unlifted"
                 );
             }
             // A shade brighter than the lightmap at full light (a coloured light adds past
             // it): lifting doesn't darken it.
             assert_eq!(
-                lit(settings, tiers, 0.5, emission, entry, [0.0; 4], dim),
-                lit(settings, tiers, 0.5, emission, entry, [0.0; 4], 0),
+                lit(settings, FULL, 0.5, emission, entry, [0.0; 4], dim),
+                lit(settings, FULL, 0.5, emission, entry, [0.0; 4], 0),
                 "{entry} emission {emission}: a shade above the dimmed lightmap"
             );
         }
         // A coloured shade: its brightest channel goes to 1 and the others keep their ratio to
         // it, at any shade. One without blue stays without it, and all are finite.
-        let gain = gains[2].powf(1.0 / 2.2);
+        let gain = GAINS[2].powf(1.0 / 2.2);
         for own in [[0.9f32, 0.6, 0.3], [0.5, 0.25, 0.0], [0.0, 0.0, 0.0]] {
             let brightest = own[0].max(1e-4);
             for shade in [1.0, 0.5] {
                 let lifted = lit(
                     settings,
-                    tiers,
+                    FULL,
                     shade,
                     3,
                     entry,
@@ -1285,14 +1365,14 @@ fn a_lifted_texel_shines_the_same_on_every_face() {
         for shade in shades {
             for emission in [3, 8] {
                 assert_eq!(
-                    draw(unlit, tiers, shade, emission, entry),
-                    draw(unlit, tiers, shade, 0, entry),
+                    draw(unlit, FULL, shade, emission, entry),
+                    draw(unlit, FULL, shade, 0, entry),
                     "{entry} emission {emission} shade {shade}, HDR Lighting off"
                 );
             }
         }
         for shade in shades {
-            let surface = face(tiers, shade, 0, entry);
+            let surface = face(FULL, shade, 0, entry);
             for i in 0..3 {
                 assert!(
                     near(surface[i], texel[i] * shade),
@@ -1309,14 +1389,12 @@ fn unmarked_entity_users_keep_their_source_gain() {
         return;
     };
     let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     let globals = super::super::Globals {
         fog: [0.0, 100.0, 0.0, 100.0],
         fog_ends: [100.0, 100.0, 0.0, 0.0],
-        hdr_windows: hdr.windows(),
         hdr_light: [0.0, 0.0, 1.0, 1.0],
         hdr_settings: settings,
-        hdr_gains: gains,
         ..bytemuck::Zeroable::zeroed()
     };
     // HDR Lighting off (the look's lane at 0): nothing is lifted.
@@ -1350,13 +1428,11 @@ fn additive_texels_below_the_mark_cutoff_keep_their_gain() {
         return;
     };
     let hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     let globals = super::super::Globals {
         fog: [0.0, 100.0, 0.0, 100.0],
-        hdr_windows: hdr.windows(),
         hdr_light: [0.0, 0.0, 1.0, 1.0],
         hdr_settings: settings,
-        hdr_gains: gains,
         ..bytemuck::Zeroable::zeroed()
     };
     let draw = Draw::new(&device, &queue, false, &globals, 16);
@@ -1393,16 +1469,14 @@ fn check_oit_writer(terrain: bool, kind: &str, overlay: u32, tier: u32, alphas: 
     }))
     .unwrap();
     let mut hdr = Hdr::with_debug(&device, &queue, F::Rgba16Float, Output::Pq, true, None);
-    let (settings, gains) = hdr.draw_params(true);
+    let settings = hdr.draw_params(true);
     let globals = super::super::Globals {
         fog: [0.0, 100.0, 0.0, 100.0],
         fog_ends: [100.0, 100.0, 0.0, 0.0],
         misc: [0.0, 1.0, 0.0, 0.0],
         filtering: [0.0, 1.0, 0.0, 0.0],
-        hdr_windows: hdr.windows(),
         hdr_light: [0.0, 0.0, 1.0, 1.0],
         hdr_settings: settings,
-        hdr_gains: gains,
         ..bytemuck::Zeroable::zeroed()
     };
     for &alpha in alphas {

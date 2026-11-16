@@ -1226,6 +1226,8 @@
   "In the last build, on {horizon}": "前回のビルドは {horizon} 上",
   "Duplicate native mod {id}.": "Duplicate native mod {id}.",
   "Native and content mod ids differ.": "Native and content mod ids differ.",
+  "The server gets a copy: your single-player world stays as it is.": "The server gets a copy: your single-player world stays as it is.",
+  "You have no single-player world yet: play one first, or choose New world.": "You have no single-player world yet: play one first, or choose New world.",
   "Not prepared. Horizon can prepare Minecraft {version} from your own install; sign in to download it from Mojang instead.": "未準備です。Horizon は自分のインストールから Minecraft {version} を準備できます。Mojang からダウンロードするにはサインインしてください。",
   "Couldn't load patch notes. {error}": "パッチノートを読み込めませんでした。{error}",
   "Loading patch notes…": "パッチノートを読み込み中…",

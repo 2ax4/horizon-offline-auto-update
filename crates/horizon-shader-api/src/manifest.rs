@@ -30,16 +30,28 @@ pub enum Primaries {
     Bt2020,
 }
 
-/// `[material] coverage`: which alpha decides whether a point of solid or cutout terrain is
-/// drawn.
+/// `[material] coverage` and `[entity] coverage`: which alpha decides whether a point of the
+/// stage's surface is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Coverage {
-    /// The engine's alpha test on the sampled texture, as Horizon's own terrain: the returned
-    /// alpha is translucent terrain's opacity only, and the stage may not `discard`.
+    /// The engine's, as Horizon's own draw: the alpha test on the sampled texture (and, for
+    /// entities, the layer's opacity), and the stage may not `discard`. The returned alpha is
+    /// translucent terrain's opacity only; an entity's is ignored.
     #[default]
     Engine,
     /// The returned alpha drives the alpha test, and the stage may `discard`.
     Pack,
+}
+
+impl Coverage {
+    /// The `coverage` key of `stage`, `[{name}]` in the manifest.
+    fn parse(stage: Option<&Stage>, name: &str) -> Result<Self, String> {
+        match stage.and_then(|s| s.coverage.as_deref()) {
+            None | Some("engine") => Ok(Coverage::Engine),
+            Some("pack") => Ok(Coverage::Pack),
+            Some(c) => Err(format!("{name}.coverage {c:?}: engine or pack")),
+        }
+    }
 }
 
 impl Primaries {
@@ -102,7 +114,9 @@ pub struct Manifest {
     /// `[frame] primaries`.
     pub primaries: Primaries,
     /// `[material] coverage`.
-    pub coverage: Coverage,
+    pub material_coverage: Coverage,
+    /// `[entity] coverage`.
+    pub entity_coverage: Coverage,
     pub options: Vec<PackOption>,
     /// How the settings page lays the options out; the first page is the one it opens on.
     /// Empty: one page with every option.
@@ -132,12 +146,12 @@ pub struct Manifest {
     /// 0.2: the motion guide the post stage's `motion_at` reads, if the pack asks for it;
     /// needs `[[post]]`.
     pub motion: Option<Motion>,
-    /// 0.2: kept resources and compute passes. Checked, not yet run.
+    /// 0.2: kept resources and compute passes.
     pub kept: crate::kept::Kept,
 }
 
-/// `[ray_tracing]` (0.2): the pack's post passes, and its material stage where it calls them,
-/// get `trace`, `trace_layers` and the other trace functions, which read the terrain around the
+/// `[ray_tracing]` (0.2): the pack's post passes, and its material, compute and `[[before_world]]`
+/// stages where they call them, get `trace`, `trace_layers` and the other trace functions, which read the terrain around the
 /// camera where the device traces rays (`frame.has_ray_tracing`) and miss where it doesn't. No
 /// keys yet.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -392,7 +406,8 @@ pub struct Stage {
     /// (true when absent); false for a pack that fogs its surfaces itself.
     #[serde(default)]
     pub fog: Option<bool>,
-    /// The material stage only (0.2): `"engine"` (when absent) or `"pack"`, `Manifest::coverage`.
+    /// The material and entity stages only: `"engine"` (when absent) or `"pack"`,
+    /// `Manifest::material_coverage` and `Manifest::entity_coverage`.
     #[serde(default)]
     pub coverage: Option<String>,
     /// The sky stage only: whether Minecraft's clouds still draw (true when absent); false for
@@ -597,6 +612,7 @@ pub(crate) fn taken(name: &str, ray_tracing: bool, motion: bool) -> bool {
         "trace_any_layers",
         "RAY_SOLID",
         "RAY_TRANSLUCENT",
+        "RAY_ENTITY",
         "hit_normal_map",
         "hit_specular_map",
         "block_pbr_maps",
@@ -752,11 +768,8 @@ impl Manifest {
             }
             Some(p) => return Err(err(format!("frame.primaries {p:?}: bt709 or bt2020"))),
         };
-        let coverage = match raw.material.as_ref().and_then(|m| m.coverage.as_deref()) {
-            None | Some("engine") => Coverage::Engine,
-            Some("pack") => Coverage::Pack,
-            Some(c) => return Err(err(format!("material.coverage {c:?}: engine or pack"))),
-        };
+        let material_coverage = Coverage::parse(raw.material.as_ref(), "material").map_err(err)?;
+        let entity_coverage = Coverage::parse(raw.entity.as_ref(), "entity").map_err(err)?;
         let id_ok = (1..=64).contains(&raw.id.len())
             && raw
                 .id
@@ -776,7 +789,7 @@ impl Manifest {
             && raw.entity.is_none()
         {
             return Err(err(
-                "no stage: give it a [sky], a [material], a [weather], a [[post]], an [entity]                  or a [tonemap]"
+                "no stage: give it a [sky], a [material], a [weather], a [[post]], an [entity] or a [tonemap]"
                     .into(),
             ));
         }
@@ -804,10 +817,11 @@ impl Manifest {
             .chain(&raw.weather)
             .chain(&raw.post)
             .chain(&raw.tonemap)
-            .chain(&raw.entity)
             .any(|s| s.coverage.is_some())
         {
-            return Err(err("`coverage` is a key of [material] only".into()));
+            return Err(err(
+                "`coverage` is a key of [material] and [entity] only".into()
+            ));
         }
         if raw
             .sky
@@ -861,9 +875,12 @@ impl Manifest {
         )
         .map_err(err)?;
         check_post_targets(&raw.post, traced, moving, &kept.resources).map_err(err)?;
-        if raw.ray_tracing.is_some() && raw.post.is_empty() && raw.material.is_none() {
+        let tracer =
+            !raw.post.is_empty() || raw.material.is_some() || !kept.before_world.is_empty();
+        if raw.ray_tracing.is_some() && !tracer {
             return Err(err(
-                "[ray_tracing] needs a [[post]] pass or a [material] stage: `trace` is theirs"
+                "[ray_tracing] needs a [[post]] pass, a [[before_world]] pass or a [material] \
+                 stage: `trace` is theirs"
                     .into(),
             ));
         }
@@ -1218,7 +1235,8 @@ impl Manifest {
             entity: raw.entity,
             blend,
             primaries,
-            coverage,
+            material_coverage,
+            entity_coverage,
             options,
             pages,
             tags: raw.tags,
@@ -1325,8 +1343,7 @@ impl Manifest {
         out
     }
 
-    /// Whether the pack declares kept resources or compute passes, which the game doesn't run
-    /// yet.
+    /// Whether the pack declares kept resources or compute passes.
     pub fn computes(&self) -> bool {
         !self.kept.resources.is_empty()
             || !self.kept.before_world.is_empty()

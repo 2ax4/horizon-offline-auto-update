@@ -241,7 +241,6 @@
   "Peak Brightness": "اوج روشنایی",
   "Black Level": "سطح سیاه",
   "UI Brightness": "روشنایی رابط کاربری",
-  "HDR Lighting": "نورپردازی HDR",
   "Battery Mode": "حالت باتری",
   "Graphics API": "API گرافیک",
   "Translucent Batching": "دسته بندی شفاف",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "افزودن نشانگر",
   "horizon.studio.topbar.clear_keyframes": "🗑 پاک کردن کی‌فریم‌ها",
   "horizon.studio.topbar.timeline_hud": "⏱ تایم‌لاین",
-  "horizon.studio.topbar.split_scene": "برش صحنه"
+  "horizon.studio.topbar.split_scene": "برش صحنه",
+  "horizon.options.block_vibration": "بازخورد لمسی از Bedrock",
+  "horizon.options.split_vibration": "لرزش تقسیم دسته",
+  "horizon.options.impulse_triggers": "ماشه‌های ضربه‌ای",
+  "A tick when you break a block, as in Bedrock.": "وقتی بلوکی را می‌شکنید، مانند Bedrock می‌لرزد.",
+  "A short buzz when you split a stack, as in Bedrock.": "هنگام تقسیم یک دسته، مانند Bedrock، کوتاه می‌لرزد.",
+  "An Xbox One controller's triggers buzz with its handles.": "ماشه‌های دسته Xbox One همراه با دسته‌های آن می‌لرزند."
 }

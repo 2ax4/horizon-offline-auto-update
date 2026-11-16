@@ -241,7 +241,6 @@
   "Peak Brightness": "Μέγιστη φωτεινότητα",
   "Black Level": "Μαύρο Επίπεδο",
   "UI Brightness": "Φωτεινότητα διεπαφής χρήστη",
-  "HDR Lighting": "Φωτισμός HDR",
   "Battery Mode": "Λειτουργία μπαταρίας",
   "Graphics API": "API γραφικών",
   "Translucent Batching": "Ημιδιαφανές παρτίδες",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Προσθήκη δείκτη",
   "horizon.studio.topbar.clear_keyframes": "🗑 Καθαρισμός βασικών καρέ",
   "horizon.studio.topbar.timeline_hud": "⏱ Χρονολόγιο",
-  "horizon.studio.topbar.split_scene": "Διαχωρισμός σκηνής"
+  "horizon.studio.topbar.split_scene": "Διαχωρισμός σκηνής",
+  "horizon.options.block_vibration": "Απτική ανάδραση από το Bedrock",
+  "horizon.options.split_vibration": "Δόνηση διαχωρισμού στοίβας",
+  "horizon.options.impulse_triggers": "Σκανδάλες παλμού",
+  "A tick when you break a block, as in Bedrock.": "Όταν σπάσεις ένα μπλοκ, δονείται, όπως στο Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Ένας σύντομος κραδασμός όταν χωρίζετε μια στοίβα, όπως στο Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Οι σκανδάλες ενός χειριστηρίου Xbox One δονούνται μαζί με τις λαβές του."
 }

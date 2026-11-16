@@ -877,7 +877,7 @@ impl Goal for ClimbOnTopOfPowderSnow {
 #[derive(Clone, Debug)]
 pub struct Panic {
     pub speed: f64,
-    /// Only the damage of `#panic_environmental_causes` (an armadillo).
+    /// Only the damage of `#panic_environmental_causes` (a wolf).
     pub environmental: bool,
     /// `TurtlePanicGoal`: always look for water this far away, not only
     /// when on fire.
@@ -899,6 +899,10 @@ impl Panic {
         self
     }
 }
+#[path = "animal_panic.rs"]
+mod animal_panic;
+pub use animal_panic::{AnimalPanic, water_pos};
+
 pub fn should_panic(m: &Mob) -> bool {
     m.last_damage
         .is_some_and(|(d, t)| d.causes_panic() && i64::from(m.age) - t <= 40)
@@ -920,33 +924,11 @@ impl Goal for Panic {
         if !wanted {
             return false;
         }
-        let range = self.water_range.or((m.fire_ticks > 0).then_some(5));
-        if let Some(range) = range {
-            let (bx, by, bz) = (
-                m.position.x.floor() as i32,
-                m.position.y.floor() as i32,
-                m.position.z.floor() as i32,
-            );
-            if cx.w.data.state(cx.w.world.block(bx, by, bz)).top == 0.0 {
-                // findBlocksInBoxByManhattanDistance(pos, range, 1) for water.
-                let mut best: Option<([i32; 3], i32)> = None;
-                for dy in -1i32..=1 {
-                    for dx in -range..=range {
-                        for dz in -range..=range {
-                            let d = dx.abs() + dy.abs() + dz.abs();
-                            if cx.w.fluid(bx + dx, by + dy, bz + dz) == crate::blocks::Fluid::Water
-                                && best.is_none_or(|b| d < b.1)
-                            {
-                                best = Some(([bx + dx, by + dy, bz + dz], d));
-                            }
-                        }
-                    }
-                }
-                if let Some((p, _)) = best {
-                    self.pos = [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])];
-                    return true;
-                }
-            }
+        if let Some(range) = self.water_range.or((m.fire_ticks > 0).then_some(5))
+            && let Some(p) = water_pos(m, cx.w, range)
+        {
+            self.pos = [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])];
+            return true;
         }
         match m.default_random_pos(cx.w, 5, 4) {
             Some(p) => {
@@ -1147,8 +1129,8 @@ pub struct LookAtPlayer {
     pub only_horizontal: bool,
     /// `LookAtPlayerGoal(Mob.class, ...)`: the nearest mob, not the player.
     pub mobs: bool,
-    /// `LookAtPlayerGoal(Strider.class, ...)`: only mobs of this species.
-    pub only: Option<Species>,
+    /// `LookAtPlayerGoal(<species class>, ...)`: only these species, subclasses too.
+    pub only: &'static [Species],
     /// InteractGoal: LOOK and MOVE.
     pub interact: bool,
     look_at: Option<Who>,
@@ -1161,7 +1143,7 @@ impl LookAtPlayer {
             probability: 0.02,
             only_horizontal: false,
             mobs: false,
-            only: None,
+            only: &[],
             interact: false,
             look_at: None,
             look_time: 0,
@@ -1175,9 +1157,9 @@ impl LookAtPlayer {
         }
     }
     /// `LookAtPlayerGoal(this, <species class>, range)`.
-    pub fn species(species: Species, range: f32) -> Self {
+    pub fn species(list: &'static [Species], range: f32) -> Self {
         Self {
-            only: Some(species),
+            only: list,
             ..Self::mobs(range)
         }
     }
@@ -1226,8 +1208,8 @@ impl Goal for LookAtPlayer {
         self.look_at = None;
         let range = f64::from(self.range);
         if !self.mobs {
-            // level.getNearestPlayer(forNonCombat().range(lookDistance)).
-            if m.can_see_player(cx.w, range) {
+            // `EntitySelector.notRiding(mob)`: never the player riding it.
+            if !super::riders::player_rides(m, cx.w) && m.can_see_player(cx.w, range) {
                 self.look_at = Some(Who::Player);
             }
             return self.look_at.is_some();
@@ -1239,7 +1221,7 @@ impl Goal for LookAtPlayer {
         let candidates: Vec<(u32, Vec3)> =
             cx.w.others_near(area)
                 .filter(|s| s.id != id && s.alive && s.bounds.intersects(area))
-                .filter(|s| only.is_none_or(|o| s.species == o))
+                .filter(|s| only.is_empty() || only.contains(&s.species))
                 .map(|s| (s.id, s.position))
                 .collect();
         let mut best: Option<(u32, f64)> = None;
@@ -3036,6 +3018,10 @@ mod built_by_player_tests {
 #[cfg(test)]
 #[path = "goals_targeting_tests.rs"]
 mod avoid_entity_targeting_tests;
+
+#[cfg(test)]
+#[path = "panic_tests.rs"]
+mod panic_tests;
 
 #[cfg(test)]
 mod peaceful_targets_tests {

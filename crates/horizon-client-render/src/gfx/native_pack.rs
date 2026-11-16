@@ -12,11 +12,13 @@ use super::native_shadow::{NativeShadow, ShadowGrid};
 use super::native_sky::NativeSky;
 use super::output::EffectiveOutput;
 use super::pack_timing::PassTiming;
-use super::surface_setup::ray_query::ray_scene::RayScene;
+use super::surface_setup::ray_query::ray_scene::{RayScene, Traced};
 use super::{Frame, SectionKey};
 use crate::fast_hash::FxHashMap;
 
 pub struct NativePack {
+    /// The manifest's `name`.
+    pub name: String,
     pub frame: NativeFrame,
     pub sky: Option<NativeSky>,
     pub material: Option<NativeMaterial>,
@@ -115,19 +117,18 @@ fn chosen_shadow(
 
 impl NativePack {
     /// Writes this frame's inputs (`NativeFrame::write`), and for a `[ray_tracing]` pack where
-    /// its post passes and material stage trace `scene` from, once it is built.
+    /// its passes and material stage trace this frame's `scene` from, once it is built.
     pub(in crate::gfx) fn write(
         &mut self,
         queue: &wgpu::Queue,
         frame: &super::Frame,
         size: [u32; 2],
         display: super::output::DisplayValues,
-        scene: Option<&RayScene>,
+        scene: Option<&Traced<'_>>,
     ) {
-        let scene = scene.and_then(|s| s.traced(frame.camera));
-        let post = self.post.trace(queue, scene.as_ref());
+        let post = self.post.trace(queue, scene);
         let material = self.material.as_ref();
-        let terrain = material.and_then(|m| m.trace(queue, scene.as_ref()));
+        let terrain = material.and_then(|m| m.trace(queue, scene));
         self.frame.ray_distance = post.or(terrain);
         self.frame.write(queue, frame, size, display);
         if let Some(epochs) = &self.frame.epochs {
@@ -163,6 +164,13 @@ impl NativePack {
             let scene = scene.and_then(|s| s.traced(camera));
             trace.bind(device, &self.frame, scene.as_ref());
         }
+    }
+
+    /// Whether the pack's rays read the scene's entity layer: its files name `RAY_ENTITY`, and
+    /// its stages trace on this device.
+    pub(in crate::gfx) fn traces_entities(&self) -> bool {
+        let material = self.material.as_ref().and_then(|m| m.scene.as_ref());
+        self.post.traces_entities() || material.is_some_and(|t| t.traces_entities())
     }
 
     /// The pipelines the pack's terrain draws with this frame, and its group 3.
@@ -286,7 +294,7 @@ impl NativePack {
             && option_on(constants, option);
         frame.reads_opaque = reads_opaque(&report.stages);
         let fog = report.material_fog;
-        let coverage = report.manifest.coverage;
+        let coverage = report.manifest.material_coverage;
         let keeps = |key: fn(&horizon_shader_api::Stage) -> Option<bool>| {
             report.sky.as_ref().and_then(key).unwrap_or(true)
         };
@@ -315,10 +323,12 @@ impl NativePack {
             .find(|s| s.kind == StageKind::Weather)
             .map(|s| s.label.clone());
         let has_vertex = report.stages.iter().any(|s| s.kind == StageKind::Vertex);
-        let (mut post, others): (Vec<_>, Vec<_>) = report
-            .stages
-            .into_iter()
-            .partition(|s| matches!(s.kind, StageKind::Post | StageKind::Compute));
+        let (mut post, others): (Vec<_>, Vec<_>) = report.stages.into_iter().partition(|s| {
+            matches!(
+                s.kind,
+                StageKind::Post | StageKind::Compute | StageKind::BeforeWorld
+            )
+        });
         let sky = others
             .iter()
             .find(|s| s.kind == StageKind::Sky)
@@ -352,14 +362,18 @@ impl NativePack {
             .find(|s| s.kind == StageKind::Entity)
             .map(|stage| {
                 let groups = [terrain.entities, terrain.retained_entities];
-                NativeEntity::new(device, format, groups, &frame, stage, constants)
+                let coverage = report.manifest.entity_coverage;
+                NativeEntity::new(device, format, groups, &frame, stage, constants, coverage)
             })
             .transpose()?;
         // The decode and the tonemap run without a chain too.
         let tonemap = others.iter().find(|s| s.kind == StageKind::Tonemap);
-        // A `[ray_tracing]` pack's passes as the check built them against the scene.
-        let scenes: Vec<(String, naga::Module)> = post
-            .iter_mut()
+        // A `[ray_tracing]` pack's post passes as the check built them against the scene; its
+        // compute passes keep theirs (`ComputePass::scene`). Whether any of them, compute and
+        // before-world passes included, reads the entity layer.
+        let entities = post.iter().any(CheckedStage::traces_entities);
+        let scenes: Vec<(String, naga::Module)> = (post.iter_mut())
+            .filter(|s| s.kind == StageKind::Post)
             .filter_map(|s| Some((s.label.clone(), s.scene.take()?)))
             .collect();
         let manifest = &report.manifest;
@@ -371,8 +385,9 @@ impl NativePack {
         let refused = others.iter().any(wanted)
             && super::surface_setup::ray_query::on(device)
             && !material.as_ref().is_some_and(traced);
-        if !scenes.is_empty() && !refused {
-            let shape = super::native_post::trace::TraceShape::of(terrain);
+        let computes = post.computes_trace();
+        if (!scenes.is_empty() || computes) && !refused {
+            let shape = super::native_post::trace::TraceShape::of(terrain, entities);
             if !post.trace_scene(device, scenes, constants, &shape, &frame.pbr)
                 && let Some(m) = material.as_mut()
             {
@@ -392,6 +407,7 @@ impl NativePack {
         labels.extend(weather_label);
         labels.extend(post.labels().into_iter().map(str::to_owned));
         let pack = Self {
+            name: report.manifest.name.clone(),
             particle_lights: report.manifest.particle_lights.clone(),
             light_colors: report.manifest.lights.clone(),
             traces: report.manifest.ray_tracing.is_some(),
@@ -427,7 +443,8 @@ impl NativePack {
             sky_visible,
             scene,
         } = start;
-        self.write(queue, frame, size, output.display(), scene);
+        let scene = scene.and_then(|s| s.traced(frame.camera));
+        self.write(queue, frame, size, output.display(), scene.as_ref());
         self.frame
             .block_light
             .update(queue, frame.camera, lights, light_revision);
@@ -496,6 +513,7 @@ impl NativePack {
             scene,
         } = post;
         let history_reset = self.frame.take_history_reset();
+        let scene = scene.and_then(|(scene, camera)| scene.traced(camera));
         self.post.run(
             device,
             encoder,
@@ -504,7 +522,7 @@ impl NativePack {
             size,
             history_reset,
             self.timing.as_mut(),
-            scene,
+            scene.as_ref(),
         );
     }
 

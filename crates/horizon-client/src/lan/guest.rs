@@ -333,6 +333,7 @@ pub struct Guest {
     pub xp_level: i32,
     pub xp_progress: f32,
     pub xp_total: i32,
+    pub score: i32,
     /// `Player.enchantmentSeed` (the enchanting table's offers).
     pub xp_seed: i32,
     /// Active status effects (`LivingEntity.activeEffects`).
@@ -347,6 +348,8 @@ pub struct Guest {
     /// `lastSentHealth`, `lastSentFood` and `lastFoodSaturationZero`.
     pub sent_health: Option<(f32, i32, bool)>,
     pub sent_xp: Option<(f32, i32, i32)>,
+    /// The score (`Player.DATA_SCORE_ID`) the player's client was last sent.
+    pub sent_score: i32,
     /// The air supply and absorption the player's client was last sent
     /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
     /// defaults until either changes.
@@ -355,6 +358,10 @@ pub struct Guest {
     /// The shared flags (Entity.DATA_SHARED_FLAGS_ID) the player's client was
     /// last sent about itself.
     pub sent_shared: i8,
+    /// `updateFallFlying` ended the glide this tick. Vanilla's ServerPlayer.doTick ends it after the level tick's
+    /// ServerEntity.sendChanges, so the cleared flag reaches the client with the next tick's data: a landing glide
+    /// lasts one more tick on its ground, and a jump then keeps the speed (the elytra hop).
+    pub glide_end_unsent: bool,
     /// Pose last delivered to this player's own entity data, initially Standing.
     pub sent_pose: Pose,
     /// The shoulder parrots (Player.DATA_SHOULDER_PARROT_LEFT and _RIGHT) the
@@ -595,6 +602,7 @@ impl Guest {
             xp_level: 0,
             xp_progress: 0.0,
             xp_total: 0,
+            score: 0,
             xp_seed: 0,
             effects: Default::default(),
             sent_effects: Vec::new(),
@@ -602,9 +610,11 @@ impl Guest {
             menu_state: 0,
             sent_health: None,
             sent_xp: None,
+            sent_score: 0,
             sent_air: (300, 0.0),
             sent_frozen: 0,
             sent_shared: 0,
+            glide_end_unsent: false,
             sent_pose: Pose::Standing,
             sent_shoulders: [None; 2],
             last_death: None,
@@ -840,6 +850,22 @@ impl Guest {
             f |= 8;
         }
         f
+    }
+    /// `updateFallFlying` ends the glide (`glide_end_unsent`: its end reaches the client a tick later).
+    pub fn end_glide(&mut self) {
+        self.fall_flying = false;
+        self.glide_end_unsent = true;
+    }
+    /// The pose this player's own data tells its client, where this sender owns it (standing,
+    /// crouching, gliding): a glide's pose goes too (vanilla's updatePlayerPose), and one ended this
+    /// tick still shows until the next tick's data, which this takes (`glide_end_unsent`).
+    pub fn own_pose(&mut self) -> Option<Pose> {
+        let pose = if std::mem::take(&mut self.glide_end_unsent) {
+            Pose::FallFlying
+        } else {
+            self.pose()
+        };
+        matches!(pose, Pose::Standing | Pose::Crouching | Pose::FallFlying).then_some(pose)
     }
     /// `Player.getDesiredPose`: sleeping, gliding, then the body's own pose
     /// (swimming, crawling, crouching) once its server tick has run.
@@ -1632,15 +1658,19 @@ fn network_stack(
         // a layer that has none leaves the stack without the component. An
         // ominous banner made by the raid keeps only its flag, so its layers
         // are the ones the NBT encoder synthesises from it.
-        let patterns: Vec<(&str, &str)> = if d.ominous_banner && d.banner_patterns.is_empty() {
-            crate::item_data::OMINOUS_LAYERS.to_vec()
-        } else {
-            d.banner_patterns
-                .iter()
-                .map(|layer| (&*layer.pattern, &*layer.color))
-                .collect()
-        };
+        let patterns: Option<Vec<(&str, &str)>> =
+            if d.ominous_banner && d.banner_patterns.is_empty() {
+                Some(crate::item_data::OMINOUS_LAYERS.to_vec())
+            } else {
+                // A direct holder is not in the synced registry: one in the list
+                // leaves the stack without the component, as an unknown id does.
+                d.banner_patterns
+                    .iter()
+                    .map(|layer| Some((layer.pattern.id()?, &*layer.color)))
+                    .collect()
+            };
         let layers: Option<Vec<(i32, i32)>> = patterns
+            .unwrap_or_default()
             .iter()
             .map(|(pattern, color)| {
                 let name = if pattern.contains(':') {
@@ -1854,8 +1884,13 @@ fn network_stack(
                 horizon_protocol::item::Component::Raw(w.data),
             ));
         }
-        // What a bundle holds, for its tooltip (ClientBundleTooltip).
-        if !d.bundle_contents.is_empty() {
+        // What a bundle holds, for its tooltip (ClientBundleTooltip); a
+        // bundle's removed contents stay removed (`bundle[!bundle_contents]`).
+        if d.other("!minecraft:bundle_contents").is_some() {
+            stack
+                .removed
+                .push(horizon_protocol::item::component::BUNDLE_CONTENTS);
+        } else if !d.bundle_contents.is_empty() {
             let contents = d
                 .bundle_contents
                 .iter()

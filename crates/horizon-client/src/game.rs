@@ -351,6 +351,7 @@ mod nautili;
 mod net_harness;
 mod nether_portal;
 mod no_resources;
+mod nonliving_hurt;
 mod occlusion_culling;
 mod ominous_item_spawner;
 mod options;
@@ -3273,7 +3274,7 @@ fn ray_box(eye: [f64; 3], dir: [f64; 3], reach: f64, b: Aabb) -> Option<f64> {
     }
     (t0 <= t1).then_some(t0)
 }
-/// `Entity.calculateViewVector`, which `GameRenderer.pick` aims with: float radians through `Mth.sin` and
+/// `Entity.calculateViewVector`, which `Minecraft.pick` aims with: float radians through `Mth.sin` and
 /// `Mth.cos`, vanilla's 65536-entry table. A placement's cursor and an interaction's point come from this ray, and
 /// the exact trigonometry below moved them by up to ~1e-4 of a block.
 fn pick_view_vector(yaw: f32, pitch: f32) -> [f64; 3] {
@@ -3304,7 +3305,7 @@ fn level_can_have_weather(sky_light: bool, has_ceiling: bool, is_end: bool) -> b
     sky_light && !has_ceiling && !is_end
 }
 /// `Camera.setRotation` (`rotationYXZ(π - yaw, -pitch, 0)`) for the player's
-/// view, turned round in third-person front view (`Camera.setup`).
+/// view, turned round in third-person front view (`Camera.update`).
 fn camera_rotation(camera_type: perspective::CameraType, yaw: f32, pitch: f32) -> glam::Quat {
     let (view_yaw, view_pitch) = if camera_type == perspective::CameraType::ThirdPersonFront {
         (yaw + 180.0, -pitch)
@@ -3531,8 +3532,7 @@ impl Game<'_> {
         }
         let (origin, dir) = self.aim()?;
         // GameRenderer.pick: the block ray runs out to the larger of the two
-        // interaction ranges; filterHitResult then drops a hit past the
-        // block's.
+        // interaction ranges; filterHitResult then drops a hit past the block's.
         self.clip_ray(origin, dir, self.block_reach.max(self.entity_reach))
             .filter(|hit| {
                 let distance: [f64; 3] = std::array::from_fn(|i| hit.point[i] - origin[i]);
@@ -3612,11 +3612,11 @@ impl Game<'_> {
         player.item_use_slows_sprint = item_use_slows_sprint;
         player.respiration = respiration;
         player.glider = glider;
-        // On someone else's server the glide flag is the server's
-        // (`DATA_SHARED_FLAGS_ID`, applied by the SetEntityData handler); the
-        // game's own integrated server has no such round trip, so the client
-        // keeps predicting the clear a tick after the landing glide.
-        player.server_owns_glide = self.integrated.is_none();
+        // A client of a server, the window's own integrated one included, takes
+        // the glide's end from the server's flag alone (`DATA_SHARED_FLAGS_ID`,
+        // applied by the SetEntityData handler): vanilla's LocalPlayer never
+        // ends a glide itself.
+        player.server_owns_glide = self.remote.is_some();
         let _ = player.set_sleeping(sleeping);
         player.leather_boots = leather_boots;
         player.freeze_immune = freeze_immune;
@@ -4833,7 +4833,7 @@ impl Game<'_> {
             return;
         }
         // The game master blocks' screens open on the player's own client
-        // (`BlockEntity.usedBy`); the server has nothing to open.
+        // (`StructureBlockEntity.usedBy`); the server has nothing to open.
         if matches!(
             &*name,
             "minecraft:structure_block"
@@ -5008,7 +5008,6 @@ impl Game<'_> {
         if canceled {
             return Ok(false);
         }
-        self.input_feedback(horizon_client::input_source::Feedback::BlockBroken);
         let broken = state;
         let facts = self.res.facts().get(state).clone();
         let state = self.crack_mined_pot(pos, state);
@@ -6542,7 +6541,7 @@ impl Game<'_> {
         self.maps.slots.next_frame();
         // LevelExtractor.extract: the transient blocks queued since the last frame.
         self.drain_transient_block_queue();
-        self.prepare_entity_culling();
+        self.prepare_entity_culling(camera);
         self.prepare_occlusion_culling(camera);
         self.prepare_trims();
         self.begin_skinning();
@@ -7411,6 +7410,7 @@ impl Game<'_> {
         self.fns = Default::default();
         (self.world_tables, self.health_resources) =
             self.build_world_tables(false, &level.enabled_features)?;
+        self.invalidate_tagged_shader_ids();
         self.damage_tag_generation = self.damage_tag_generation.wrapping_add(1);
         // Native tag reads use the lock to tell that the tag tables are ready.
         self.session_lock = Some(session_lock);
@@ -7552,6 +7552,7 @@ impl Game<'_> {
             level: self.level.xp_level,
             progress: self.level.xp_progress,
             total: self.level.xp_total,
+            score: self.level.score,
         };
         self.restore_effects();
         self.mining = None;
@@ -8737,6 +8738,7 @@ impl Game<'_> {
         level.xp_level = self.experience.level;
         level.xp_progress = self.experience.progress;
         level.xp_total = self.experience.total;
+        level.score = self.experience.score;
         level.root_vehicle = vehicle.as_ref().map(|v| v.2).or(self.pending_vehicle);
         // The ride's tree, or none once the file's own came back.
         match vehicle {
@@ -8774,7 +8776,6 @@ impl Game<'_> {
                 map.insert("attributes".into(), p.saved_attributes());
             }
             level.fall_distance = p.fall_distance;
-
             level.food = p.health.food.food;
             level.saturation = p.health.food.saturation;
             level.flying = p.flying;
@@ -9059,12 +9060,12 @@ impl Game<'_> {
             )
         });
         let (camera, underwater, view_yaw, view_pitch) = match view {
-            Some((c, yaw, pitch)) => {
-                let s =
-                    self.world
-                        .block(c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32);
-                (c, self.res.facts().get(s).fluid == Fluid::Water, yaw, pitch)
-            }
+            Some((c, yaw, pitch)) => (
+                c,
+                self.camera_submersion([c.x, c.y, c.z]) == horizon_client::fog::FogType::Water,
+                yaw,
+                pitch,
+            ),
             None => (
                 glam::DVec3::new(0.5, 100.0, 0.5),
                 false,
@@ -9614,12 +9615,7 @@ impl Game<'_> {
             },
             title,
             sky_blocked: horizon_client::fog::sky_pass_skipped(
-                horizon_client::fog::fog_type(
-                    &self.world,
-                    self.res.facts(),
-                    [camera.x, camera.y, camera.z],
-                    &self.near_plane(),
-                ),
+                self.camera_submersion([camera.x, camera.y, camera.z]),
                 self.potions.effects.get("blindness").is_some()
                     || self.potions.effects.get("darkness").is_some(),
                 self.boss_overlay.should_create_world_fog(),
@@ -9697,10 +9693,7 @@ impl Game<'_> {
             border,
             game_time: self.world.game_time as f32,
             shader_game_time: ((self.world.game_time % 24000) as f32 + alpha as f32) / 24000.0,
-            crumbling_sprite: frame_geometry::crumbling_sprite(
-                &self.gui.atlas.sprites,
-                self.settings.improved_transparency,
-            ),
+            crumbling_sprite: frame_geometry::crumbling_sprite(&self.gui.atlas.sprites),
             end_portal_sprites: ["environment/end_sky", "entity/end_portal/end_portal"].map(|n| {
                 self.gui
                     .atlas
@@ -9757,7 +9750,7 @@ impl Game<'_> {
                 } else {
                     horizon_client::debug_overlay::GPU_TIMING_GAP
                 });
-                renderer.take_entity_runs(self.native_shaders.entity_runs.get_mut());
+                self.native_shaders.hand_over(renderer);
                 horizon_client::spans::time("renderer", || renderer.render(&frame))
             }
             None => Err("renderer".into()),
@@ -9792,7 +9785,6 @@ impl Game<'_> {
 fn autosave_interval(rate: f32) -> i64 {
     i64::from((rate * 300.0) as i32).max(100)
 }
-
 /// winit's events for a window's game, with any loop: a headless client (#4951) has no
 /// winit loop and calls these from its own.
 impl Game<'_> {

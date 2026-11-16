@@ -206,7 +206,11 @@ keeps drawing. What a pack works with:
   drawn. Under `"engine"` solid and cutout terrain keep Horizon's alpha test on the texture's alpha and ignore the
   returned alpha, translucent terrain is cut on the texture's alpha too and takes the returned alpha as its opacity,
   and the check refuses a `discard` reachable from `material`. Under `"pack"` the returned alpha drives the alpha
-  test and the stage may `discard`, as in 0.1.
+  test and the stage may `discard`.
+- **`[entity] coverage`**: the same for the entity stage. Under `"engine"` (the default) an entity keeps Horizon's
+  coverage: the texture's alpha times the layer's opacity is cut below 0.1 and blends, the returned alpha is ignored,
+  and the check refuses a `discard` reachable from `entity`. Under `"pack"` the returned alpha is cut and blends, and
+  the stage may `discard`. Dissolve masks and culling are Horizon's under either.
 
 ```toml
 [tonemap]                  # optional: the pack's own tone curve
@@ -218,6 +222,7 @@ coverage = "engine"        # optional: engine (default) or pack, when the materi
 
 [entity]                   # optional: the colour of entities and block entities (items and particles later)
 file = "entity.wgsl"
+coverage = "engine"        # optional: engine (default) or pack, when the stage cuts or fades entities itself
 
 [frame]
 blend = "gamma"            # optional: gamma (default) or linear
@@ -266,10 +271,36 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
 
+- 2026-11-15: API 0.2 (experimental): `frame.light_direction` is the sun by day and the moon by night also for a pack
+  without a `[shadow]` stage, where it now equals the frame's `sun_direction` or `moon_direction`; it read straight up
+  (0, 1, 0) at every time of day until now, so a pack that traced its shadows along it got them straight down. Packs
+  with `[shadow]` see the same value as before. A fix of a value; no WGSL name changes.
+- 2026-11-14: API 0.2 (**breaking**, experimental): the entity stage keeps the engine's coverage unless the pack
+  declares it, with `[entity] coverage`, `"engine"` (the default) or `"pack"`. Under `"engine"` the texture's alpha
+  times the layer's opacity is cut and blends, not the returned alpha, and `horizon-shader check` refuses a `discard`
+  that `entity` can reach. An entity stage that cuts or fades entities itself sets `coverage = "pack"`, which keeps
+  the old behaviour.
+- 2026-11-14: API 0.2 (experimental): `RAY_ENTITY` also holds the block entities at rest that the block entity cache
+  keeps (on in every graphics preset: closed chests, shulker boxes, bells, decorated pots, banners), in view or not,
+  so they cast traced shadows and show in reflections as the mobs do. A hit on one is an entity hit like any other.
 - **2026-11-13: API 0.1 removed (breaking, #15886).** Use shader API 0.2 instead. The game, `horizon-shader` and
   the registry refuse a 0.1 pack with `needs shader API 0.1; this Horizon serves 0.2`; the game draws without it.
   [Moving a pack to 0.2](#shader-api-02-experimental) is described above; Golden Hour 2.0.0 is the moved example. The
   0.1 reference is gone, and the templates of `horizon-shader new` are 0.2 packs. API 0.2 is unchanged.
+- 2026-11-15: API 0.2 (additions, experimental): compute `[[post]]` and `[[before_world]]` files trace under
+  `[ray_tracing]`. One that calls a trace function gets `RayHit`, `trace`, `trace_any`, `trace_layers`,
+  `trace_any_layers`, `RAY_SOLID`, `RAY_TRANSLUCENT`, `hit_normal_map`, `hit_specular_map` and `block_pbr_maps`, as
+  a post pass does; one that calls none, and every pack without the key, composes as before. A `[[before_world]]`
+  pass traces this frame's scene. `[ray_tracing]` also takes a `[[before_world]]` pass as what traces. The game runs
+  kept resources and compute passes beside `[ray_tracing]`.
+- 2026-11-15: API 0.2 (experimental): the game runs kept resources, compute `[[post]]` entries and
+  `[[before_world]]` passes (#16011 item 4), which it refused until now. The API is unchanged.
+- 2026-11-15: API 0.2 (additions, experimental): fixed-size kept textures (`[[resource]]` with a `size`) may take
+  32 MiB together, both versions counted, as much as kept buffers; it was 1 MiB, one 256×256 `rgba16float` texture.
+  A camera-centred trail or height map, a light cache or a lookup table can now be a texture rather than a buffer
+  indexed by hand: a 1024×1024 `rgba16float` one takes 16 MiB. The device still refuses a side longer than its
+  largest texture when the pack loads. Every pack the old budget took passes; no WGSL name changes, so every pack
+  builds from the same WGSL as before.
 - 2026-11-15: API 0.2 (additions, experimental): post targets are counted by memory. `[[post]] output`s and
   R-relative kept textures together may take 6 render-size `rgba16float` textures, an `output` its `scale`² (1, 0.25
   or 0.0625), an R-relative kept texture 2 as before, with at most 16 `output`s; it was 4 targets, an `output` 1. Two
@@ -280,6 +311,16 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
   `MOTION_OBJECT`, `MOTION_NEW` and `MOTION_NO_HISTORY` kinds: how each pixel's surface moved since last frame, for
   temporal passes. `horizon-shader check` takes it; the game refuses a pack with `[motion]` until it draws the guide.
   A pack without the key is built from the same WGSL as before, a test holds; API 0.1 is unchanged.
+- 2026-11-14: API 0.2 (experimental): `RAY_ENTITY` also holds the entities within the scene's reach that the camera
+  doesn't draw (behind or beside it, or hidden behind terrain), so they cast traced shadows and show in reflections,
+  and turning the camera doesn't change the layer. Block entities out of view are not in it yet.
+- 2026-11-14: API 0.2 (additions, experimental): under `[ray_tracing]` the scene holds the entities the camera draws in
+  a third layer, only for a pack whose files name its constant, `RAY_ENTITY` (outside a comment; dead code counts).
+  Such a pack's `trace_layers` and `trace_any_layers` take it, its `RayHit` gains `entity`, and on an entity hit
+  `hit_normal_map` and `hit_specular_map` give their defaults; a ray stops where vanilla's entity alpha test keeps the
+  pixel. `trace` and `trace_any` keep reading solid terrain alone. The check refuses a pack's own `RAY_ENTITY` or post
+  `output` by that name there, and a `displacement` or `vertex` that reaches the layer. Packs that don't name it are
+  built from the same WGSL as before, a test holds.
 - 2026-11-13: API 0.2 (change, experimental): the game draws entities and block entities through the `[entity]`
   stage (`EntityInput.kind` 0 and 1) instead of refusing a pack that has it, with the stage's shadow maps and coloured
   lights, under either `[frame] blend`. Dropped and framed items, particles and the first-person hand keep Horizon's

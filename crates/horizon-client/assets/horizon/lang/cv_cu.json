@@ -241,7 +241,6 @@
   "Peak Brightness": "Чи пысӑк ҫутӑлӑх",
   "Black Level": "Хура ур.",
   "UI Brightness": "UI ҫутӑлӑхӗ",
-  "HDR Lighting": "HDR ҫутти",
   "Battery Mode": "Аккумулятор режимӗ",
   "Graphics API": "Графика API",
   "Translucent Batching": "Ҫурма ҫутӑ ҫыхӑну",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Маркер хуш",
   "horizon.studio.topbar.clear_keyframes": "🗑 Уйрӑм кадрсене тасат",
   "horizon.studio.topbar.timeline_hud": "⏱ Вӑхӑт йӗрӗ",
-  "horizon.studio.topbar.split_scene": "Сценӑна уйӑр"
+  "horizon.studio.topbar.split_scene": "Сценӑна уйӑр",
+  "horizon.options.block_vibration": "Bedrockран хаптик калаҫу",
+  "horizon.options.split_vibration": "Йышне пайласан вибраци",
+  "horizon.options.impulse_triggers": "Импульс триггерĕсем",
+  "A tick when you break a block, as in Bedrock.": "Блок çурсан вăл Bedrock пек вибрацилет.",
+  "A short buzz when you split a stack, as in Bedrock.": "Йыша пайласан кӗске ҫемҫе вибраци, Bedrockри пек.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One контроллерĕн триггерĕсем унăн авăрĕсемпе пĕрле вибрацилеççĕ."
 }

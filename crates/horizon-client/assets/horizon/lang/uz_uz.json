@@ -241,7 +241,6 @@
   "Peak Brightness": "Eng yuqori yorqinlik",
   "Black Level": "Qora daraja",
   "UI Brightness": "UI yorqinligi",
-  "HDR Lighting": "HDR yoritish",
   "Battery Mode": "Batareya rejimi",
   "Graphics API": "Grafik API",
   "Translucent Batching": "Shaffof yig'ish",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Belgi qo'shish",
   "horizon.studio.topbar.clear_keyframes": "🗑 Kalit kadrlarni tozalash",
   "horizon.studio.topbar.timeline_hud": "⏱ Vaqt chizig'i",
-  "horizon.studio.topbar.split_scene": "Sahnani bo'lish"
+  "horizon.studio.topbar.split_scene": "Sahnani bo'lish",
+  "horizon.options.block_vibration": "Bedrock’dan haptik qayta aloqa",
+  "horizon.options.split_vibration": "To‘plamni bo‘lishda tebranish",
+  "horizon.options.impulse_triggers": "Impuls triggerlari",
+  "A tick when you break a block, as in Bedrock.": "Blokni sindirganingizda u Bedrockdagidek tebranadi.",
+  "A short buzz when you split a stack, as in Bedrock.": "To‘plamni bo‘lganda qisqa tebranadi, Bedrockdagidek.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One kontrollerining triggerlari tutqichlari bilan birga tebranadi."
 }

@@ -241,7 +241,6 @@
   "Peak Brightness": "Pico de łuminosità",
   "Black Level": "Liveło nero",
   "UI Brightness": "Luminosità de l’UI",
-  "HDR Lighting": "Iłuminasion HDR",
   "Battery Mode": "Modo bataria",
   "Graphics API": "API grafiche",
   "Translucent Batching": "Lote traslucida",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Zonta marcador",
   "horizon.studio.topbar.clear_keyframes": "🗑 Descanseła i fotogrami ciave",
   "horizon.studio.topbar.timeline_hud": "⏱ Linea del tenpo",
-  "horizon.studio.topbar.split_scene": "Dividi ła sena"
+  "horizon.studio.topbar.split_scene": "Dividi ła sena",
+  "horizon.options.block_vibration": "Risposta atica da Bedrock",
+  "horizon.options.split_vibration": "Vibrazsion co se divide un mùcio",
+  "horizon.options.impulse_triggers": "Griléti a inpulso",
+  "A tick when you break a block, as in Bedrock.": "Co te rompi un bloco, el vibra, come in Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Na vibrazsion curta co se divide un mùcio, come in Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "I griléti de un controller Xbox One i vibra insieme a le so inprese."
 }

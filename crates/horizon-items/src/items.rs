@@ -146,7 +146,7 @@ pub fn parse_consume_effect(effect: &serde_json::Value) -> Option<ConsumeEffect>
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ItemInfo {
     pub fire_resistant: bool,
     pub id: Arc<str>,
@@ -800,7 +800,7 @@ impl Items {
                     .or_insert(BlockStateId(i as u32));
             }
         }
-        // Block.getItem is not an inverse of BlockItem.getBlock: several items
+        // Block.asItem is not an inverse of BlockItem.getBlock: several items
         // may place the same block. Read their normal compiled bindings too.
         #[derive(Default, serde::Deserialize)]
         struct Bindings {
@@ -2032,7 +2032,7 @@ impl LootContext<'_> {
                 "minecraft:uniform" => {
                     let min = Self::number(o.get("min").unwrap_or(&Value::Null), random);
                     let max = Self::number(o.get("max").unwrap_or(&Value::Null), random);
-                    // UniformGenerator.getFloat / getInt (Mth.nextInt) differ; use int for counts.
+                    // UniformGenerator.getFloatUnsafe / getIntUnsafe (Mth.nextInt) differ; use int for counts.
                     if max <= min {
                         min
                     } else {

@@ -574,6 +574,7 @@ impl Game<'_> {
                 level: g.xp_level,
                 progress: g.xp_progress,
                 total: g.xp_total,
+                score: g.score,
             },
         );
         let level_up_sound = std::mem::replace(&mut self.level_up_sound, play.level_up_sound);
@@ -678,14 +679,14 @@ impl Game<'_> {
             &mut self.applied_modifiers,
             std::mem::take(&mut play.modifiers),
         );
-        // Its worn armour on its attributes, when it changed.
+        // Its equipment on its attributes, when it changed (once its tick saw a new hand item).
         let selected_item = self.inventory.get(self.selected).and_then(Option::as_ref);
         let unchanged = play.equipped.as_deref().is_some_and(|eq| {
             eq.len() == self.armor.len() + 1
                 && eq[..self.armor.len()] == self.armor[..]
                 && eq[self.armor.len()].as_ref() == selected_item
         });
-        if !unchanged {
+        if !unchanged && (play.equipped.is_none() || self.held_item_ticked()) {
             let mut equipped: Vec<Option<ItemStack>> = self.armor.to_vec();
             equipped.push(selected_item.cloned());
             self.apply_equipment();
@@ -766,7 +767,6 @@ impl Game<'_> {
             building_boxes,
         })
     }
-
     /// The second half of `as_guest`: the guest's state back into their
     /// record, the game's back in place, and what the turn changed sent.
     pub(super) fn leave_guest(&mut self, host: &mut LanHost, swap: GuestSwap) {
@@ -970,7 +970,6 @@ impl Game<'_> {
         // An ender chest the guest opened: the menu shows their inventory
         // itself (lan_open_container), not a stand-in block entity.
         self.close_ender_chest();
-
         // What the action opened: handed to the guest instead of the host.
         let opened = self.container.take();
         let guest_table = std::mem::replace(&mut self.craft_table, craft_table);
@@ -1081,6 +1080,7 @@ impl Game<'_> {
         g.xp_level = new_xp.level;
         g.xp_progress = new_xp.progress;
         g.xp_total = new_xp.total;
+        g.score = new_xp.score;
         let new_mode = self.mode_id();
         self.mode = mode;
         self.creative = creative;
@@ -1245,7 +1245,6 @@ impl Game<'_> {
                     .for_turn(actor, None, building_players(host));
         }
     }
-
     /// `ServerLevel.broadcastDamageEvent` for a guest that took an unblocked hit.
     fn guest_damage_broadcast(
         &mut self,
@@ -1264,7 +1263,6 @@ impl Game<'_> {
             .map_or("minecraft:generic", |d| d.name.as_str());
         host.hub.damage_event(id, kind, None, None, at);
     }
-
     /// `LivingEntity.playHurtSound` for a guest: the server's `Entity.playSound`
     /// reaches every player around but the hurt one, whose own client plays it
     /// from `handleDamageEvent` (#4149).
@@ -1277,7 +1275,6 @@ impl Game<'_> {
         self.audio.play_unshared(sound, Some(at), 1.0, 1.0);
         host.hub.sound(sound, at, 1.0, 1.0, source, Some(conn));
     }
-
     /// `ServerLevel.players()` in turn: the host's own player, then each
     /// guest in the level in place with their state swapped in (`as_guest`).
     /// What reaches the players around a point (a beacon's powers, a splash
@@ -1968,14 +1965,14 @@ impl Game<'_> {
     }
 
     /// The rest of it: a block in `dimension` within `radius` of the world
-    /// spawn (square, in the Overworld only).
+    /// spawn (square, and only in the dimension the spawn belongs to).
     pub(super) fn spawn_protects(&self, radius: i32, dimension: &str, pos: [i32; 3]) -> bool {
         let Some(spawn) = self.level.world_spawn else {
             return false;
         };
         let dx = pos[0].abs_diff(spawn[0]);
         let dz = pos[2].abs_diff(spawn[2]);
-        dimension == "minecraft:overworld" && dx.max(dz) <= radius as u32
+        dimension == self.level.spawn_dimension() && dx.max(dz) <= radius as u32
     }
 
     /// ServerPlayer.sendSpawnProtectionMessage.
@@ -3377,145 +3374,6 @@ impl Game<'_> {
             .map(|(&fence, _)| fence)
     }
 
-    fn guest_attack(&mut self, host: &mut LanHost, conn: u32, id: i32) {
-        let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
-            return;
-        };
-        if host.hub.guests[gi].spectator() {
-            return;
-        }
-        if self.guest_attack_stops(host, gi, id) {
-            return;
-        }
-        // Native mods, where Player.attack starts: a canceled blow does
-        // nothing (game/native_hooks.rs).
-        let aimed = if let Some(g) = host
-            .hub
-            .guests
-            .iter()
-            .find(|g| g.entity_id == id && g.conn != conn && host.hub.here(g))
-        {
-            Some(("minecraft:player".to_owned(), g.position))
-        } else {
-            // The mod hooks hear no natural fence knot (#13036).
-            self.level_entity(id)
-                .filter(|t| !matches!(t, super::commands::Target::Knot(_)))
-                .map(|t| {
-                    (
-                        self.target_type(t),
-                        self.target_position(t).unwrap_or_default(),
-                    )
-                })
-        };
-        if let Some((kind, at)) = aimed
-            && self.as_guest(host, conn, |g| {
-                let mut canceled = false;
-                g.native_attack_entity(id, &kind, at, &mut canceled);
-                canceled
-            }) == Some(true)
-        {
-            return;
-        }
-        if let Some(victim) = Self::pvp_victim(host, conn, id) {
-            if let Some(Some(strike)) = self.as_guest(host, conn, |g| g.pvp_strike())
-                && self.pvp_land(host, victim, &strike)
-            {
-                let on_ground = Self::pvp_victim_on_ground(host, victim);
-                let stops_sprint = strike.stops_sprint();
-                let sent = self.as_guest(host, conn, |g| g.pvp_hit_after(on_ground, stops_sprint));
-                self.send_guest_motion(host, conn, sent.flatten());
-            }
-            return;
-        }
-        // A ghast's fireball or a wind charge: turned along the guest's own
-        // view (ServerGamePacketListenerImpl.handleInteract, then
-        // Player.attack's AIM_DEFLECT).
-        if let Some(i) = self
-            .creatures
-            .projectiles
-            .iter()
-            .position(|p| p.id != 0 && p.id as i32 == id && super::deflect::attackable(p))
-        {
-            self.as_guest_with_host(host, conn, |g, host| {
-                if g.within_interaction_range(i) {
-                    if matches!(
-                        g.creatures.projectiles[i].kind,
-                        horizon_client::projectiles::ProjectileKind::ShulkerBullet { .. }
-                    ) {
-                        g.hit_shulker_bullet(Some(host), i);
-                    } else {
-                        g.deflect(i);
-                    }
-                }
-            });
-            return;
-        }
-        if let Some(index) = self
-            .mobs
-            .iter()
-            .position(|m| m.id as i32 == id && m.alive())
-            .filter(|_| self.dragon.as_ref().is_none_or(|d| d.id as i32 != id))
-        {
-            if host.hub.guests[gi].vehicle == Some(self.mobs[index].id) {
-                return;
-            }
-            // A mace's smash sets the attacker's velocity and sends it at once, before the
-            // Wind Burst's push (MaceItem.hurtEnemy, then the post-attack effects).
-            let sent = self
-                .as_guest(host, conn, |g| {
-                    let marked = g
-                        .player
-                        .as_mut()
-                        .is_some_and(|p| std::mem::take(&mut p.health.sync_velocity));
-                    g.attack_mob(index);
-                    g.swing_arm();
-                    let p = g.player.as_mut()?;
-                    let sent = std::mem::replace(&mut p.health.sync_velocity, marked);
-                    sent.then_some(p.velocity)
-                })
-                .flatten();
-            self.send_guest_motion(host, conn, sent);
-            // The mob now answers to this guest (game/lan_mobs.rs).
-            if let Ok(id) = u32::try_from(id) {
-                host.mob_players.insert(id, conn);
-            }
-            return;
-        }
-        let (old_yaw, old_pitch) = (host.hub.guests[gi].yaw, host.hub.guests[gi].pitch);
-        let boat = self.boats.iter().position(|boat| boat.id as i32 == id);
-        // A packet names its target already. Keep the attacker's actual yaw
-        // for the boat's knockback instead of aiming a ray at its center.
-        if boat.is_none() && self.look_at_entity(host, gi, id, None).is_none() {
-            return;
-        }
-        // A mace's smash sets the attacker's velocity and sends it at once, before the
-        // Wind Burst's push (MaceItem.hurtEnemy, then the post-attack effects).
-        let sent = self
-            .as_guest(host, conn, |g| {
-                let marked = g
-                    .player
-                    .as_mut()
-                    .is_some_and(|p| std::mem::take(&mut p.health.sync_velocity));
-                if let Some(index) = boat {
-                    g.strike_boat(index);
-                    g.swing_arm();
-                } else {
-                    g.attack();
-                }
-                let p = g.player.as_mut()?;
-                let sent = std::mem::replace(&mut p.health.sync_velocity, marked);
-                sent.then_some(p.velocity)
-            })
-            .flatten();
-        self.send_guest_motion(host, conn, sent);
-        // The mob now answers to this guest (game/lan_mobs.rs).
-        if let Ok(id) = u32::try_from(id) {
-            host.mob_players.insert(id, conn);
-        }
-        host.hub.guests[gi].yaw = old_yaw;
-        host.hub.guests[gi].pitch = old_pitch;
-    }
-
     /// Commands.performCommand for a guest with command access.
     /// Commands.performCommand for a guest, with the message arguments it
     /// signed (none after an unsigned command packet).
@@ -3987,9 +3845,11 @@ impl Game<'_> {
             level: g.xp_level,
             progress: g.xp_progress,
             total: g.xp_total,
+            score: g.score,
         };
         xp.respawn(self.ui.rules.bool("keep_inventory") || g.game_mode == SPECTATOR);
-        (g.xp_level, g.xp_progress, g.xp_total) = (xp.level, xp.progress, xp.total);
+        (g.xp_level, g.xp_progress, g.xp_total, g.score) =
+            (xp.level, xp.progress, xp.total, xp.score);
         // PlayerEvent.Clone, at the end of `restoreFrom`: the data is copied,
         // the new player not yet placed.
         let (cloned, name) = (g.uuid, g.name.clone());
@@ -4371,6 +4231,7 @@ impl Game<'_> {
                 level: g.xp_level,
                 progress: g.xp_progress,
                 total: g.xp_total,
+                score: g.score,
             }
             .death_reward(self.ui.rules.bool("keep_inventory") || g.game_mode == SPECTATOR);
             let (name, uuid) = (g.name.clone(), g.uuid);
@@ -5007,7 +4868,7 @@ impl Game<'_> {
         }
         if self.guest_can_glide(host, conn) != Some(true) {
             if let Some(g) = host.hub.guest_mut(conn) {
-                g.fall_flying = false;
+                g.end_glide();
             }
             return;
         }
@@ -5731,6 +5592,7 @@ fn eye_columns(at: [f64; 3], body: Dimensions) -> [std::ops::RangeInclusive<i32>
 
 mod attack_checks;
 mod dig_stop;
+mod guest_attack;
 use dig_stop::{StopDig, stop_dig};
 
 /// ServerPlayer.swingAndResetAttackStrength resets only when a use starts a swing.

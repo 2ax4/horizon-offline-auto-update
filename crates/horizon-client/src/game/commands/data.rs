@@ -101,6 +101,13 @@ impl Game<'_> {
         self.player.as_ref()?;
         self.sync_level();
         let mut tag = self.level.player_tag();
+        // `ServerPlayer.addAdditionalSaveData` always stores the tracker.
+        self.load_warden_tracker();
+        set_key(
+            &mut tag,
+            "warden_spawn_tracker",
+            self.sculk.tracker.to_nbt(),
+        );
         if let Some(u) = self.saved_player_uuid() {
             set_key(&mut tag, "UUID", Tag::IntArray(u.to_vec()));
         }
@@ -792,6 +799,14 @@ impl Game<'_> {
                 p.pitch = pitch;
                 p.no_gravity = entity_nbt::flag(&tag, "NoGravity");
                 p.on_ground = entity_nbt::flag(&tag, "OnGround");
+                // `SpectralArrow.readAdditionalSaveData`: a load reads the glow
+                // `Duration` again (200 when the compound has none), so a merge
+                // restarts the glow the arrow's next hit gives.
+                if let Some(a) = p.arrow.as_mut()
+                    && a.is_spectral_type()
+                {
+                    a.read_spectral_duration(&tag);
+                }
                 set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));
             }
             _ => return Err(stale()),
@@ -2213,6 +2228,9 @@ mod saved_tag_tests;
 
 #[cfg(test)]
 mod mod_block_entity_tests;
+
+#[cfg(test)]
+mod spectral_merge_tests;
 
 #[cfg(test)]
 mod arrow_owner_tests {

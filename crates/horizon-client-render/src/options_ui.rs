@@ -1740,7 +1740,7 @@ fn pvp_rows() -> Vec<Result<crate::extras::Item, &'static str>> {
 /// half-width button holds (`width` measures text with the screen's font): those take the
 /// whole row, so no label slides past its edges, in any language.
 fn wide_extras(s: &Settings, width: impl Fn(&str) -> f32) -> Vec<crate::extras::Item> {
-    // A button's label keeps 2 px off each edge (`AbstractButton.renderString`'s margin),
+    // A button's label keeps 2 px off each edge (`AbstractButton.extractDefaultLabel`'s margin),
     // past which it slides back and forth.
     let room = 150.0 - 4.0;
     pvp_rows()
@@ -3341,7 +3341,7 @@ impl OptionsUi {
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
-        self.output = output;
+        self.output = output.shown(self.in_world);
         let (w, h) = (batch.width, batch.height);
         if let Some(error) = &self.resource_error {
             ui::menu_background(batch, atlas, 0.0, 0.0, w, h, self.in_world);
@@ -7385,6 +7385,7 @@ mod tests {
         // Vanilla's own: the same option on two of its screens.
         let vanilla_repeats: BTreeMap<&str, &[&str]> = [
             ("MenuBlur", &["Accessibility", "Graphics"][..]),
+            ("FovEffects", &["Accessibility", "Graphics"][..]),
             ("ShowSubtitles", &["Accessibility", "Sound"][..]),
             ("Narrator", &["Accessibility", "Chat"][..]),
             ("ChatOpacity", &["Accessibility", "Chat"][..]),

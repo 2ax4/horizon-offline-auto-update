@@ -241,7 +241,6 @@
   "Peak Brightness": "Врвна осветленост",
   "Black Level": "Црно ниво",
   "UI Brightness": "Осветленост на интерфејсот",
-  "HDR Lighting": "HDR осветлување",
   "Battery Mode": "Режим на батерија",
   "Graphics API": "Графички API",
   "Translucent Batching": "Проѕирна серија",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Додај ознака",
   "horizon.studio.topbar.clear_keyframes": "🗑 Избриши клучни кадри",
   "horizon.studio.topbar.timeline_hud": "⏱ Временска линија",
-  "horizon.studio.topbar.split_scene": "Подели сцена"
+  "horizon.studio.topbar.split_scene": "Подели сцена",
+  "horizon.options.block_vibration": "Хаптичка повратна информација од Bedrock",
+  "horizon.options.split_vibration": "Вибрација при делење на куп",
+  "horizon.options.impulse_triggers": "Импулсни тригери",
+  "A tick when you break a block, as in Bedrock.": "Кога кршите блок, тој вибрира, како во Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Кратко вибрирање при делење на куп, како во Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Тригерите на контролерот Xbox One вибрираат заедно со неговите рачки."
 }

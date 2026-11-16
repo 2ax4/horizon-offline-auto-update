@@ -2546,6 +2546,31 @@ def world_misc():
         cmd('/particle minecraft:flame 4 300 4 0 0 0 0 1 force @e[type=minecraft:pig]'),
         cmd('/particle minecraft:dust{color:[1.0,0.0,0.0],scale:1.0} 4 210 4 0 0 0 0 5 force @s'),
         cmd('/particle minecraft:block{block_state:"minecraft:stone"} 4 210 4 1 1 1 0.1 10 normal @a'),
+        # ParticleArgument decodes the options through the type's codec: a scale
+        # outside [0.01;4.0], a colour that is neither an int nor three floats and
+        # an item id the registry does not hold all fail before the particle is
+        # made; the success line names the type's registry key, not the typed text.
+        cmd('/particle flame 4 210 4'),
+        cmd('/particle minecraft:dust{color:0,scale:10} 4 210 4'),
+        cmd('/particle minecraft:dust{color:0,scale:0.01} 4 210 4'),
+        cmd('/particle minecraft:dust{color:"red",scale:1} 4 210 4'),
+        cmd('/particle minecraft:item{item:"minecraft:not_an_item"} 4 210 4'),
+        cmd('/particle minecraft:item{item:{}} 4 210 4'),
+        cmd('/particle minecraft:item{item:"minecraft:stone"} 4 210 4'),
+        cmd('/particle minecraft:item{item:{id:"minecraft:stone"}} 4 210 4'),
+        cmd('/particle minecraft:dust{color:[1,"a",2],scale:1} 4 210 4'),
+        cmd('/particle minecraft:dust{color:[1,2,3,4],scale:1} 4 210 4'),
+        cmd('/particle minecraft:dust{color:0} 4 210 4'),
+        cmd('/particle minecraft:dust{color:0,scale:"x"} 4 210 4'),
+        cmd('/particle minecraft:dust_color_transition{from_color:0,to_color:0,scale:10} 4 210 4'),
+        cmd('/particle minecraft:item{item:{id:"minecraft:air"}} 4 210 4'),
+        cmd('/particle minecraft:item 4 210 4'),
+        cmd('/particle minecraft:item{item:{id:"minecraft:stone",count:0}} 4 210 4'),
+        # Every field's error, joined last to first.
+        cmd('/particle minecraft:dust{color:"red",scale:10} 4 210 4'),
+        cmd('/particle minecraft:dust{color:"red"} 4 210 4'),
+        cmd('/particle minecraft:item{item:{id:"minecraft:not_an_item",count:0}} 4 210 4'),
+        cmd('/particle minecraft:item{item:{id:"minecraft:stone",count:"x"}} 4 210 4'),
         cmd('/playsound minecraft:block.note_block.harp master @s'),
         cmd('/playsound minecraft:block.note_block.harp record @s 4 210 4 1 2 0'),
         cmd('/playsound minecraft:block.note_block.harp master @a 1000 210 1000'),
@@ -7223,6 +7248,65 @@ def primed_tnt_fall():
     return ops
 
 
+def end_crystal_saved_motion():
+    """`Entity.load` reads `Motion` (a part over 10 loads as 0) and `Rotation` (`setXRot`: the pitch `% 360`
+    within +-90), and `saveWithoutId` writes them back. `EndCrystal.tick` never moves or turns the crystal, so both
+    keep what was loaded, after ticks and through a save and a reload of the chunk."""
+    x0, y0, z0 = 4096 - 160, 260, 3648
+    ring = [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': ring}]
+    subjects = ['Motion:[0.0d,0.4d,0.0d]', 'Motion:[12.0d,0.1d,-0.2d]', 'Rotation:[45.0f,10.0f]',
+                'Rotation:[400.0f,100.0f],Motion:[0.3d,0.0d,0.0d]', 'Rotation:[-30.0f,-450.0f]']
+    for n, fields in enumerate(subjects, 1):
+        ops.append(cmd(f'/summon end_crystal {x0 + 3 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;{TAG_CRYSTAL},0,{n},1],'
+                       f'ShowBottom:0b,{fields}}}', expect_result=1))
+
+    def reads():
+        for n in range(1, len(subjects) + 1):
+            for key in ('Motion', 'Rotation'):
+                ops.append(cmd(f'/data get entity {TAG_CRYSTAL:08x}-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 2})
+    reads()
+    # The chunk saves and drops its entities, then loads them back.
+    ops += [cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            {**cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1), 'guard': True},
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': ring}]
+    reads()
+    return ops + setup(f'/kill @e[type=end_crystal,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+TAG_CRYSTAL = 15995  # UUIDs of end_crystal_saved_motion's crystals
+
+def armor_stand_air_refills():
+    """#16823: an armor stand is a `LivingEntity`, so `LivingEntity.baseTick` refills its air by 4 a
+    tick up to 300 (`increaseAirSupply`), a marker's too, and in water as well: `armor_stand` is in
+    the `can_breathe_under_water` tag. Read after summoning and after 1, 2 and 22 ticks."""
+    x0, y0, z0 = 3456, 260, 3648
+    chunk = [[x0 >> 4, z0 >> 4]]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False),
+           cmd(f'/fill {x0 + 13} {y0} {z0 + 8} {x0 + 13} {y0 + 1} {z0 + 8} water', False)]
+    uuids = []
+    subjects = (('-1s', ''), ('100s', ''), ('298s', ''), ('-1s', ',Marker:1b'), ('-1s', ',NoGravity:1b'),
+                ('100s', None))
+    for n, (air, extra) in enumerate(subjects, 1):
+        uuids.append(f'000041b7-0000-0000-0000-{n:04x}00000001')
+        x = x0 + 13 if extra is None else x0 + 2 * n
+        ops.append(cmd(f'/summon armor_stand {x}.5 {y0} {z0 + 8}.5 '
+                       f'{{UUID:[I;16823,0,{n},1],Air:{air}{extra or ""}}}', expect_result=1))
+    for wait in (0, 1, 1, 20):
+        if wait:
+            ops.append({'op': 'tick', 'n': wait})
+        for uuid in uuids:
+            ops.append(cmd(f'/data get entity {uuid} Air'))
+    return ops + setup(*[f'/kill {uuid}' for uuid in uuids],
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
 def end_crystal_saved_fall():
     """#14671: `Entity.load` reads `OnGround` (`getBooleanOr`) and `fall_distance`, and `saveWithoutId` writes them
     back; `EndCrystal.tick` never moves the crystal nor runs `baseTick`, so both keep what was loaded, through a save
@@ -7406,6 +7490,68 @@ def loaded_wolf_taming():
     reads()
     return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def loaded_dragon_health_above_max():
+    """#16724: `LivingEntity.readAdditionalSaveData` reads the ender dragon's `Health` through
+    `setHealth` too, which clamps it to its max health of 200. Read after summoning and after an
+    unload and reload (frozen, so only the save and the load count)."""
+    x0, y0, z0 = 4032, 260, 3776
+    chunk = [[x0 >> 4, z0 >> 4]]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    uuids = []
+    # One dragon: Horizon has a single dragon per level, so it refuses to summon a second.
+    for n, health in enumerate(('1000.0f',), 1):
+        uuids.append(f'00004154-0000-0000-0000-{n:04x}00000001')
+        ops.append(cmd(f'/summon ender_dragon {x0 + 8}.5 {y0 + 12 * n} {z0 + 8}.5 '
+                       f'{{UUID:[I;16724,0,{n},1],Health:{health},NoAI:1b}}', expect_result=1))
+
+    def reads():
+        for uuid in uuids:
+            ops.append(cmd(f'/data get entity {uuid} Health'))
+
+    reads()
+    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    return ops + setup('/tick unfreeze', *[f'/kill {uuid}' for uuid in uuids], f'/forceload remove {x0} {z0}')
+
+
+def loaded_minecart_fire():
+    """#16736: a minecart has no `baseTick`, so nothing counts its fire ticks down, and `Entity.move`
+    resets them only on an entity that is not on fire: a cart loaded with `Fire` above 0 keeps it.
+    Read after summoning, after a tick, and after an unload and reload (frozen, so only the save
+    and the load count). Water puts a burning cart out (`WaterFluid.entityInside`)."""
+    x0, y0, z0 = 3648, 260, 3776
+    chunk = [[x0 >> 4, z0 >> 4]]
+    subjects = [('minecart', 'Fire:100s'), ('chest_minecart', 'Fire:100s'), ('hopper_minecart', 'Fire:1s'),
+                ('minecart', 'Fire:0s'), ('minecart', 'Fire:100s')]
+    # The last cart stands in water.
+    wet = f'{x0 + 3 * len(subjects)} {y0} {z0 + 8}'
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False),
+           cmd(f'/setblock {wet} water', False)]
+    uuids = []
+    for n, (kind, fields) in enumerate(subjects, 1):
+        uuids.append(f'00004160-0000-0000-0000-{n:04x}00000001')
+        ops.append(cmd(f'/summon {kind} {x0 + 3 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;16736,0,{n},1],{fields}}}',
+                       expect_result=1))
+
+    def reads():
+        for uuid in uuids:
+            ops.append(cmd(f'/data get entity {uuid} Fire'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 1})
+    reads()
+    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air',
                        f'/forceload remove {x0} {z0}')
 
 
@@ -7637,37 +7783,6 @@ def ominous_spawner_loaded_entity_fields():
             *setup(f'/forceload add {x0} {z0}'), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]}]
     return ops + reads() + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
                                  f'/forceload remove {x0} {z0}')
-
-
-def thrown_item_kept():
-    """#16698: `ThrowableItemProjectile` keeps the stack it was loaded with in its entity data and
-    saves it back as `Item`, wherever it has flown to since. Read after summoning, after a tick of
-    flight, and after an unload and reload (frozen, so only the save and the load count)."""
-    x0, y0, z0 = 3904, 260, 3776
-    chunk = [[x0 >> 4, z0 >> 4]]
-    subjects = [('egg', 'diamond_pickaxe'), ('snowball', 'diamond_pickaxe'), ('egg', 'blue_egg'),
-                ('experience_bottle', 'stick'), ('ender_pearl', 'stick'), ('egg', None)]
-    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
-    uuids = []
-    for n, (kind, item) in enumerate(subjects, 1):
-        uuids.append(f'0000413a-0000-0000-0000-{n:04x}00000001')
-        held = f'Item:{{id:"minecraft:{item}",count:1}},' if item else ''
-        ops.append(cmd(f'/summon {kind} {x0 + 2}.5 {y0 + 2 * n} {z0 + 8}.5 '
-                       f'{{UUID:[I;16698,0,{n},1],{held}Motion:[0.6d,0.0d,0.0d],NoGravity:1b}}', expect_result=1))
-
-    def reads():
-        for uuid in uuids:
-            ops.append(cmd(f'/data get entity {uuid} Item.id'))
-
-    reads()
-    ops.append({'op': 'tick', 'n': 1})
-    reads()
-    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
-            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
-            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
-    reads()
-    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]', '/tick unfreeze',
-                       f'/forceload remove {x0} {z0}')
 
 
 def thrown_projectile_rotation():
@@ -8486,6 +8601,44 @@ def explosion_creaking_heart_experience():
                        f'/forceload remove {x0} {z0}')
 
 
+def discovered_groups(directory=None):
+    """The groups that live in a file of their own under `tools/command_exec_groups/` (#16833).
+
+    A module there defines `GROUP` (the group's name) and `cases(cmd, setup)` (its ops) and is
+    found by its file: adding a group touches no shared line, so two pull requests that each add
+    one don't conflict. Sorted by file name, so the order is the same everywhere."""
+    import importlib.util
+    from pathlib import Path
+    import sys
+
+    directory = Path(directory) if directory else Path(__file__).resolve().parent / 'command_exec_groups'
+    found = []
+    for path in sorted(directory.glob('*.py')):
+        if path.name.startswith('_'):
+            continue
+        # In sys.modules with its file, so `parity.py --trace` records it as a dependency.
+        name = f'command_exec_groups.{path.stem}'
+        module = sys.modules.get(name)
+        if module is None or Path(getattr(module, '__file__', '')) != path:
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        found.append((module.GROUP, module.cases(cmd, setup)))
+    return found
+
+
+def with_discovered(result, found):
+    """`result` with the discovered groups before its last group, which has to stay last (it
+    leaves the player in other food than it found). A name used twice is an error."""
+    result = [*result[:-1], *found, result[-1]]
+    names = [name for name, _ in result]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ValueError(f'command_exec group names used twice: {", ".join(twice)}')
+    return result
+
+
 def groups():
     try:
         from .spectral_duration_corpus import cases as spectral_saved_duration
@@ -8675,6 +8828,7 @@ def groups():
         ('animal signed InLove', animal_signed_in_love()),
         ('mob fire resistance damage', mob_fire_resistance_damage()),
         ('armor stand climbing', armor_stand_climbing()),
+        ('armor stand air refills', armor_stand_air_refills()),
         ('painting saved ground', painting_saved_ground()),
         ('mob armor damage', mob_armor_damage()),
         ('mob max health bounds', mob_max_health_bounds()),
@@ -8688,6 +8842,7 @@ def groups():
         ('primed tnt box', primed_tnt_box()),
         ('primed tnt fall', primed_tnt_fall()),
         ('end crystal saved fall', end_crystal_saved_fall()),
+        ('end crystal saved motion', end_crystal_saved_motion()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
         ('explosion player experience', explosion_player_experience()),
@@ -8699,7 +8854,6 @@ def groups():
         ('projectile fall distance', projectile_fall_distance()),
         ('ominous spawner loaded fields', ominous_spawner_loaded_entity_fields()),
         ('thrown projectile rotation', thrown_projectile_rotation()),
-        ('thrown item kept', thrown_item_kept()),
         ('item frame rotation', item_frame_rotation()),
         ('item fall distance', item_fall_distance()),
         ('beacon levels load', beacon_levels_load()),
@@ -8707,6 +8861,8 @@ def groups():
         ('loaded dead mob', loaded_dead_mob()),
         ('loaded health above max', loaded_health_above_max()),
         ('loaded wolf taming', loaded_wolf_taming()),
+        ('loaded dragon health above max', loaded_dragon_health_above_max()),
+        ('loaded minecart fire', loaded_minecart_fire()),
         ('falling block fall float', falling_block_fall_float()),
         ('explosion infested blocks', explosion_infested_blocks()),
         ('jigsaw default joint', jigsaw_default_joint()),
@@ -8825,4 +8981,4 @@ def groups():
     ]
     result.insert(1, ('vehicle kill contents', vehicle_kill_contents(cmd)))
     result.insert(1, ('trader llama NoAI delay', llama_delay(cmd)))
-    return result
+    return with_discovered(result, discovered_groups())

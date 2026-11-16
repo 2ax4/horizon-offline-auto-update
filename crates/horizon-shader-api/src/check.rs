@@ -13,8 +13,8 @@ use crate::inputs::{COMPUTE_INPUT, DISPLACEMENT_INPUT, Frame, RAY_HIT};
 use crate::manifest::{OptionKind, PackOption};
 use crate::package::Pack;
 use crate::stages::{
-    Composed, GROUP, RAY_SCENE_BINDING, RAY_SPRITE_ARRAYS, RAY_SPRITES_BINDING, StageKind,
-    compose_traced, identifiers,
+    Composed, GROUP, RAY_ENTITY_RETAINED_BINDING, RAY_ENTITY_STORE_BINDING, RAY_SCENE_BINDING,
+    StageKind, compose_traced, identifiers,
 };
 use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
 use std::collections::HashSet;
@@ -84,6 +84,18 @@ pub struct CheckedStage {
 }
 
 impl CheckedStage {
+    /// Whether the stage against the scene reads the entity layer too: its pack's files name
+    /// `RAY_ENTITY` (`names_ray_entity`), so the renderer binds the layer for it.
+    pub fn traces_entities(&self) -> bool {
+        self.scene.as_ref().is_some_and(|module| {
+            module.global_variables.iter().any(|(_, g)| {
+                g.binding
+                    .as_ref()
+                    .is_some_and(|b| b.group == GROUP && b.binding == RAY_ENTITY_STORE_BINDING)
+            })
+        })
+    }
+
     /// Whether the stage's function, or a function it calls, reads the prelude's `global`
     /// (a resource of the stage, such as `reflection`).
     pub fn reads(&self, global: &str) -> bool {
@@ -341,16 +353,28 @@ fn check_entry(
     };
     let (expressions, texture_reads) = cost(scene.as_ref().map_or(&module, |s| &s.0));
     let mut problems = Vec::new();
-    let engine = kind == StageKind::Material && pack.manifest.coverage == crate::Coverage::Engine;
-    if engine && let Some(at) = reachable_discard(&module, kind.function()) {
+    let engine = match kind {
+        StageKind::Material => Some((pack.manifest.material_coverage, "the texture")),
+        StageKind::Entity => Some((
+            pack.manifest.entity_coverage,
+            "the texture and the layer's opacity",
+        )),
+        _ => None,
+    }
+    .and_then(|(coverage, test)| (coverage == crate::Coverage::Engine).then_some(test));
+    if let Some(test) = engine
+        && let Some(at) = reachable_discard(&module, kind.function())
+    {
+        let function = kind.function();
         problems.push(located(
-                &composed,
-                at.to_range().map(|r| r.start),
-                "`discard` reachable from `material`: under `[material] coverage = \"engine\"` (the \
-                 default) Horizon's alpha test on the texture decides what is drawn; a pack that cuts \
-                 its own holes sets `coverage = \"pack\"`"
-                    .into(),
-            ));
+            &composed,
+            at.to_range().map(|r| r.start),
+            format!(
+                "`discard` reachable from `{function}`: under `[{function}] coverage = \"engine\"` \
+                 (the default) Horizon's alpha test on {test} decides what is drawn; a pack that \
+                 cuts its own holes sets `coverage = \"pack\"`"
+            ),
+        ));
     }
     if expressions > MAX_EXPRESSIONS {
         problems.push(problem(
@@ -527,11 +551,12 @@ fn vertex_rays(
     composed: &Composed,
     manifest: &crate::manifest::Manifest,
 ) -> Vec<Problem> {
-    let last = RAY_SPRITES_BINDING + RAY_SPRITE_ARRAYS - 1;
+    // The entity layer's bindings come last.
     let scene: Vec<_> = (module.global_variables.iter())
         .filter(|(_, g)| {
             g.binding.as_ref().is_some_and(|b| {
-                b.group == GROUP && (RAY_SCENE_BINDING..=last).contains(&b.binding)
+                let bindings = RAY_SCENE_BINDING..=RAY_ENTITY_RETAINED_BINDING;
+                b.group == GROUP && bindings.contains(&b.binding)
             })
         })
         .map(|(handle, _)| handle)

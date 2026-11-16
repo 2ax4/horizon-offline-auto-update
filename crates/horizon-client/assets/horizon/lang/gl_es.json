@@ -241,7 +241,6 @@
   "Peak Brightness": "Brillo máximo",
   "Black Level": "Nivel Negro",
   "UI Brightness": "Brillo da interface de usuario",
-  "HDR Lighting": "Iluminación HDR",
   "Battery Mode": "Modo de batería",
   "Graphics API": "API de gráficos",
   "Translucent Batching": "Lote translúcido",
@@ -1041,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Engadir marcador",
   "horizon.studio.topbar.clear_keyframes": "🗑 Borrar fotogramas clave",
   "horizon.studio.topbar.timeline_hud": "⏱ Liña de tempo",
-  "horizon.studio.topbar.split_scene": "Dividir escena"
+  "horizon.studio.topbar.split_scene": "Dividir escena",
+  "horizon.options.block_vibration": "Resposta háptica de Bedrock",
+  "horizon.options.split_vibration": "Vibración ao dividir unha pila",
+  "horizon.options.impulse_triggers": "Gatillos de impulso",
+  "A tick when you break a block, as in Bedrock.": "Cando rompes un bloque, vibra, coma en Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Unha vibración curta ao dividir unha pila, como en Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Os gatillos dun mando de Xbox One vibran xunto coas súas empuñaduras."
 }

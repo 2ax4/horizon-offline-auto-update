@@ -32,7 +32,7 @@ const TERRAIN_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
 
 /// entity.wgsl after the OverlayTexture constants it reads.
 fn entity_shader() -> String {
-    crate::overlay::wgsl_constants() + include_str!("hdr_light.wgsl") + include_str!("entity.wgsl")
+    crate::overlay::wgsl_constants() + wgsl_prefix::HDR_LIGHT + include_str!("entity.wgsl")
 }
 
 fn no_pack_hdr_gain(layered: bool, pack: bool, world: bool) -> bool {
@@ -40,11 +40,11 @@ fn no_pack_hdr_gain(layered: bool, pack: bool, world: bool) -> bool {
 }
 
 fn terrain_shader() -> String {
-    include_str!("hdr_light.wgsl").to_owned() + include_str!("terrain.wgsl")
+    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
 }
 
 fn border_shader() -> String {
-    include_str!("hdr_light.wgsl").to_owned() + include_str!("border.wgsl")
+    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("border.wgsl")
 }
 
 /// The static block-entity vertex entry point shares entity shading but lives
@@ -466,15 +466,10 @@ struct Globals {
     /// x: `Options.textureFiltering` (0 none, 1 RGSS, 2 anisotropic); y: the sprite arrays' width;
     /// z: the mip level at which a sprite is one texel, when the views reach it, else 0.
     filtering: [f32; 4],
-    /// HDR output's tier windows, low to very bright: where the lift starts, where it is
-    /// full (`hdr::Hdr::windows`); zero without HDR.
-    hdr_windows: [[f32; 4]; 2],
     /// x and y unused; z 1 with HDR output on; w the world's writers write light (terrain.wgsl).
     hdr_light: [f32; 4],
-    /// The sun's disc's peak, an unused lane, world/look and debug; then the tiers' gains
-    /// (`Hdr::draw_params`).
+    /// The display's headroom, an unused lane, world/look and debug (`Hdr::draw_params`).
     hdr_settings: [f32; 4],
-    hdr_gains: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1500,7 +1495,7 @@ pub struct Renderer {
     hdr_marker: Option<std::path::PathBuf>,
     /// The window's graphics driver (`hdr_start`); `None` offscreen.
     hdr_driver: Option<String>,
-    /// The HDR Lighting setting, kept for the HDR output made when HDR turns on.
+    /// Whether the Look setting is Horizon's, kept for the HDR output made when HDR turns on.
     hdr_lighting_setting: bool,
     /// The shader pack's post-processing, and the dimension (legacy id) it was loaded for.
     pack_post: Option<(i32, Option<pack_post::PackPost>)>,
@@ -1605,6 +1600,8 @@ pub struct Renderer {
     pub fullbright: bool,
     /// The Improved transparency option (`GameRenderer.useImprovedTransparency`).
     pub improved_transparency: bool,
+    /// The last frame drew translucent blocks' cracks through its path (`translucent_cracks_transparent`).
+    cracks_transparent: bool,
     /// Its passes and targets, made when first drawn with.
     oit: Option<oit::Oit>,
     /// Advance animated block textures (Horizon setting; vanilla always does).
@@ -4952,6 +4949,7 @@ impl Renderer {
             screenshot_halvings: 0,
             gamma: 0.5,
             improved_transparency: false,
+            cracks_transparent: false,
             oit: None,
             fullbright: false,
             animated_textures: true,
@@ -6600,7 +6598,7 @@ impl Renderer {
             None => "HDR: not offered by this display".into(),
         }
     }
-    /// The HDR Lighting setting (`Hdr::look`).
+    /// Whether the Look setting is Horizon's (`Hdr::look`).
     pub fn set_hdr_lighting(&mut self, on: bool) {
         self.hdr_lighting_setting = on;
         if let Some(hdr) = &mut self.hdr {
@@ -6626,11 +6624,12 @@ impl Renderer {
     }
 
     /// Whether ordinary entity models may be posed on the GPU (`Frame::skin`, `entity_skin::poses`).
-    /// Not under a pack's `[entity]` stage: the game names the runs the stage lights by their
-    /// place in the CPU vertices (`take_entity_runs`), and posed models are not in them.
+    /// Not while the ray scene has the entity layer (`traces_entities`): its BLAS is built from
+    /// the CPU-posed vertices.
     pub fn skins_entities(&self) -> bool {
         self.entity_skin.is_some()
-            && !self.draws_entity_stage()
+            // The ray scene's entity BLAS is built from the CPU-posed vertices.
+            && !self.traces_entities()
             && entity_skin::poses(
                 self.frame_gen.on,
                 (self.pack_post.as_ref())
@@ -6816,6 +6815,10 @@ impl Renderer {
             (_, Some(_)) => Some("native"),
             _ => None,
         }
+    }
+    /// The running Horizon pack's name, from its manifest.
+    pub fn native_pack_name(&self) -> Option<&str> {
+        self.native.as_ref().map(|pack| pack.name.as_str())
     }
     /// `screenshot-sequence`: waits (30 seconds at most) for the frame just drawn to finish on
     /// the GPU, and takes the centre depth a `shaders/` pack copied in it, which its next frame
@@ -7807,16 +7810,11 @@ impl Renderer {
             self.shader_pack_kind().is_some(),
             !frame.title,
         );
-        let (hdr_settings, hdr_gains) = self
+        let hdr_settings = self
             .hdr
             .as_ref()
-            .map_or(([0.0; 4], [0.0; 4]), |h| h.draw_params(!frame.title));
-        self.world_post.baked_light(
-            hdr_gain,
-            hdr_settings,
-            hdr_gains,
-            self.hdr.as_ref().map_or([[0.0; 4]; 2], hdr::Hdr::windows),
-        );
+            .map_or([0.0; 4], |h| h.draw_params(!frame.title));
+        self.world_post.baked_light(hdr_gain, hdr_settings);
         let jitter = self.world_post.jitter(
             [self.config.width, self.config.height],
             taa,
@@ -7960,7 +7958,6 @@ impl Renderer {
                 },
                 0.0,
             ],
-            hdr_windows: self.hdr.as_ref().map_or([[0.0; 4]; 2], hdr::Hdr::windows),
             hdr_light: [
                 0.0,
                 0.0,
@@ -7969,7 +7966,6 @@ impl Renderer {
                 f32::from(u8::from(hdr_gain)),
             ],
             hdr_settings,
-            hdr_gains,
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));
@@ -8358,7 +8354,6 @@ impl Renderer {
                 mapped_at_creation: false,
             });
         }
-        self.ray_prepare(&mut encoder, camera, frame.title);
         self.origins.clear();
         let (sections, retiring) = (&self.sections, &self.lod_retiring);
         laps.lap("r_cameras");
@@ -9005,12 +9000,8 @@ impl Renderer {
         }
         // GameRenderer.useImprovedTransparency. A shader pack keeps its own
         // path.
-        let oit_on = self.improved_transparency
-            && !frame.title
-            && !warp_on
-            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.native.is_none()
-            && oit::supported(&self.device);
+        let oit_on = !frame.title && !warp_on && self.improved_transparency_runs();
+        self.cracks_transparent = oit_on && !hdr_gain;
         let [
             entity_quads,
             text_quads,
@@ -9138,7 +9129,7 @@ impl Renderer {
             self.entity_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Entity vertices"),
                 size: self.entity_capacity * std::mem::size_of::<Vertex>() as u64,
-                usage: entity_skin::EntitySkin::usage(self.entity_skin.is_some()),
+                usage: self.entity_usage(),
                 mapped_at_creation: false,
             });
         }
@@ -9521,6 +9512,7 @@ impl Renderer {
         self.set_up_pack_timing();
         let pack_reads_world = pack_post || native_post;
         laps.lap("r_uploads");
+        self.ray_prepare(&mut encoder, camera, frame);
         // Phase 2 of occlusion culling draws over the depth, and a shader pack or TAA reads it.
         // Post effects (a resource pack's chains, `use_depth_buffer`) read the world's depth
         // after the world pass, as `GameRenderer.render` hands them the main target's.
@@ -9717,6 +9709,8 @@ impl Renderer {
                 timing: self.own_timing.as_mut(),
                 lists,
             });
+            let scene = self.ray_scene.as_ref().and_then(|s| s.traced(frame.camera));
+            native.before_world(&self.device, &mut encoder, scene.as_ref());
         }
         if native_sky_pass && let Some(native) = &mut self.native {
             native.draw_sky_pass(native_sky::SkyPass {
@@ -10410,6 +10404,11 @@ impl Renderer {
                 pass.draw_indexed(0..entity_quads * 6, 0, 0..1);
                 pass.set_bind_group(0, &self.group, &[]);
             }
+            if entity_stage.is_some() {
+                // The entity stage binds the frame's own group; a material stage that traces
+                // draws translucent terrain with the scene's.
+                pack_frame(&mut pass);
+            }
             if text_quads > 0 && !oit_on {
                 pass.stage(self.own_timing.as_mut(), "entity text");
                 pass.set_pipeline(warped.map_or(&self.text_polygon_offset_pipeline, |w| &w.text));
@@ -10496,8 +10495,8 @@ impl Renderer {
                 );
                 pass.set_bind_group(0, &self.group, &[]);
             }
-            // Cracks multiply the existing light; scalar OIT coverage cannot carry that factor.
-            if crumbling_quads > 0 && (!oit_on || hdr_gain) {
+            // A solid block's crack is classic whatever the setting (`DESTROY_TYPES`, solid phase).
+            if crumbling_quads > 0 {
                 pass.stage(self.own_timing.as_mut(), "block breaking");
                 pass.set_pipeline(&self.crumbling_pipeline);
                 pass.set_bind_group(0, &self.entity_group, &[]);
@@ -10683,12 +10682,6 @@ impl Renderer {
                         };
                         quads(pass, &f.text[s], text_quads, entity_quads);
                         if !hdr_gain {
-                            quads(
-                                pass,
-                                &f.crumbling[s],
-                                crumbling_quads,
-                                entity_quads + text_quads,
-                            );
                             quads(
                                 pass,
                                 &f.crumbling[s],
@@ -10884,6 +10877,7 @@ impl Renderer {
                 pass.stage(self.own_timing.as_mut(), "block outline");
                 self.draw_outline(&mut pass, outline_edges as u32, frame.outline_high_contrast);
             }
+            // Cracks multiply the existing light; scalar OIT coverage cannot carry that factor.
             if translucent_crumbling_quads > 0 && (!oit_on || hdr_gain) {
                 pass.stage(self.own_timing.as_mut(), "block breaking");
                 pass.set_pipeline(&self.crumbling_pipeline);
@@ -12743,10 +12737,12 @@ mod tests {
                 || name == "border.wgsl"
                 || name == "world_primitives.wgsl"
             {
-                let base = include_str!("hdr_light.wgsl").to_owned() + &text;
+                let base = super::wgsl_prefix::HDR_LIGHT.to_owned() + &text;
                 sources.push((path, crate::overlay::wgsl_constants() + &base));
             } else if name == "hdr.wgsl" {
                 sources.push((path, super::hdr::shader()));
+            } else if name == "hdr_stats.wgsl" {
+                sources.push((path, super::hdr_stats::shader()));
             } else if name == "oit_world.wgsl" {
                 let base = super::terrain_shader() + include_str!("oit.wgsl");
                 sources.push((path, base + &text));

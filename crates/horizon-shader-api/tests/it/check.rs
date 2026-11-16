@@ -408,6 +408,7 @@ fn post_pack_with_material(
 
 const MATERIAL: &str =
     "fn material(input: MaterialInput) -> Surface { return Surface(input.albedo); }\n";
+const ENTITY: &str = "fn entity(input: EntityInput) -> Surface { return Surface(input.albedo); }\n";
 
 fn refused(problems: &[Problem], name: &str) -> Vec<(String, usize)> {
     let needle = format!("constructs `{name}`: it is Horizon's and may gain fields");
@@ -767,20 +768,23 @@ fn post(input: PostInput) -> vec4<f32> {
     assert_eq!(refused(&problems, "RayHit"), [("post.wgsl".to_owned(), 2)]);
 }
 
-/// A material pack: `[material]` with `keys`, its `material.wgsl` and a shared `helpers.wgsl`.
+/// A 0.2 pack with one stage, `[{stage}]` with `keys`: its `{stage}.wgsl` holds `body`, and a
+/// shared `helpers.wgsl`.
 fn coverage_pack(
+    stage: &str,
     keys: &str,
-    material: &str,
+    body: &str,
     helpers: &str,
 ) -> Result<horizon_shader_api::Report, Vec<Problem>> {
     let manifest = format!(
         "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
-         shared = [\"helpers.wgsl\"]\n[material]\nfile = \"material.wgsl\"\n{keys}"
+         shared = [\"helpers.wgsl\"]\n[{stage}]\nfile = \"{stage}.wgsl\"\n{keys}"
     );
+    let file = format!("{stage}.wgsl");
     let files = [
         (MANIFEST, manifest.as_str()),
         ("helpers.wgsl", helpers),
-        ("material.wgsl", material),
+        (&file, body),
     ]
     .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
     .into();
@@ -788,39 +792,52 @@ fn coverage_pack(
 }
 
 #[test]
-fn a_discard_reachable_from_material_needs_pack_coverage() {
-    let direct = "fn material(input: MaterialInput) -> Surface {\n    \
-                  if input.albedo.a < 0.3 {\n        discard;\n    }\n    \
-                  return Surface(input.albedo);\n}\n";
+fn a_discard_reachable_from_material_or_entity_needs_pack_coverage() {
     // Through a shared helper, two calls deep, inside a loop.
     let helpers = "fn cut(a: f32) {\n    for (var i = 0; i < 2; i++) {\n        \
                    if a < 0.3 {\n            discard;\n        }\n    }\n}\n\
                    fn holes(a: f32) -> f32 {\n    cut(a);\n    return a;\n}\n";
-    let through = "fn material(input: MaterialInput) -> Surface {\n    \
-                   return Surface(vec4(input.albedo.rgb, holes(input.albedo.a)));\n}\n";
-    let refused = |keys: &str, material: &str, helpers: &str| {
-        let p = coverage_pack(keys, material, helpers).expect_err("should fail");
-        let p: Vec<_> = p
-            .into_iter()
-            .filter(|p| p.message.contains("`discard` reachable from `material`"))
-            .collect();
-        assert_eq!(p.len(), 1, "{p:#?}");
-        assert!(p[0].message.contains("coverage = \"pack\""), "{p:#?}");
-        (p[0].file.clone(), p[0].line)
-    };
     let none = "fn unused() {}\n";
-    assert_eq!(refused("", direct, none), ("material.wgsl".into(), 3));
-    assert_eq!(refused("", through, helpers), ("helpers.wgsl".into(), 4));
-    let engine = "coverage = \"engine\"\n";
-    assert_eq!(
-        refused(engine, through, helpers),
-        ("helpers.wgsl".into(), 4)
-    );
-    let own = "coverage = \"pack\"\n";
-    coverage_pack(own, direct, none).unwrap();
-    coverage_pack(own, through, helpers).unwrap();
-    // A helper with a discard that `material` never calls cuts no hole.
-    coverage_pack("", MATERIAL, helpers).unwrap();
+    for (stage, input, plain) in [
+        ("material", "MaterialInput", MATERIAL),
+        ("entity", "EntityInput", ENTITY),
+    ] {
+        let direct = format!(
+            "fn {stage}(input: {input}) -> Surface {{\n    \
+             if input.albedo.a < 0.3 {{\n        discard;\n    }}\n    \
+             return Surface(input.albedo);\n}}\n"
+        );
+        let through = format!(
+            "fn {stage}(input: {input}) -> Surface {{\n    \
+             return Surface(vec4(input.albedo.rgb, holes(input.albedo.a)));\n}}\n"
+        );
+        let refused = |keys: &str, body: &str, helpers: &str| {
+            let p = coverage_pack(stage, keys, body, helpers).expect_err("should fail");
+            let p: Vec<_> = p
+                .into_iter()
+                .filter(|p| {
+                    p.message
+                        .contains(&format!("`discard` reachable from `{stage}`"))
+                })
+                .collect();
+            assert_eq!(p.len(), 1, "{p:#?}");
+            assert!(p[0].message.contains("coverage = \"pack\""), "{p:#?}");
+            (p[0].file.clone(), p[0].line)
+        };
+        let own_file = format!("{stage}.wgsl");
+        assert_eq!(refused("", &direct, none), (own_file, 3));
+        assert_eq!(refused("", &through, helpers), ("helpers.wgsl".into(), 4));
+        let engine = "coverage = \"engine\"\n";
+        assert_eq!(
+            refused(engine, &through, helpers),
+            ("helpers.wgsl".into(), 4)
+        );
+        let own = "coverage = \"pack\"\n";
+        coverage_pack(stage, own, &direct, none).unwrap();
+        coverage_pack(stage, own, &through, helpers).unwrap();
+        // A helper with a discard that the stage never calls cuts no hole.
+        coverage_pack(stage, "", plain, helpers).unwrap();
+    }
 }
 
 #[test]
@@ -829,6 +846,7 @@ fn a_traced_pack_s_own_hit_helper_is_refused_as_its_own_trace_is() {
         "trace_any",
         "trace_layers",
         "RAY_TRANSLUCENT",
+        "RAY_ENTITY",
         "hit_normal_map",
         "block_pbr_maps",
     ];
@@ -1049,6 +1067,23 @@ fn a_ray_from_a_vertex_shader_is_refused() {
         [("material.wgsl".to_owned(), 3)],
         "{problems:#?}"
     );
+    // Nor is the entity layer, in either function.
+    let entities = displaced.replace("8.0)", "8.0, RAY_ENTITY)");
+    let entities = entities.replace("trace_any(", "trace_any_layers(");
+    let problems = traced_material(&entities, "[displacement]\n", &[]).unwrap_err();
+    assert_eq!(
+        reached(&problems, "displacement"),
+        [("material.wgsl".to_owned(), 3)],
+        "{problems:#?}"
+    );
+    let entities = vertex.replace("8.0)", "8.0, RAY_ENTITY)");
+    let entities = entities.replace("trace(", "trace_layers(");
+    let problems = traced_material(MATERIAL, keys, &[("vertex.wgsl", &entities)]).unwrap_err();
+    assert_eq!(
+        reached(&problems, "vertex"),
+        [("vertex.wgsl".to_owned(), 1)],
+        "{problems:#?}"
+    );
     // The material's own rays beside both are its to trace.
     let both = format!(
         "{REFLECTING}fn displacement(input: DisplacementInput) -> f32 {{ return input.height; }}\n"
@@ -1056,4 +1091,105 @@ fn a_ray_from_a_vertex_shader_is_refused() {
     let plain = "fn vertex(input: VertexInput) -> vec3<f32> { return input.position; }\n";
     let keys = format!("{keys}[displacement]\n");
     traced_material(&both, &keys, &[("vertex.wgsl", plain)]).unwrap();
+}
+
+/// A post pass that reads the entity layer: what of an entity the sun's ray meets first.
+const ENTITY_SHADOWED: &str = "fn post(input: PostInput) -> vec4<f32> {
+    let p = view_position(input.uv, input.depth);
+    let hit = trace_layers(p, frame.sun_direction, 64.0, RAY_SOLID | RAY_ENTITY);
+    let mob = select(0.0, 1.0, hit.entity);
+    let shadowed = f32(trace_any_layers(p, frame.sun_direction, 64.0, RAY_ENTITY));
+    return vec4<f32>(hit.albedo.rgb * mob + hit_normal_map(hit).rgb * shadowed, 1.0);
+}
+";
+
+/// The entity layer is only a pack's whose files name `RAY_ENTITY`, anywhere outside a comment:
+/// its post pass is checked without the scene and with it (each translated to SPIR-V, HLSL and
+/// Metal), and has `RayHit.entity`; another pack's has neither.
+#[test]
+fn the_entity_layer_is_the_pack_s_that_names_it() {
+    let report = traced(ENTITY_SHADOWED).unwrap();
+    let post = &report.stages[0];
+    assert!(post.traces_entities());
+    let plain = naga::valid::Capabilities::default();
+    assert!(!ray_queries(&post.module) && valid(&post.module, plain));
+    let scene = post.scene.as_ref().unwrap();
+    assert!(valid(scene, plain | naga::valid::Capabilities::RAY_QUERY));
+    // Dead code names it as well.
+    let dead = format!("fn unused() -> u32 {{ return RAY_ENTITY; }}\n{SHADOWED}");
+    assert!(traced(&dead).unwrap().stages[0].traces_entities());
+    // A comment doesn't; nor does a pack without `[ray_tracing]`, which has no layers at all.
+    let commented = format!("// RAY_ENTITY\n{SHADOWED}");
+    assert!(!traced(&commented).unwrap().stages[0].traces_entities());
+    assert!(post_pack(ENTITY_SHADOWED, TONEMAP, "").is_err());
+    // `entity` is a field only where the layer is.
+    let reads = SHADOWED.replace("hit.material + hit.tags", "u32(hit.entity)");
+    let problems = traced(&reads).unwrap_err();
+    assert!(problems[0].message.contains("entity"), "{problems:#?}");
+    let named = format!("const LAYERS: u32 = RAY_ENTITY;\n{reads}");
+    assert!(traced(&named).unwrap().stages[0].traces_entities());
+}
+
+/// A traced pack whose files don't name `RAY_ENTITY` composes as it did before the entity layer,
+/// byte for byte, with the scene and without it: the hashes are those of its post and material
+/// stages composed before.
+#[test]
+fn a_traced_pack_that_doesn_t_name_ray_entity_composes_as_before() {
+    let manifest = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
+                    [material]\nfile = \"material.wgsl\"\n[[post]]\nfile = \"post.wgsl\"\n\
+                    [tonemap]\nfile = \"tonemap.wgsl\"\n[ray_tracing]\n";
+    let files = [
+        (MANIFEST, manifest),
+        ("material.wgsl", REFLECTING),
+        ("post.wgsl", SHADOWED),
+        ("tonemap.wgsl", TONEMAP),
+    ]
+    .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+    .into();
+    let pack = Pack::from_files(files).unwrap();
+    let stages = [
+        (StageKind::Post, "post.wgsl"),
+        (StageKind::Material, "material.wgsl"),
+    ];
+    let hashes: Vec<String> = stages
+        .into_iter()
+        .flat_map(|(kind, file)| {
+            use horizon_shader_api::{compose, compose_scene};
+            [compose(&pack, kind, file), compose_scene(&pack, kind, file)]
+        })
+        .map(|c| horizon_shader_api::package::sha256_hex(c.text.as_bytes()))
+        .collect();
+    assert_eq!(
+        hashes,
+        [
+            "98798d371e540aa157b5e297d13f4cb26d033cd20fa4d7e0d4812532a3929da1",
+            "38e22f3422efecd68b09c7156406fbbe2a44c11962bc012740bba3b418453505",
+            "97d863f6ab2d52d7b3d7acf56804fc84762007df473b0a9217ae1a52722e0756",
+            "3d90723593cdcf680d2cc479b8eedaafd394a7acdbfc58a9c4c5c4761692e876",
+        ]
+    );
+}
+
+/// The entity layer's bindings against the scene, the retained block entities' store the last of
+/// them (`RAY_ENTITY_RETAINED_BINDING`), are the naming pack's alone: another traced pack's scene
+/// has none of them.
+#[test]
+fn the_retained_block_entities_store_is_the_layer_s_last_binding() {
+    use horizon_shader_api::stages::{
+        GROUP, RAY_ENTITY_RETAINED_BINDING, RAY_ENTITY_STORE_BINDING,
+    };
+    let bindings = |post: &str| -> Vec<u32> {
+        let report = traced(post).unwrap();
+        let scene = report.stages[0].scene.clone().unwrap();
+        let mut found: Vec<u32> = (scene.global_variables.iter())
+            .filter_map(|(_, g)| g.binding.as_ref())
+            .filter(|b| b.group == GROUP && b.binding >= RAY_ENTITY_STORE_BINDING)
+            .map(|b| b.binding)
+            .collect();
+        found.sort_unstable();
+        found
+    };
+    assert_eq!(RAY_ENTITY_RETAINED_BINDING, 63);
+    assert_eq!(bindings(ENTITY_SHADOWED), [60, 61, 62, 63]);
+    assert_eq!(bindings(SHADOWED), [0u32; 0]);
 }
