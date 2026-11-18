@@ -53,16 +53,19 @@ shared = ["common.wgsl"]   # optional: WGSL put before every stage's file, in or
 [sky]                      # each stage is optional, but a pack has at least one
 file = "sky.wgsl"
 clouds = true              # optional: false when the pack draws its own clouds
-sun = true                 # optional: false when the pack draws its own sun (the moon stays)
+sun = true                 # optional: false when the pack draws its own sun
+moon = true                # optional: false when the pack draws its own moon
 stars = true               # optional: false when the pack draws its own stars
 
 [material]
 file = "material.wgsl"
 files = ["pbr.wgsl"]       # optional, on any stage: WGSL put after `shared`, before this stage's file
-fog = false                # optional: the pack fogs its surfaces itself (Horizon does when absent or true)
 
 [vertex]                   # needs [material]: where corners of terrain are drawn, for the world and the shadow map; shares the material's module
 file = "vertex.wgsl"
+
+[frame]                    # optional
+fog = "pack"               # optional: the pack fogs what its stages draw itself (Horizon does under "engine", the default)
 
 [weather]                  # the colour of rain and snow streaks
 file = "weather.wgsl"
@@ -75,7 +78,7 @@ option = "shadows"         # optional: drawn while this option is not 0 (else al
 resolution_option = "shadow_resolution"   # optional: an int, or a choice of numbers, whose value replaces resolution
 distance_option = "shadow_distance"       # optional: the same for distance
 
-[[post]]                   # full-screen passes, in the order they run (8 at most)
+[[post]]                   # full-screen passes, in the order they run (12 at most)
 file = "post/grade.wgsl"
 name = "Colour grade"      # optional: the GPU time overlay's label
 output = "bloom"           # optional, not on the last pass: writes this target, read by name in later passes
@@ -160,11 +163,15 @@ removed filename cannot be mapped back to an ID. If several installed packs shar
 filename in lexical order is used and listed. The `HORIZON_SHADER_PACK` development override still
 names an exact filesystem path; `shaders/` packs still use filenames.
 
-## Shader API 0.2 (experimental)
+<a id="shader-api-02-experimental"></a>
+
+## Shader API 0.2
 
 0.2 is the line this build serves, the line for linear light and HDR
 ([hdr-linear-light.md](../design/hdr-linear-light.md)): `horizon-shader check` and `pack` take it, the game draws it
 and the registry lists it. A pack for another line is refused (`needs shader API 0.1; this Horizon serves 0.2`).
+The launcher goes by the game it installed, not by its own build: it asks that game for its lines
+(`--launch-api`, `content.shader.api`) and offers and installs a registry pack made for one of them.
 A pack draws the world
 into a float frame where the device can (else the 8-bit one): the frame follows the picked pack,
 rebuilding the renderer and remeshing the world when needed. A refused or missing pack, or one whose owner mod is off,
@@ -211,6 +218,11 @@ keeps drawing. What a pack works with:
   coverage: the texture's alpha times the layer's opacity is cut below 0.1 and blends, the returned alpha is ignored,
   and the check refuses a `discard` reachable from `entity`. Under `"pack"` the returned alpha is cut and blends, and
   the stage may `discard`. Dissolve masks and culling are Horizon's under either.
+- **`[frame] fog`**: `"engine"` (the default) or `"pack"`, which fogs what its stages draw itself. Under `"pack"`
+  Horizon skips its fog on what `material` and `entity` return, and every stage gets `vanilla_fog(position)`,
+  vanilla's fog at a point, with the frame's two fog distances it reads (`fog_environment`, `fog_render`), so a pack
+  can start from vanilla's fog and change it. What Horizon draws itself (items, particles, clouds, the hand) keeps
+  vanilla's fog.
 
 ```toml
 [tonemap]                  # optional: the pack's own tone curve
@@ -227,6 +239,7 @@ coverage = "engine"        # optional: engine (default) or pack, when the stage 
 [frame]
 blend = "gamma"            # optional: gamma (default) or linear
 primaries = "bt709"        # optional: bt709 (default) or bt2020, which needs blend = "linear"
+fog = "engine"             # optional: engine (default) or pack, when the pack fogs what its stages draw
 
 [ray_tracing]              # optional, needs [[post]] or [material], no keys: the post stage gets `trace` and `trace_any`, the material stage where it calls them
 [motion]                   # optional, needs [[post]]: the post stage's motion guide (not drawn yet)
@@ -239,12 +252,19 @@ linear light: decode a constant written for display values with a 2.2 power, com
 `packs/traced_water` are the smallest packs that trace rays, from a post pass and from the material stage
 ([the guide](../shaders.md#ray-tracing)).
 
+A 0.2 pack from before 2026-11-16 moves to the terrain's own inputs so: where it drew vanilla's colour with
+`input.tint` or `hit.tint`, it reads `shaded_tint` (the old value, the shade and ambient occlusion in it), or lights
+with `tint`, `shade` and `ao` apart; `[material] fog = false` becomes `[frame] fog = "pack"`; `frame.fog_start` and
+`fog_end` become `fog_environment` and `fog_render`; the post stage's `history` becomes a
+`[[resource]]` with `keep = "view"` that a pass writes as its `output` and reads as `<name>_previous` next frame; and
+`EntityInput.emission` is `full_light`.
+
 ## Testing a pack frame by frame
 
 `horizon-ctl screenshot-sequence FRAMES STEP_MS PATH`, under `HORIZON_STILL`, starts the running pack over and draws
 its first FRAMES frames on a set clock: frame n has `frame_index` n, `time` (n - 1) × STEP_MS / 1000 and `delta_time`
-STEP_MS / 1000 (0 on frame 1; STEP_MS may be a decimal, `16.666667` for 60 fps), and `history` and the eased values
-start as in a pack just loaded. The last frame is written as a PNG, the same bytes every run on the same build, GPU
+STEP_MS / 1000 (0 on frame 1; STEP_MS may be a decimal, `16.666667` for 60 fps), and the eased values start as in
+a pack just loaded. The last frame is written as a PNG, the same bytes every run on the same build, GPU
 and driver. Packs in the `shaders/` format get the same (`frameCounter`, `frameTimeCounter`, `frameTime`). How to use
 it: [the guide](../shaders.md#testing-a-pack-frame-by-frame).
 
@@ -258,9 +278,10 @@ it: [the guide](../shaders.md#testing-a-pack-frame-by-frame).
 
 ## Stability
 
-Experimental (API 0.2). The stages ship in the game behind pack selection; see [stability.md](stability.md).
-While the API is experimental, a line is served until the next one is on by default: 0.1 ended when 0.2 was
-([hdr-linear-light.md](../design/hdr-linear-light.md), step 5).
+API 0.2 is final, at the preview level of [stability.md](stability.md): #17834 was its last breaking change. What
+the reference says stays: additions and fixes toward it go on in 0.2, and a change that breaks a 0.2 pack only comes
+with a new line, 0.3, after a deprecation while the game still serves 0.2. API 0.1 has ended: it is refused since #15886,
+when 0.2 went on by default ([hdr-linear-light.md](../design/hdr-linear-light.md), step 5).
 
 ## Not there yet
 
@@ -271,6 +292,49 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
 
+- 2026-11-18: API 0.2 is final (preview): #17834 was the last change that breaks a 0.2 pack. A breaking change now
+  starts 0.3, after a deprecation. No WGSL or manifest change.
+- 2026-11-17: API 0.2 (experimental, #18023): an R-relative kept texture takes its two versions at their size of the
+  post targets' budget, `2 × scale² × bytes a texel / 8` render-size `rgba16float` textures, instead of 2 at any
+  format and scale: `rgba16float` at scale 0.5 takes 0.5, `r32uint` at scale 1 takes 1. Packs that keep small
+  textures fit where they were refused. A `rgba32float` or `rgba32uint` one at scale 1 takes 4 where it took 2, so a
+  pack whose post targets took more than 4 with one of those, or two of them, is now refused; no WGSL name changes.
+- 2026-11-16: API 0.2 (**breaking**, experimental): the terrain's own inputs. `MaterialInput` and `VertexInput` have
+  the quad's `tint` without its shade and ambient occlusion, the face's `shade`, the corner's `ao` and its `face`;
+  `MaterialInput.emission` is the block state's light level over 15 (one candle 3/15, four 12/15); `VertexInput.fluid`
+  is 2 for lava. A pack whose material or vertex stage reads `tint`, `shade`, `ao`, `face` or `emission` makes the
+  world load again when it starts, and terrain takes half again its memory; a device whose vertex stage reads no
+  storage buffers refuses it. A pack that names `shaded_tint` gets the old `tint` last in `MaterialInput`,
+  `VertexInput` and `RayHit`, free (on an entity hit, its `tint` times its `shade`). `RayHit` gains `shade`, `ao` and
+  `back` and is ordered as the reference lists it; an entity hit has vanilla's entity shade, the Nether's in the
+  Nether. A terrain hit's `tint`, `shade`, `ao` and `emission` change value, not type, in a later version (to what
+  `MaterialInput` gives), without a source break; its `shaded_tint` stays their product. `EntityInput.emission` is
+  `full_light: bool`. Gone: the post stage's `history`, `[material] fog` (a check error naming `[frame] fog`), and
+  `frame.fog_start` and `fog_end`; the fog's fields are declared for every pack. [Moving a
+  pack](#shader-api-02-experimental) says what to read instead. A pack that reads none of these is built and draws as
+  before.
+- 2026-11-16: API 0.2 (additions, experimental): `[sky] moon = false` leaves out Minecraft's moon, as `sun = false`
+  its sun, for a sky that draws its own; and `frame.moon_phase`, the phase of the moon Horizon draws (0 full to 7
+  waxing gibbous), declared only for a pack whose files name `moon_phase`, at the end of `Frame`. A pack that sets
+  neither is built from the same WGSL and drawn as before.
+- 2026-11-16: API 0.2 (additions, experimental): `[entity] reads` and `[sky] reads` (#16011 item 4): the entity and
+  sky stages read kept resources by `[material] reads`' rules: `x` for this frame's version of a texture a
+  `[[before_world]]` pass writes, `x_previous` for last frame's, and buffers, in their fragments only. The check
+  refuses `x` of a texture only `[[post]]` passes write, and `writes` on either stage. An entity or sky stage without
+  `reads` composes and draws as before, a test holds. The reference now says that a compute pass may call
+  `storageBarrier()`.
+- 2026-11-15: API 0.2 (additions, experimental): `[material] reads` (#16011 item 4): the terrain reads kept
+  resources, `x` for this frame's version of a texture a `[[before_world]]` pass writes (in the same frame),
+  `x_previous` for last frame's, and buffers; their declarations join the material's module at the passes'
+  bindings. The check refuses `x` of a texture only `[[post]]` passes write (they run after the terrain draws),
+  `writes` on `[material]`, `reads` on the other stages, and `displacement` or a `[vertex]` file reaching a kept
+  resource, as both also draw the shadow map. The kept resources' frame (the versions' swap and the clears) now starts
+  before the world draws in every pack that keeps them. A material without `reads` composes as before, a test holds.
+- 2026-11-15: API 0.2 (addition, experimental): `[frame] fog = "pack"` turns Horizon's fog off on what the material
+  and entity stages return, and gives every stage `fn vanilla_fog(position: vec3<f32>) -> f32` and the frame's
+  `fog_environment` and `fog_render`, the two distances vanilla's fog takes the larger of, which `fog_start` and
+  `fog_end` merge. The enchantment glint Horizon adds after `entity` fades by `vanilla_fog`. A pack without the key
+  is drawn and checked as before, and `[material] fog = false` stays as it was; a manifest sets one of the two.
 - 2026-11-15: API 0.2 (experimental): `frame.light_direction` is the sun by day and the moon by night also for a pack
   without a `[shadow]` stage, where it now equals the frame's `sun_direction` or `moon_direction`; it read straight up
   (0, 1, 0) at every time of day until now, so a pack that traced its shadows along it got them straight down. Packs
@@ -456,7 +520,7 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 - 2026-10-31: API 0.1 (additions): translucent terrain in the shadow pass: `shadow_map_translucent`
   and `shadow_color`, so a pack can tint the light that passes through water and stained glass.
 - 2026-10-31: API 0.1 (additions): `Frame.mods`, eight `vec4<f32>` a native mod hands the pack it bundles each
-  frame (`native_shader_params` in docs/native-mods.md), all 0 when no mod sets them.
+  frame (`native_shader_params` in docs/modding/src/how-to/native-mods.md), all 0 when no mod sets them.
 - 2026-10-31: API 0.1 (additions): `[shadow]`: the engine draws the solid terrain the light sees
   into a distorted depth map each frame, which the material and post stages read as `shadow_map`
   with `shadow_sampler` and the prelude's `shadow_position`; the frame's `light_direction`,

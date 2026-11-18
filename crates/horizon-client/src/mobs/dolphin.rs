@@ -9,6 +9,7 @@ use super::{
 use crate::blocks::Fluid;
 use horizon_core::geometry::trig::Mth;
 use horizon_core::random::RandomSource;
+use horizon_world::move_gate::MoveGate;
 
 /// `Entity.getMotionDirection`: the horizontal step of the yaw
 /// (`Direction.fromYRot`: south, west, north, east).
@@ -108,7 +109,7 @@ impl Goal for SwimToTreasure {
         m.nav_move_to(cx.w, next, 1.3);
         // `adjustedTickDelay(80)`: this goal does not require every tick, so
         // 40, and the draw is the level's random, not the dolphin's.
-        if cx.lr.next_int_bound(reduced(80)).unwrap_or(1) == 0 {
+        if cx.level.random().next_int_bound(reduced(80)).unwrap_or(1) == 0 {
             // Entity event 38: happy villager particles about the dolphin.
             cx.events.push(MobEvent::AroundSelf {
                 mob: m.id,
@@ -142,22 +143,23 @@ impl Goal for SwimWithPlayer {
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         // getNearestPlayer(forNonCombat().range(10).ignoreLineOfSight()).
         m.can_see_player_through_walls(cx.w, 10.0)
-            && cx.w.player.as_ref().is_some_and(|p| p.swimming)
+            && cx.w.selected_player().is_some_and(|p| p.swimming)
             && m.ai.target != Some(Who::Player)
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        cx.w.player
-            .as_ref()
+        cx.w.selected_player()
             .is_some_and(|p| p.swimming && m.distance_sqr(p.position) < 256.0)
     }
     fn start(&mut self, _: &mut Mob, cx: &mut Cx) {
-        cx.events.push(grace());
+        cx.events.push(cx.w.route_player_event(grace()));
     }
     fn stop(&mut self, m: &mut Mob, _: &mut Cx) {
         m.nav_stop();
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
-        let Some(p) = cx.w.player.clone() else { return };
+        let Some(p) = cx.w.selected_player().cloned() else {
+            return;
+        };
         let (y, x) = (m.kind.max_head_y_rot + 20.0, m.kind.max_head_x_rot);
         m.look_at_speed(p.eye, y, x);
         if m.distance_sqr(p.position) < 6.25 {
@@ -171,7 +173,7 @@ impl Goal for SwimWithPlayer {
             );
         }
         if p.swimming && m.random.next_int_bound(6).unwrap_or(1) == 0 {
-            cx.events.push(grace());
+            cx.events.push(cx.w.route_player_event(grace()));
         }
     }
 }
@@ -262,9 +264,11 @@ impl Goal for Jump {
             // Mth.rotLerp(0.2, xRot, 0).
             m.head_pitch += 0.2 * super::living::wrap(0.0 - m.head_pitch);
         } else if v.length() > f64::from(1.0e-5f32) {
-            let horizontal = v.x.hypot(v.z);
-            m.head_pitch = ((-v.y).atan2(horizontal) * f64::from(180.0f32)
-                / f64::from(std::f32::consts::PI)) as f32;
+            // `Math.atan2(-vy, horizontalDistance) * 57.2957763671875`.
+            let horizontal = (v.x * v.x + v.z * v.z).sqrt();
+            m.head_pitch = (horizon_core::jmath::atan2(-v.y, horizontal)
+                * f64::from(horizon_core::geometry::trig::RAD_TO_DEG))
+                as f32;
         }
     }
 }
@@ -294,7 +298,7 @@ impl FollowPlayerRidden {
     /// `Entity.hasMovedHorizontallyRecently` of the rider, and the player's
     /// own position (its yaw gives the directions).
     fn rider<'a>(&self, cx: &'a Cx) -> Option<&'a super::PlayerView> {
-        cx.w.player.as_ref().filter(|p| {
+        cx.w.selected_player().filter(|p| {
             p.vehicle
                 .as_ref()
                 .is_some_and(|v| v.nautilus == self.nautilus)
@@ -358,7 +362,7 @@ impl Goal for FollowPlayerRidden {
             f64::from(m.ai.zza),
         );
         m.move_relative(speed, input);
-        m.do_move(cx.w, cx.events);
+        m.do_move(cx.w, cx.level, cx.events, &mut MoveGate::new());
         self.recalc -= 1;
         if self.recalc > 0 {
             return;
@@ -482,7 +486,7 @@ impl Goal for PlayWithItems {
         0
     }
     fn can_use(&mut self, m: &mut Mob, _cx: &mut Cx) -> bool {
-        m.extra.main_hand.is_some()
+        m.extra.main_hand_id().is_some()
     }
     fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
         drop_item(m, cx.events);
@@ -552,7 +556,7 @@ mod item_tests {
             "ahead at 0.3: {motion:?}"
         );
         assert_eq!(motion[1], 0.0, "level, so no climb");
-        assert!(m.extra.main_hand.is_none(), "the mouth is empty");
+        assert!(m.extra.main_hand_id().is_none(), "the mouth is empty");
     }
 }
 
@@ -576,6 +580,7 @@ mod target_tests {
     /// `Dolphin.canAttack`: a baby takes nobody as its target, so a hit on it
     /// is not answered; an adult does take the one that hurt it.
     #[test]
+    #[ignore = "daily"]
     fn a_baby_dolphin_spares_whatever_hurt_it() {
         let ran = with_test_world(&[], |w, _| {
             assert!(
@@ -587,7 +592,7 @@ mod target_tests {
                 "an adult dolphin takes its attacker"
             );
         });
-        let _ = ran;
+        assert!(ran, "vanilla data is missing");
     }
 }
 
@@ -609,6 +614,7 @@ mod treasure_play_tests {
     /// `DolphinSwimToTreasureGoal.tick`: `level.getRandom().nextInt(this.adjustedTickDelay(80))`,
     /// the level's random and 40 ticks for a goal that does not tick every tick.
     #[test]
+    #[ignore = "daily"]
     fn a_dolphin_hearts_its_treasure_on_the_levels_random_every_40_ticks() {
         let mut out = None;
         if !with_test_world(&[], |w, _| {
@@ -619,11 +625,11 @@ mod treasure_play_tests {
                 let mut m = dolphin();
                 // A treasure far enough that `canContinueToUse` holds.
                 m.extra.home = Some([40, 64, 40]);
-                let mut lr = crate::mobs::world::level_random(seed);
+                let mut lr = crate::health::TestLevel::new(seed);
                 let mut events = Vec::new();
                 let mut cx = Cx {
                     w,
-                    lr: &mut lr,
+                    level: &mut lr.level(),
                     events: &mut events,
                 };
                 let mut goal = SwimToTreasure::default();
@@ -654,17 +660,18 @@ mod treasure_play_tests {
     /// `Dolphin.MoveToItemGoal.start`: `playSound(DOLPHIN_PLAY, 1.0, 1.0)`,
     /// which `Entity.playSound` drops for a silent dolphin.
     #[test]
+    #[ignore = "daily"]
     fn a_silent_dolphin_makes_no_sound_swimming_to_an_item() {
         let ran = with_test_world(&[], |w, _| {
             for silent in [false, true] {
                 let mut m = dolphin();
                 m.extra.point = Some([8.5, 64.0, 0.5]);
                 m.silent = silent;
-                let mut lr = crate::mobs::world::level_random(0);
+                let mut lr = crate::health::TestLevel::new(0);
                 let mut events = Vec::new();
                 let mut cx = Cx {
                     w,
-                    lr: &mut lr,
+                    level: &mut lr.level(),
                     events: &mut events,
                 };
                 MoveToItem::default().start(&mut m, &mut cx);
@@ -685,6 +692,6 @@ mod treasure_play_tests {
                 }
             }
         });
-        let _ = ran;
+        assert!(ran, "vanilla data is missing");
     }
 }

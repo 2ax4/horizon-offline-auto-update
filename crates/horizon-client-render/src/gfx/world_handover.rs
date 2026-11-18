@@ -44,7 +44,6 @@ impl Renderer {
             index_quads,
             packed_on,
             packed_quads,
-            hold,
             lods,
             lod_cull_free,
             lod_cull_next,
@@ -54,6 +53,7 @@ impl Renderer {
             lod_pending,
             detail_columns,
             detail_revision,
+            upload_retries,
             block_entities,
             block_entity_section_revisions,
             block_entity_membership_revisions,
@@ -64,7 +64,13 @@ impl Renderer {
             light_revision,
             ray_scene,
             capture_copies,
+            // The arenas' pages hold their buffers of looks: their state goes with them.
+            terrain_looks,
+            look_groups,
+            looks_layout,
         );
+        // Until the game gives this renderer its pack again (`world_held`).
+        self.world_held = from.external.is_some();
         // The mesher makes the layout the sections are uploaded in.
         crate::mesher::packed::pack_quads(self.packed_quads);
         if let (Some(flat), Some(old)) = (&mut self.flat, &mut from.flat) {

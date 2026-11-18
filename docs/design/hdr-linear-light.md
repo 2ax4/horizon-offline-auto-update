@@ -2,7 +2,7 @@
 
 A design note, before any code: what a colour means to a shader pack from API 0.2 on, how the frame stores the
 picture, and how HDR output stops reading light from the frame's alpha. Part of [#3125](https://github.com/horizon-rust/horizon/issues/3125)
-and [#1441](https://github.com/horizon-rust/horizon/issues/1441). The shader API is experimental, which needs a
+and [#1441](https://github.com/horizon-rust/horizon/issues/1441). The shader API was experimental when this was written, which needs a
 design note for a new line ([api/stability.md](../api/stability.md)); this is that note.
 
 ## Why
@@ -61,8 +61,8 @@ below); where HDR's settings live (a later note).
   multiplicative, vanilla's lit colour `albedo * tint * lightmap` is the same in linear: decoding the product is the
   product of the decoded terms.
 - **What converts:** `MaterialInput` `albedo`, `tint`, `lightmap` and `colored_light`; `SkyInput.color`;
-  `WeatherInput.color`; `Frame` `sky_color` and `fog_color`; `block_texture` and `block_texture_level`; every
-  colour texture a stage samples (`scene_color`, `previous`, `history`, pack targets, `opaque_color`, `reflection`,
+  `WeatherInput.color`; `Frame` `sky_color` and `fog_color`; `block_texture` and `block_texture_level`; every colour
+  texture a stage samples (`scene_color`, `previous`, pack targets and kept resources, `opaque_color`, `reflection`,
   `shadow_color`, `block_light_colors`). Data stays data: depth, normals, `light` levels, `emission`, and every
   channel of the LabPBR maps (`block_normal_map`, `block_specular_map` and their `_level` forms).
 - **Alpha is coverage only.** The rule to return `input.color.a` goes; a 0.2 post pass's alpha is ignored.
@@ -236,12 +236,12 @@ inputs and gamma values, and the marks its stages passed on in alpha. It is reti
 - Golden Hour's 0.2 port replaced it as the example and test pack;
 - the changelog says so.
 
-The shader API is experimental: it may change in any release without notice, with no deprecation window
+The shader API was experimental then: it could change in any release without notice, with no deprecation window
 ([api/stability.md](../api/stability.md)). Serving 0.1 for longer would have kept its shim, the pipeline variants
 that write marks and the HDR pass's lift from them, only for packs that can move to 0.2.
 
-Later lines follow the same rule while the API is experimental: a line is served until the next one is on by default.
-From preview on, stability.md's deprecation windows apply.
+0.2 is final, at the preview level (2026-11-18): from now stability.md's deprecation windows apply, and a line is
+served beside the next one through its deprecation.
 
 ## `shaders/`-format packs
 

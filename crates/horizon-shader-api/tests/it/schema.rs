@@ -432,39 +432,52 @@ fn refuses_files_a_pack_does_not_use() {
 }
 
 #[test]
-fn fog_is_a_key_of_the_material_stage() {
+fn fog_is_no_stage_s_key() {
     let with_fog = |stage: &str| {
         format!(
             "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"0.2\"\n\n{stage}\nfile = \"a.wgsl\"\nfog = false\n"
         )
     };
-    let material = horizon_shader_api::Manifest::parse(&with_fog("[material]")).unwrap();
-    assert_eq!(material.material.unwrap().fog, Some(false));
-    for stage in ["[sky]", "[[post]]"] {
+    for stage in ["[material]", "[sky]", "[[post]]"] {
         let e = horizon_shader_api::Manifest::parse(&with_fog(stage)).unwrap_err();
-        assert!(e.contains("`fog`"), "{e}");
+        assert!(
+            e.contains("[material] fog is gone: [frame] fog = \"pack\""),
+            "{e}"
+        );
     }
 }
 
 #[test]
-fn a_sky_can_keep_or_replace_minecrafts_clouds_sun_and_stars() {
+fn a_sky_can_keep_or_replace_minecrafts_clouds_sun_moon_and_stars() {
     let manifest = |stages: &str| {
         Manifest::parse(&format!(
             "schema = 1\nid = \"a\"\nname = \"A\"\nversion = \"1\"\napi = \"0.2\"\n{stages}"
         ))
     };
-    let m =
-        manifest("[sky]\nfile = \"s.wgsl\"\nclouds = false\nsun = false\nstars = true\n").unwrap();
+    let m = manifest(
+        "[sky]\nfile = \"s.wgsl\"\nclouds = false\nsun = false\nmoon = false\nstars = true\n",
+    )
+    .unwrap();
     let sky = m.sky.unwrap();
     assert_eq!(
-        (sky.clouds, sky.sun, sky.stars),
-        (Some(false), Some(false), Some(true))
+        (sky.clouds, sky.sun, sky.moon, sky.stars),
+        (Some(false), Some(false), Some(false), Some(true))
     );
     let m = manifest("[sky]\nfile = \"s.wgsl\"\n").unwrap();
-    assert_eq!(m.sky.unwrap().sun, None);
-    for key in ["clouds", "sun", "stars"] {
-        let e = manifest(&format!("[material]\nfile = \"m.wgsl\"\n{key} = false\n"));
-        assert!(e.unwrap_err().to_string().contains("keys of [sky] only"));
+    let sky = m.sky.unwrap();
+    assert_eq!((sky.sun, sky.moon), (None, None));
+    for key in ["clouds", "sun", "moon", "stars"] {
+        for stages in [
+            format!("[material]\nfile = \"m.wgsl\"\n{key} = false\n"),
+            format!("[weather]\nfile = \"w.wgsl\"\n{key} = false\n"),
+            format!("[material]\nfile = \"m.wgsl\"\n[vertex]\nfile = \"v.wgsl\"\n{key} = false\n"),
+        ] {
+            let e = manifest(&stages);
+            assert!(
+                e.unwrap_err().to_string().contains("keys of [sky] only"),
+                "{stages}"
+            );
+        }
     }
 }
 
@@ -592,6 +605,11 @@ fn a_pack_texture_is_declared_for_every_stage_and_decoded() {
     };
     refused(&texture.replace("noise.png", "noise.jpg"), ".png");
     refused(&format!("{texture}{texture}"), "declared twice");
+    // A word WGSL reserves: refused in the manifest, not at a line of the stages' prelude.
+    refused(
+        &texture.replace("\"noise\"", "\"from\""),
+        "texture id \"from\"",
+    );
     refused(&texture.replace("clamp", "mirror"), "repeat or clamp");
     refused(
         &format!("{texture}filter = \"cubic\"\n"),
@@ -766,7 +784,7 @@ const SMALLEST: &str = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\na
 
 #[test]
 fn the_frame_tonemap_and_entity_keys_are_read() {
-    use horizon_shader_api::{Blend, Coverage, Primaries};
+    use horizon_shader_api::{Blend, Coverage, Fog, Primaries};
     let m = Manifest::parse(SMALLEST).unwrap();
     assert_eq!((m.blend, m.tonemap.is_none()), (Blend::Gamma, true));
     assert_eq!(m.primaries, Primaries::Bt709);
@@ -807,6 +825,12 @@ fn the_frame_tonemap_and_entity_keys_are_read() {
         coverage(&section("e", "engine")),
         (Coverage::Engine, Coverage::Engine)
     );
+    // Horizon fogs what the stages draw unless the pack says it does.
+    assert_eq!(Manifest::parse(&both).unwrap().fog, Fog::Engine);
+    let own = format!("{both}[frame]\nfog = \"pack\"\n");
+    assert_eq!(Manifest::parse(&own).unwrap().fog, Fog::Pack);
+    let engine = format!("{both}[frame]\nfog = \"engine\"\n");
+    assert_eq!(Manifest::parse(&engine).unwrap().fog, Fog::Engine);
     let tonemap = format!("{SMALLEST}[tonemap]\nfile = \"t.wgsl\"\nname = \"Curve\"\n");
     let m = Manifest::parse(&tonemap).unwrap();
     assert_eq!(m.tonemap.as_ref().unwrap().name.as_deref(), Some("Curve"));
@@ -860,8 +884,18 @@ fn the_frame_tonemap_and_entity_keys_are_checked() {
             "`coverage` is a key of [material] and [entity] only",
         ),
         (
+            format!("{SMALLEST}[frame]\nfog = \"none\"\n"),
+            "frame.fog \"none\": engine or pack",
+        ),
+        (
+            format!(
+                "{SMALLEST}[material]\nfile = \"m.wgsl\"\nfog = false\n[frame]\nfog = \"pack\"\n"
+            ),
+            "[material] fog is gone",
+        ),
+        (
             format!("{SMALLEST}[entity]\nfile = \"e.wgsl\"\nfog = false\n"),
-            "`fog` is a key of [material] only",
+            "[material] fog is gone",
         ),
         (
             format!("{SMALLEST}[entity]\nfile = \"e.wgsl\"\nscale = 0.5\n"),
@@ -869,7 +903,7 @@ fn the_frame_tonemap_and_entity_keys_are_checked() {
         ),
         (
             format!("{SMALLEST}[entity]\nfile = \"e.wgsl\"\nclouds = false\n"),
-            "`clouds`, `sun` and `stars` are keys of [sky] only",
+            "`clouds`, `sun`, `moon` and `stars` are keys of [sky] only",
         ),
         (
             format!("{SMALLEST}[entity]\nfile = \"e.glsl\"\n"),
@@ -882,7 +916,7 @@ fn the_frame_tonemap_and_entity_keys_are_checked() {
         ),
         (
             format!("{SMALLEST}[tonemap]\nfile = \"t.wgsl\"\nfog = false\n"),
-            "`fog` is a key of [material] only",
+            "[material] fog is gone",
         ),
         (
             format!("{SMALLEST}[tonemap]\nfile = \"../t.wgsl\"\n"),

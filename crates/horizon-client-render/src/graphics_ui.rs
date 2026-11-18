@@ -642,6 +642,12 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
             ],
         ),
     ];
+    // The fork forces ticking serial, so Parallel Tick would be a no-op setting.
+    for (_, groups) in &mut pages {
+        for (_, rows) in groups {
+            rows.retain(|r| !matches!(r.item, Item::Horizon(H::ParallelTick)));
+        }
+    }
     // Only Windows and Linux have more than one graphics API, translucent batching (Metal
     // draws flat) and GPU culling (Metal draws no count the GPU wrote).
     if cfg!(target_os = "macos") {
@@ -1212,6 +1218,9 @@ impl Item {
             Item::Vanilla(Opt::MaxAnisotropy) if s.file.int("textureFiltering") != 2 => {
                 Some("Only with Anisotropic texture filtering.")
             }
+            Item::Horizon(H::LeafCulling) if !s.horizon.vanilla_models(&s.resource_packs) => {
+                Some("Only with the default resource pack.")
+            }
             _ => None,
         }
     }
@@ -1296,7 +1305,7 @@ impl Item {
         self.touched(s);
     }
     pub fn cycle(self, s: &mut Settings, back: bool, framebuffer: [i32; 2], out: &EffectiveOutput) {
-        if !self.available() {
+        if !self.available() || self.blocked(s, out).is_some() {
             return;
         }
         match self {
@@ -1467,7 +1476,7 @@ pub struct GraphicsScreen {
     /// The window's size in pixels, which a vanilla row's step can need (the fullscreen
     /// resolution): the options screen sets it before each input.
     pub(crate) framebuffer: [i32; 2],
-    /// The output of the renderer the settings are drawn for (`OptionsUi::draw`), handed in
+    /// The output of the renderer the settings are drawn for (`OptionsUi::draw_background`), handed in
     /// each time the screen is reached.
     pub(crate) output: EffectiveOutput,
 }
@@ -2753,6 +2762,31 @@ mod tests {
         );
         assert_eq!(s.horizon.leaf_culling, LeafCullingMode::Hidden);
         assert_eq!(s.horizon.preset, Preset::Custom);
+
+        // A custom resource pack blocks leaf culling and explains why.
+        s.resource_packs = vec!["vanilla".into(), "faithful.zip".into()];
+        assert_eq!(
+            item.blocked(&s, &NONE),
+            Some("Only with the default resource pack.")
+        );
+        let before_mode = s.horizon.leaf_culling;
+        item.cycle(&mut s, false, FB, &NONE);
+        assert_eq!(s.horizon.leaf_culling, before_mode);
+        let screen_row = GraphicsScreen::default()
+            .sheets(&s)
+            .into_iter()
+            .flat_map(|sh| sh.groups)
+            .flat_map(|g| g.rows)
+            .find(|row| row.id == item)
+            .unwrap();
+        assert!(!screen_row.live);
+        assert_eq!(
+            screen_row.why.as_deref(),
+            Some("Only with the default resource pack.")
+        );
+
+        s.resource_packs = vec!["vanilla".into()];
+        assert_eq!(item.blocked(&s, &NONE), None);
     }
 
     #[test]
@@ -2811,6 +2845,7 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "daily"]
     fn hdr_sliders_step_through_every_value_they_can_be_set_to() {
         let out = offering(true, None);
         let value = |h: H, s: &Settings| match h {
@@ -2918,6 +2953,7 @@ mod tests {
                 "No settings match.",
                 "Undo",
                 "Done",
+                "Only with the default resource pack.",
             ] {
                 lang::get(text);
             }

@@ -37,7 +37,7 @@ itself once the player is out, without writing its file again, and C's file hold
 The engines run in a fresh folder with fresh HORIZON_HOME and XDG folders (lab.game_env), on free ports, with no
 window. Every request, reply (records shortened) and check goes to --out/steps.json, with both servers' logs.
 Build first:
-    cargo build --profile fast -p horizon-client --bin horizon-client
+    cargo build --profile fast -p horizon-game --bin horizon-client
     cargo build --profile fast -p horizon-bots
 """
 import argparse
@@ -53,7 +53,6 @@ import socket
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid as uuidlib
@@ -683,7 +682,7 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     os.environ.update(lab.game_env())
-    with tempfile.TemporaryDirectory(prefix='server-transfer-e2e-') as scratch:
+    with lab.temp_folder('server-transfer-e2e-') as scratch:
         try:
             run(bins, Path(args.resources), Path(scratch), out)
         except (Failed, RuntimeError) as e:

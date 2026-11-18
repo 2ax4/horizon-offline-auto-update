@@ -379,7 +379,7 @@ fn motion_brings_the_post_stage_only_the_motion_names() {
 /// that keeps resources, and to no other pack.
 #[test]
 fn kept_resources_bring_the_frame_s_epochs_to_their_pack_only() {
-    let epochs = "    view_epoch: u32,\n    world_epoch: u32,\n    reset_reasons: u32,\n}";
+    let epochs = "    view_epoch: u32,\n    world_epoch: u32,\n    reset_reasons: u32,\n";
     let resource =
         "[[resource]]\nname = \"cells\"\nbuffer = 64\nelement = \"u32\"\nkeep = \"view\"\n";
     let reasons = [
@@ -445,6 +445,47 @@ fn ray_entity_comes_to_the_traced_stages_of_the_pack_that_names_it() {
         ] {
             assert_eq!(prelude_names(&composed, kind), want, "{kind:?}");
         }
+    }
+}
+
+/// The frame's fog distances are every pack's, last; `[frame] fog = "pack"` brings
+/// `vanilla_fog` to every stage of its pack, with `[[resource]]` or without.
+#[test]
+fn pack_fog_brings_vanilla_fog_to_every_stage_of_its_pack_only() {
+    let key = "[frame]\nfog = \"pack\"\n";
+    let fields = "    fog_environment: vec2<f32>,\n    fog_render: vec2<f32>,\n}";
+    let resource =
+        "[[resource]]\nname = \"cells\"\nbuffer = 64\nelement = \"u32\"\nkeep = \"view\"\n";
+    for kept in ["", resource] {
+        let fogged = pack_with(&format!("{kept}{key}"), None);
+        for kind in StageKind::ALL {
+            let file = format!("{}.wgsl", kind.name());
+            let composed = compose(&fogged, kind, &file);
+            assert!(composed.text.contains(fields), "{kind:?}");
+            let plain = compose(&pack_with(kept, None), kind, &file);
+            assert!(plain.text.contains(fields), "{kind:?}");
+            let without = prelude_names(&plain, kind);
+            let mut want = without;
+            want.insert("vanilla_fog".to_owned());
+            assert_eq!(prelude_names(&composed, kind), want, "{kind:?}");
+        }
+    }
+    // The names read in each stage, so the check translates them for every backend.
+    let material = "fn material(input: MaterialInput) -> Surface {\n    \
+                    let f = vanilla_fog(input.position) + frame.fog_render.x;\n    \
+                    return Surface(vec4<f32>(mix(input.albedo.rgb, frame.fog_color, f), input.albedo.a));\n}\n";
+    let post = "fn post(input: PostInput) -> vec4<f32> {\n    \
+                let p = view_position(input.uv, input.depth);\n    \
+                return vec4<f32>(input.color.rgb * (1.0 - vanilla_fog(p)) + frame.fog_environment.y, 1.0);\n}\n";
+    for (file, text) in [("material.wgsl", material), ("post.wgsl", post)] {
+        check(&pack_with(key, Some((file, text)))).unwrap();
+        check(&pack_with(&format!("{resource}{key}"), Some((file, text)))).unwrap();
+        // A pack without the key hasn't `vanilla_fog`.
+        let problems = messages(check(&pack(Some((file, text)))));
+        assert!(
+            problems.iter().any(|p| p.contains("vanilla_fog")),
+            "{problems:#?}"
+        );
     }
 }
 

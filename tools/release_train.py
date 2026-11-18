@@ -8,10 +8,9 @@
 
 The game ships only the Nightly since 2026-10-28 (Ludovic): when `decide --kind game` says so, release.yml starts
 `nightly build` on the commit it decided (tools/ci/nightly.py), and "the last release" is the published Nightly.
-
 A kind releases when a pull request merged into main since its last published release changed one of its
 player-facing paths (GAME_PATHS, LAUNCHER_PATHS), once BATCH of them are waiting and the newest merged at least
-DEBOUNCE ago (a burst of merges becomes one release), or once the oldest has waited MAX_WAIT (a lone fix still ships),
+DEBOUNCE ago (a burst of merges becomes one release), or once the oldest has waited MAX_WAIT (LAUNCHER_MAX_WAIT for the launcher: a lone fix still ships),
 or at once when one of those pull requests is labelled release-now. Pull requests labelled skip-release (work players don't see) don't count
 towards a release and aren't listed in the notes. RELEASES_PAUSED=1 (a repository variable) stops automatic releases,
 and an open issue labelled release-blocker stops game releases, even forced ones, until it is closed.
@@ -50,6 +49,10 @@ MAINTAINER = "ludovic111"
 BATCH = 5
 DEBOUNCE = dt.timedelta(minutes=5)
 MAX_WAIT = dt.timedelta(hours=6)
+# The launcher waits an hour at most: a fix to installs or updates is what players are waiting for, and a launcher
+# release updates itself without touching worlds (2026-11-17: the Voltz install fix sat merged, "3 of 5 pull
+# requests: waiting for more, or 234 more minutes", while players couldn't install the mod).
+LAUNCHER_MAX_WAIT = dt.timedelta(hours=1)
 # Kept as typed in release titles, where the clauses after the first are lowercased.
 PROPER = {"Horizon", "Horizon's", "Minecraft", "Mojang", "Microsoft", "Java", "Xbox", "PlayStation", "Steam", "Windows",
           "Linux", "LAN", "Kira", "Discord", "Wayland", "Hyprland", "F3", "GUI", "UI"}
@@ -72,11 +75,11 @@ LAUNCHER_PATHS = [
     "crates/horizon-friends/",
     "crates/horizon-mcp/",
     "crates/horizon-mod-api-gen/",
-    "crates/horizon-mods/",
+    "crates/horizon-mod-package/",
     "crates/horizon-port-pack/",
     "crates/horizon-prepare/",
     "crates/horizon-release-sign/",
-    "crates/horizon-telemetry/",
+    "crates/horizon-system/",
     "crates/horizon-theme/",
     # Its icon, its menu entries and its AppImage are compiled or packaged into a release
     # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
@@ -235,37 +238,42 @@ def changed_paths(commit):
     return run("git", "diff", "--name-only", f"{commit}^1", commit).split()
 
 
-# Pull requests asked for in one GraphQL query. One `gh pr view` per pull request ran out of the workflow token's
-# hourly quota once ~2,000 merges piled up since the last Nightly (11-08 to 11-13): every decision died half way,
-# so no Nightly could ever go out again.
-PR_BATCH = 50
-PR_FIELDS = ("number title url mergedAt author { login } labels(first: 30) { nodes { name } } "
-             "closingIssuesReferences(first: 10) { nodes { number } }")
-
-
-def pull_requests(numbers):
-    """The pull requests with these numbers, in that order: one GraphQL query per PR_BATCH of them."""
+def merged_pull_request_metadata():
+    """Repository-owned merge identities and note fields, without one network call per PR."""
     owner, name = REPO.split("/")
-    found, unique = {}, list(dict.fromkeys(numbers))
-    for start in range(0, len(unique), PR_BATCH):
-        chunk = unique[start:start + PR_BATCH]
-        fields = " ".join(f"p{number}: pullRequest(number: {number}) {{ {PR_FIELDS} }}" for number in chunk)
-        query = f'query {{ repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}'
-        data = gh_json("api", "graphql", "-f", f"query={query}")
-        found.update((int(key[1:]), value) for key, value in data["data"]["repository"].items())
-    return [parse_pull_request(found[number]) for number in numbers]
-
-
-def parse_pull_request(data):
-    return {
-        "number": data["number"],
-        "title": data["title"].strip(),
-        "url": data["url"],
-        "labels": sorted(label["name"] for label in data["labels"]["nodes"]),
-        "issues": sorted(issue["number"] for issue in (data.get("closingIssuesReferences") or {}).get("nodes") or []),
-        "author": (data.get("author") or {}).get("login", ""),
-        "merged_at": dt.datetime.fromisoformat(data["mergedAt"].replace("Z", "+00:00")) if data.get("mergedAt") else None,
+    query = """
+    query($owner: String!, $name: String!, $endCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(first: 100, states: MERGED, after: $endCursor) {
+          nodes {
+            number title url mergedAt mergeCommit { oid } author { login }
+            labels(first: 100) { nodes { name } }
+            closingIssuesReferences(first: 100) { nodes { number } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
     }
+    """
+    pages = gh_json("api", "graphql", "--paginate", "--slurp",
+                    "-F", f"owner={owner}", "-F", f"name={name}", "-f", f"query={query}")
+    owned = {}
+    for page in pages:
+        for data in page["data"]["repository"]["pullRequests"]["nodes"]:
+            # A historical merge commit can have been removed by a force-push. It cannot
+            # match a reachable candidate; GraphQL explicitly permits a null commit.
+            if data["mergeCommit"] is None:
+                continue
+            owned[(data["number"], data["mergeCommit"]["oid"])] = {
+                "number": data["number"],
+                "title": data["title"].strip(),
+                "url": data["url"],
+                "labels": sorted(label["name"] for label in data["labels"]["nodes"]),
+                "issues": sorted(issue["number"] for issue in data["closingIssuesReferences"]["nodes"]),
+                "author": (data["author"] or {}).get("login", ""),
+                "merged_at": dt.datetime.fromisoformat(data["mergedAt"].replace("Z", "+00:00")),
+            }
+    return owned
 
 
 def published_releases():
@@ -315,6 +323,8 @@ def decision(kind, prs, now, paused=False, force=False, new_line=None, blockers=
     counted = [pr for pr in prs if pr["paths"] and "skip-release" not in pr["labels"]]
     urgent = [pr for pr in counted if "release-now" in pr["labels"]]
     merged = [pr["merged_at"] for pr in counted if pr.get("merged_at")]
+    max_wait = LAUNCHER_MAX_WAIT if kind == "launcher" else MAX_WAIT
+    hours = max_wait.seconds // 3600
     if blockers:
         return False, "held by " + ", ".join(f"release-blocker #{number}" for number in blockers)
     if force:
@@ -327,10 +337,11 @@ def decision(kind, prs, now, paused=False, force=False, new_line=None, blockers=
         return False, "no merged pull request changed what players run"
     if urgent:
         return True, "release-now: " + ", ".join(f"#{pr['number']}" for pr in urgent)
-    if merged and now - min(merged) >= MAX_WAIT:
-        return True, f"{len(counted)} pull requests changed what players run; the oldest has waited {MAX_WAIT.seconds // 3600} hours"
+    if merged and now - min(merged) >= max_wait:
+        return True, (f"{len(counted)} pull requests changed what players run; the oldest has waited {hours} "
+                      f"hour{'s' if hours != 1 else ''}")
     if len(counted) < BATCH:
-        wait = MAX_WAIT - (now - min(merged)) if merged else MAX_WAIT
+        wait = max_wait - (now - min(merged)) if merged else max_wait
         return False, (f"{len(counted)} of {BATCH} pull requests: waiting for more, or {wait.seconds // 60 + 1} more "
                        "minutes for the oldest")
     if merged and now - max(merged) < DEBOUNCE:
@@ -505,10 +516,19 @@ def gather(kind, head, releases=None):
 def merged_between(kind, base, head):
     """The pull requests merged into main between base and head, with their player-facing paths ("paths")."""
     exporter_paths = exporters()
-    merged = merged_pull_requests(base, head)
-    prs = pull_requests([number for number, _ in merged])
-    for pr, (_, commit) in zip(prs, merged):
+    candidates = merged_pull_requests(base, head)
+    if not candidates:
+        return []
+    # Merge subjects survive imports and PR numbers are repository-local. Fetch this
+    # repository's merge identities AND note fields in one fully paginated query.
+    owned = merged_pull_request_metadata()
+    prs = []
+    for number, commit in candidates:
+        if (number, commit) not in owned:
+            continue
+        pr = owned[(number, commit)].copy()
         pr["paths"] = [path for path in changed_paths(commit) if player_facing(path, kind, exporter_paths)]
+        prs.append(pr)
     return prs
 
 

@@ -354,7 +354,7 @@ def horizon_resave(source, destination, bin_dir):
     saves.mkdir(parents=True)
     shutil.copytree(source, saves / 'world')
     socket = Path(tempfile.mkdtemp(prefix='hzrt')) / 'control.sock'  # sockets need short paths
-    ctl = [str(bin_dir / 'horizon-ctl'), '--socket', str(socket)]
+    ctl = [str(lab.binary(bin_dir, 'horizon-ctl')), '--socket', str(socket)]
     extra = []
     # Offscreen on macOS, and on a Linux without vscreen (never a window on a real monitor).
     if sys.platform == 'darwin' or not shutil.which('vscreen'):
@@ -665,7 +665,7 @@ def main():
     else:
         bin_dir = Path(args.bin_dir).resolve() if args.bin_dir else None
         if bin_dir is None:
-            subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib', '--bins'], cwd=ROOT, check=True)
+            subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib', '--bins'], cwd=ROOT, check=True)
             bin_dir = ROOT / os.environ.get('CARGO_TARGET_DIR', 'target') / 'fast'
         h = horizon_resave(v0, RUN / 'h', bin_dir)
     print('comparing', v0, 'with', h)

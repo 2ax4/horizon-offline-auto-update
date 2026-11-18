@@ -7,7 +7,7 @@ signature, input, resource and limit is in the generated
 
 **Shader API 0.1 is retired (#15886).** A 0.1 pack is refused with `needs shader API 0.1; this Horizon serves 0.2`:
 it stays in the list, and the game draws without it. To move one, set `api = "0.2"` and treat colours as linear light,
-as [api/shaders.md](api/shaders.md#shader-api-02-experimental) describes; the example pack Golden Hour 2.0.0 was moved
+as [api/shaders.md](api/shaders.md#shader-api-02) describes; the example pack Golden Hour 2.0.0 was moved
 that way.
 
 Shader packs in the Iris/OptiFine format are a separate feature with its own loader; this page is only about
@@ -15,12 +15,12 @@ Horizon's own format.
 
 | Part | Where | State |
 |---|---|---|
-| Format, stages, check | `crates/horizon-shader-api` | API 0.2, experimental |
+| Format, stages, check | `crates/horizon-shader-api` | API 0.2, final (preview) |
 | Authoring tool | `horizon-shader` (same crate) | `new`, `check`, `pack` |
 | Templates | `crates/horizon-shader-api/templates/` | post, sky, material |
 | Example pack | `crates/horizon-shader-api/packs/golden_hour` | a warm sky and two post passes |
 | In the game: every stage | Options > Video Settings > Shaders > Shader Packs | sky, material, post passes, hot reload |
-| The registry and the launcher | `shader` kind ([api/mod-index.md](api/mod-index.md)); the Mods page's Shader packs tab | checked, then installed into `shaderpacks/` |
+| The registry and the launcher | `shader` kind ([modding/src/reference/registry-index.md](modding/src/reference/registry-index.md)); the Mods page's Shader packs tab | checked, then installed into `shaderpacks/` |
 
 ## Quick start
 
@@ -55,7 +55,10 @@ my_pack 0.1.0 (shader API 0.2): FAILED
 Put the pack folder (or its `.hshader`) in `shaderpacks/` beside `options.txt` (Open Pack Folder opens it) and pick
 it on Options > Video Settings > Shaders > Shader Packs..., which lists Horizon's packs, marked (Horizon), beside packs in the
 `shaders/` format; one runs at a time, and clicking it again turns it off. `HORIZON_SHADER_PACK=<its folder or file
-name>` runs a pack whatever the page says, for development. The game checks the pack first, and refuses one that
+name>` runs a pack whatever the page says, for development. `HORIZON_TERRAIN_LOOKS=1` makes terrain keep each quad's
+own tint, directional shade, ambient occlusion, face and light level beside its vertices while one of Horizon's packs
+runs, as a pack whose material or vertex stage reads `tint`, `shade`, `ao`, `face` or `emission` does, for the engine's
+own tests: they take half again the terrain's memory, and the world loads again when such a pack starts or stops. The game checks the pack first, and refuses one that
 fails, with its problems in the chat. While it runs, the game looks at the pack twice a second: save a file
 and the pack is checked and rebuilt in place ("Shader pack ... reloaded"); if the new version fails, the chat says
 where. A stage that fails keeps the last good version drawing; a manifest that is refused (another API line, a
@@ -75,7 +78,7 @@ options are saved to `shaderpacks/<pack>.txt` (`NAME=value` lines), and the pack
 
 ## Testing a pack frame by frame
 
-A pack that keeps something from frame to frame (`history`, eased values) draws a little differently in every run,
+A pack that keeps something from frame to frame (kept resources, eased values) draws a little differently in every run,
 as frames come when they come. With `HORIZON_STILL=1` and the world frozen the scene holds still
 ([agent-control.md](agent-control.md#repeatable-screenshots)), and
 
@@ -83,7 +86,7 @@ as frames come when they come. With `HORIZON_STILL=1` and the world frozen the s
 horizon-ctl screenshot-sequence 64 50 frame64.png
 ```
 
-starts the pack over as if just loaded (black `history`, eased values from the start) and draws 64 frames 50 ms
+starts the pack over as if just loaded (eased values from the start) and draws 64 frames 50 ms
 apart on its clock: frame n has `frame_index` n, `time` (n - 1) × 0.05 and `delta_time` 0.05 (0 on frame 1). The
 64th is written to `frame64.png` (and `frame64-hdr.png` with HDR output on) before the reply. STEP_MS may be a
 decimal: `16.666667` steps a 60 fps clock. The same build, GPU
@@ -127,11 +130,12 @@ by Horizon: a pack changes how things look, not how they are drawn.
 | `[material]` | `fn material(input: MaterialInput) -> Surface` | the lit colour of each point of a block's surface, before the alpha test and fog: every terrain section and distant tile, solid, cutout and translucent (not entities, block entities or particles) |
 | `[entity]` | `fn entity(input: EntityInput) -> Surface` | the lit colour of each point of an entity or a block entity (mobs, players, armour, chests, banners), before the alpha test, the enchantment glint and fog; `input.kind` says which. Items and particles keep Horizon's lighting for now |
 | `[weather]` | `fn weather(input: WeatherInput) -> vec4<f32>` | the colour of each point of a rain or snow streak, blended over the world with its alpha; Horizon's light and fog aren't applied, so the pack applies its own |
-| `[[post]]` | `fn post(input: PostInput) -> vec4<f32>` | a full-screen pass over the world's picture (up to 8, in order), under the hand and HUD; its alpha is ignored |
+| `[[post]]` | `fn post(input: PostInput) -> vec4<f32>` | a full-screen pass over the world's picture (up to 12, in order), under the hand and HUD; its alpha is ignored |
 | `[tonemap]` | `fn tonemap(input: TonemapInput) -> vec3<f32>` | the post chain's picture for the display, from 0 to `frame.headroom`; without it Horizon's curve runs |
 
 A pack has at least one stage; a stage it leaves out keeps vanilla's look. Each input says what vanilla would draw
-(`input.color` in the sky and post stages; `albedo * tint * vec4(lightmap, 1.0)` for a material), so a pack can start
+(`input.color` in the sky and post stages; `albedo * shaded_tint * vec4(lightmap, 1.0)` for a material, `shaded_tint`
+being vanilla's vertex colour, the quad's `tint` times its `shade` and `ao`), so a pack can start
 from vanilla and change only what it means to.
 
 Every colour a stage reads or returns is linear light: 1.0 is vanilla's white, and more is brighter, on SDR and HDR
@@ -240,8 +244,9 @@ let hit = trace(position * 0.99, direction, 64.0);   // hit.distance < 0.0: noth
 ```
 
 `trace` returns the nearest solid surface along a ray, with what the material stage would get for that point (`albedo`,
-`tint`, `light`, `uv`, `material`, `tags`, `emission`, `fluid`, `translucent`, `tangent`) and its `position`, `normal`
-and `distance`; `trace_any` only says whether something is in the way, which is all a shadow needs. Origins are camera-relative, as `view_position` gives them, and
+`light`, `uv`, `material`, `tags`, `fluid`, `translucent`, `tangent`; for now a terrain hit's `tint` still holds its shade
+and ambient occlusion, its `shade` and `ao` are 1 and its `emission` is the block's brightness class, as the reference
+says) and its `position`, `normal`, `back` and `distance`; `trace_any` only says whether something is in the way, which is all a shadow needs. Origins are camera-relative, as `view_position` gives them, and
 rays pass through the clear texels of leaves and plants, and through water, stained glass and ice, which are in a
 [layer of their own](#layers). `frame.ray_distance` is the distance the scene covers in every direction; a longer ray
 is allowed and may still hit geometry toward the corners, and no clamp is needed. Horizon keeps the scene; the look is the pack's: Horizon
@@ -321,7 +326,7 @@ Every other pack is built and runs as without it.
 | --- | --- |
 | In it | Within the scene's reach, mobs, players (third person, and the others), armour stands, item frames, paintings, projectiles, vehicles, falling blocks and block displays, whether the camera draws them this frame or not (behind it, beside it, hidden behind terrain), so turning the camera changes nothing; the block entities at rest that the block entity cache keeps (on in every graphics preset: closed chests, shulker boxes, bells, decorated pots, banners, within vanilla's 64 blocks), in view or not; and the other block entities the camera draws (a chest while it opens) |
 | Not in it | Particles, world text and name tags, the hand, the camera's own body in first person, items Horizon draws itself (a dropped item, a framed one), translucent items, breaking cracks, entity shadows, energy swirls, beams, portals, lightning, glowing outlines, additive glows; other block entities out of view (a chest opening behind the camera) |
-| A hit | `entity` true. `albedo` the entity texture's texel in linear light, `tint`, `light` and `uv` its vertices' (the colour vanilla multiplies in, alpha included; block and sky light; the atlas position), `normal` the face's against the ray, `tangent` from its uvs; `material`, `tags`, `emission` and `fluid` 0, `translucent` false, and `hit_normal_map` and `hit_specular_map` give their defaults |
+| A hit | `entity` true. `albedo` the entity texture's texel in linear light, `tint`, `light` and `uv` its vertices' (the colour vanilla multiplies in, alpha included; block and sky light; the atlas position), `normal` the face's against the ray, `tangent` from its uvs, `shade` vanilla's entity shade for the face (the Nether's in the Nether), `ao` 1; `material`, `tags`, `emission` and `fluid` 0, `translucent` false, and `hit_normal_map` and `hit_specular_map` give their defaults |
 | A ray stops | Where vanilla's alpha test keeps the entity's pixel, `(texel * tint).a` 0.1 or more, from either side of the face (on the dying dragon's dissolve, where vanilla's mask keeps it). A pack's own `[entity]` alpha is not the layer's: the scene runs no pack code |
 | Cost | For a pack that names the layer: the models of the entities within reach that the camera doesn't draw, posed on the CPU every frame, and one BLAS of the frame's entity quads and the TLAS built again every frame. The cached block entities have a BLAS a section, built again only when that section's change (a chest opens or closes, one is placed or broken) |
 
@@ -341,10 +346,11 @@ if input.translucent && frame.has_ray_tracing == 1u {
 }
 ```
 
-- **It costs more per ray.** `material` runs for every terrain fragment drawn, hidden ones included where the depth
-  test hasn't rejected them yet, so a ray there costs more than the same ray in a post pass, which runs once a pixel.
-  Light solid terrain in a post pass (`view_position`, `surface_at`) and keep the material stage's rays for translucent
-  surfaces (`input.translucent`).
+- **Where a ray is paid.** A ray in `material` is paid for every terrain fragment drawn, hidden ones included where
+  the depth test hasn't rejected them yet; a ray in a post pass once a pixel. But a post pass knows only the solid
+  terrain's surface (`surface_at` isn't `present` behind water, glass or entities) and has no albedo, so direct light
+  that must be right there is traced in `material`. With `[material] reads`, a pack can also trace in a compute or
+  `[[before_world]]` pass and apply the result in `material`.
 - **Only `material` itself traces.** `displacement` and the `[vertex]` file run in vertex shaders: the check refuses a
   pack whose `displacement` or `vertex` reaches a trace function.
 - **`trace` passes through water.** A ray from a water surface passes through other water: right for the shore's
@@ -366,10 +372,42 @@ with `compute = true`, and an option's `resets`. A compute file defines `fn comp
 The game runs them. The keys, their limits and the WGSL each pass sees are in the
 [reference](api/shaders-reference-0.2.md#kept-resources-and-compute-passes).
 
+A pack whose kept resources don't fit in video memory is refused when it loads ("its kept resources (N MiB) don't fit
+in video memory"), and the pack that ran keeps running, its resources made again as at a load. R-relative textures
+that don't fit at a new render size stay at the old one, which the log says once, until the size changes again.
+
 Under `[ray_tracing]` a compute or `[[before_world]]` file that calls a trace function gets them, as a post pass does;
 a `[[before_world]]` pass traces this frame's scene. The four trace names are found by name, as in the material
-stage, so under `[ray_tracing]` don't give them to anything of the pack's own. One part comes in a later step: `[material]` can't read kept
-resources.
+stage, so under `[ray_tracing]` don't give them to anything of the pack's own.
+
+`[material] reads` lists the kept resources the terrain reads, as a pass's `reads` does: `x` for this frame's version
+of a texture a `[[before_world]]` pass writes (it runs before the world draws, so the terrain sees what it wrote this
+frame), `x_previous` for last frame's, and a buffer as it is. A `[[post]]` pass writes after the terrain draws, so
+for a texture only it writes, the terrain reads `x_previous`: the check refuses `x`. The material writes none, and
+only `material`'s fragments read them: `displacement` and the `[vertex]` file also draw the shadow map, which gets
+no kept resources, so the check refuses them there. On a frame that clears a resource the terrain reads zeros, or
+what a `[[before_world]]` pass wrote since.
+
+`[entity] reads` and `[sky] reads` work the same way, so mobs, block entities and the sky can use the light the
+terrain gets. The entities and the sky draw after `[[before_world]]` and before `[[post]]`, as the terrain does, and
+read the same versions. Only their fragments read them: the shadow map's entities are Horizon's own draw, with no
+kept resources.
+
+```toml
+[[before_world]]
+file = "light_cache.wgsl"
+dispatch = [65536, 1, 1]
+workgroup = [64, 1, 1]
+writes = ["cache"]
+
+[material]
+file = "material.wgsl"
+reads = ["cache", "trail_previous"]
+
+[entity]
+file = "entity.wgsl"
+reads = ["cache"]
+```
 
 ## Options
 
@@ -448,6 +486,12 @@ open, each pass is timed on the GPU and the overlay shows the pack's total and i
 stage draws in a pass of its own (it shares the world's pass otherwise), so its time includes clearing the picture. The
 material stage runs inside terrain's own draws, so it has no time of its own: compare the frame's GPU time with and
 without the pack.
+
+With F3 shut, offscreen or from a script, `horizon-ctl gpu-passes on` times the same passes: `horizon-ctl bench 5`
+then replies with `shader_passes`, the pack's passes by the names F3 shows, beside `gpu_passes`, Horizon's own, and
+with `gpu`, the whole frame's percentiles (`gpu_ms`, every frame, with `bench 5 raw`; `gpu-passes off` stops it).
+`horizon-client --benchmark` records them as `shader_pass.<scene>.<pass>_ms`, and `horizon-ctl profile client start
+--gpu` into a capture (`horizon-perf query gpu`).
 
 ## Next
 

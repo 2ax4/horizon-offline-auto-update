@@ -151,7 +151,7 @@ pub struct Pack<'a> {
     pub mods: &'a dyn Fn(&str) -> bool,
 }
 
-/// Vanilla blocks by their sorted property names.
+/// Vanilla blocks by their sorted property names, under their 26.3 ids.
 const TEMPLATES: &[(&str, &str)] = &[
     ("", "minecraft:stone"),
     ("axis", "minecraft:oak_log"),
@@ -174,7 +174,7 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("facing", "minecraft:carved_pumpkin"),
     ("facing,lit", "minecraft:furnace"),
     ("lit", "minecraft:redstone_lamp"),
-    ("waterlogged", "minecraft:chain"),
+    ("waterlogged", "minecraft:iron_chain"),
     ("age", "minecraft:wheat"),
     ("distance,persistent,waterlogged", "minecraft:oak_leaves"),
     ("stage", "minecraft:oak_sapling"),
@@ -353,6 +353,15 @@ pub fn upgrade_recipe(recipe: &mut Value) -> bool {
 /// when copper chains came in). A data file naming the old id fails to load
 /// in 26.3: a recipe, a loot entry, a processor's block match.
 const RENAMED_IDS: [(&str, &str); 1] = [("minecraft:chain", "minecraft:iron_chain")];
+
+/// A 1.21.1 block or item id under its 26.3 name ([`RENAMED_IDS`]); other ids
+/// as they are.
+pub fn renamed_id(id: &str) -> &str {
+    RENAMED_IDS
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map_or(id, |(_, new)| new)
+}
 
 /// Every string of a data file that is a renamed id ([`RENAMED_IDS`]) set to
 /// the new one, in place; whether any was.
@@ -783,7 +792,7 @@ const NOT_CLAIMED: [&str; 6] = ["minecraft", "c", "horizon", "forge", "neoforge"
 /// and the namespaces already claimed) name ids in it, and no mod of the
 /// pack (`pack_mod`) has it as its id.
 fn extra_namespaces(
-    zip: &mut zip::ZipArchive<fs::File>,
+    zip: &mut crate::zip_intake::Archive<fs::File>,
     id: &str,
     pack_mod: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
@@ -859,7 +868,7 @@ pub fn namespaces_claimed(
     pack_mod: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<String>, String> {
     let file = fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let mut zip = crate::zip_intake::open(file).map_err(|e| format!("{}: {e}", jar.display()))?;
     Ok(extra_namespaces(&mut zip, id, pack_mod))
 }
 
@@ -872,7 +881,12 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// file that does not parse); Horizon's content loader refuses the whole
 /// set, so they stay out of the carry.
 fn unreadable(name: &str, bytes: &mut Vec<u8>) -> Option<String> {
-    if let Err(e) = horizon_mods::content::check_path(name) {
+    if let Err(e) = horizon_mod_package::content::check_path(name) {
+        return Some(e);
+    }
+    // A mod's helper script among its assets (a `#!` shell script that
+    // generated its textures) would have the game refuse the whole mod.
+    if let Err(e) = horizon_mod_package::content::check_bytes(name, bytes) {
         return Some(e);
     }
     if !(name.ends_with(".json") || name.ends_with(".mcmeta")) {
@@ -895,7 +909,7 @@ fn unreadable(name: &str, bytes: &mut Vec<u8>) -> Option<String> {
         },
     };
     // A vanilla or convention tag that replaces is kept: the game honours it
-    // as a data pack's, with a warning (docs/mods.md). A tag of the mod's own
+    // as a data pack's, with a warning (docs/modding/src/how-to/content-mods.md). A tag of the mod's own
     // that replaces: no pack before it defines the tag, so it is the same tag
     // added to (Towns and Towers' biome tags).
     let shared_tag = name.starts_with("data/minecraft/tags/") || name.starts_with("data/c/tags/");
@@ -995,7 +1009,7 @@ pub fn carry(
         ));
     }
     let file = fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let mut zip = crate::zip_intake::open(file).map_err(|e| format!("{}: {e}", jar.display()))?;
     // The previous harness verdict describes the content we are about to replace.
     let verdict = out.join("harness/result.json");
     if let Err(e) = fs::remove_file(&verdict)
@@ -1471,9 +1485,15 @@ pub fn carry(
     } else {
         for (b, state) in &blockstates {
             match block_template(b, state) {
-                Some(t) => {
+                Some(t) if allowed(t) => {
                     write_decl("block", b, &json!({"template": t}))?;
                     report.blocks.insert(b.clone(), t.to_owned());
+                }
+                // A declaration naming a block the game lacks fails the whole
+                // content root at start.
+                Some(t) => {
+                    let why = format!("template {t} is not one of the game's blocks");
+                    report.blocks_unknown.insert(b.clone(), why);
                 }
                 None => {
                     let props: Vec<String> = properties(state).into_iter().collect();
@@ -2419,6 +2439,72 @@ mod tests {
         assert_eq!(block_template("gem_vine", &vine), Some("minecraft:vine"));
         let odd = json!({"variants": {"charge=1,mode=fast": {}}});
         assert_eq!(template("gem_core", &properties(&odd)), None);
+        // 26.3 calls 1.21.1's chain the iron chain; `minecraft:chain` is no block.
+        let chain = json!({"variants": {"waterlogged=false": {}}});
+        assert_eq!(
+            template("gem_track", &properties(&chain)),
+            Some("minecraft:iron_chain")
+        );
+    }
+
+    /// What the game would refuse in a content mod stays out of the carry, so
+    /// the rest of the mod loads: a helper script among the assets, and a block
+    /// whose template the game doesn't have.
+    #[test]
+    fn content_the_game_refuses_stays_out() {
+        let dir = temp_dir("refused");
+        let jar = dir.join("refused.jar");
+        write_jar(
+            &jar,
+            &[
+                (
+                    "assets/example/blockstates/track.json",
+                    br#"{"variants":{"waterlogged=false":{"model":"example:block/track"}}}"#,
+                ),
+                (
+                    "assets/example/blockstates/stone.json",
+                    br#"{"variants":{"":{"model":"example:block/stone"}}}"#,
+                ),
+                (
+                    "assets/example/textures/block/generate_colors.sh",
+                    b"#!/bin/sh\nmagick convert a.png b.png\n",
+                ),
+                ("assets/example/textures/block/stone.png", b"png"),
+            ],
+        );
+        let out = dir.join("work/mods/example");
+        let info = crate::jar::JarInfo {
+            mod_id: "example".into(),
+            ..Default::default()
+        };
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+        };
+        let game_has = |b: &str| b != "minecraft:iron_chain";
+        let report = carry(&jar, &info, &out, None, &game_has, &pack, &BTreeMap::new()).unwrap();
+        let script = "assets/example/textures/block/generate_colors.sh";
+        assert!(
+            report.unreadable[script].contains("executable"),
+            "{:?}",
+            report.unreadable
+        );
+        assert!(!out.join("carry").join(script).exists());
+        assert!(
+            out.join("carry/assets/example/textures/block/stone.png")
+                .exists()
+        );
+        assert_eq!(report.blocks["stone"], "minecraft:stone");
+        assert!(
+            report.blocks_unknown["track"].contains("minecraft:iron_chain"),
+            "{:?}",
+            report.blocks_unknown
+        );
+        assert!(
+            !out.join("carry/data/example/horizon/block/track.json")
+                .exists()
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A small NeoForge jar carried over is a content mod Horizon loads.
@@ -2590,8 +2676,8 @@ mod tests {
         );
 
         // Horizon's own reader accepts it: blocks and items declared, files fenced.
-        let package = horizon_mods::Package::read(&carried).unwrap();
-        let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
+        let package = horizon_mod_package::Package::read(&carried).unwrap();
+        let content = horizon_mod_package::Content::read(&carried, &package.manifest).unwrap();
         let blocks: Vec<&str> = content.blocks.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(blocks, ["gem:gem_block", "gem:gem_door"]);
         assert_eq!(content.items.len(), 1);
@@ -2724,9 +2810,9 @@ mod tests {
         // No block is declared from another namespace's blockstate.
         assert!(report.blocks.is_empty());
         let carried = out.join("carry");
-        let package = horizon_mods::Package::read(&carried).unwrap();
+        let package = horizon_mod_package::Package::read(&carried).unwrap();
         assert_eq!(package.manifest.namespaces, ["kaisyn", "towers_wg"]);
-        let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
+        let content = horizon_mod_package::Content::read(&carried, &package.manifest).unwrap();
         assert!(
             content
                 .files
@@ -2824,8 +2910,8 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// NeoForge loads a recipe only when its `neoforge:conditions` pass. The oracle's recipes are the ones
-    /// that did: those are upgraded like any vanilla recipe, the others stay outside, as NeoForge left them out.
+    /// The oracle's recipes that passed `neoforge:conditions` are upgraded like any vanilla recipe;
+    /// recipes absent from the oracle stay outside.
     #[test]
     fn conditional_recipes_are_the_ones_neoforge_loaded() {
         let dir = std::env::temp_dir().join(format!(
@@ -2962,14 +3048,14 @@ mod tests {
             ["lost_seeds"]
         );
         let carried = out.join("carry");
-        let package = horizon_mods::Package::read(&carried).unwrap();
-        let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
+        let package = horizon_mod_package::Package::read(&carried).unwrap();
+        let content = horizon_mod_package::Content::read(&carried, &package.manifest).unwrap();
         let item = content
             .items
             .iter()
             .find(|i| i.id == "gem:cabbage_seeds")
             .unwrap();
-        assert_eq!(item.place_block.as_deref(), Some("gem:cabbages"));
+        assert_eq!(item.block.as_deref(), Some("gem:cabbages"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

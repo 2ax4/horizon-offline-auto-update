@@ -625,7 +625,7 @@ impl Screen for ControllerScreen {
         let Item::Bind(action) = item else {
             return Vec::new();
         };
-        s.controller.bind(action, PadSettings::default_of(action));
+        s.controller.reset_binding(action);
         vec![Output::Event(Event::Changed)]
     }
     /// Whose profile these settings are, and the controller the game sees.
@@ -683,24 +683,35 @@ mod tests {
         ui.key(s, key, None, false, SIZE)
     }
     fn atlas() -> HudAtlas {
-        HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap()
+        HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+            "/nonexistent/horizon-test-assets".into(),
+        ))
+        .unwrap()
     }
     /// Draw a frame, as the options screen does with what it waits on, and the frame's widgets.
     fn draw(ui: &mut Ui, s: &Settings, waiting: Option<Capture>) -> HudBatch {
         let atlas = atlas();
-        let mut batch = HudBatch::new(WINDOW);
+        let mut batch = HudBatch::scratch(WINDOW);
         assert_eq!((batch.width, batch.height), SIZE);
-        ui.draw(s, &mut batch, &atlas, (0.0, 0.0), false, waiting);
+        ui.draw_test_frame(
+            s,
+            &mut batch,
+            &atlas,
+            (0.0, 0.0),
+            false,
+            waiting,
+            &mut |_, _| {},
+        );
         crate::widgets::end_frame(crate::widgets::generation() + 1);
         batch
     }
     /// What the strip says now.
     fn strip(ui: &mut Ui, s: &Settings, waiting: Option<Capture>, over: Item) -> Option<String> {
         let atlas = atlas();
-        let mut batch = HudBatch::new(WINDOW);
+        let mut batch = HudBatch::scratch(WINDOW);
         assert_eq!((batch.width, batch.height), SIZE);
         let at = ui.point_at(s, SIZE, over);
-        ui.draw(s, &mut batch, &atlas, at, false, waiting);
+        ui.draw_test_frame(s, &mut batch, &atlas, at, false, waiting, &mut |_, _| {});
         crate::widgets::end_frame(crate::widgets::generation() + 1);
         let dock = Columns::of(SIZE.0, SIZE.1).dock;
         let labelled = crate::widgets::last_labelled();
@@ -1025,6 +1036,44 @@ mod tests {
         let outputs = ui.click(&mut s, on_reset, SIZE, false, false, false);
         assert_eq!(outputs, [CLICK, CHANGED]);
         assert!(s.controller.is_default(JUMP));
+    }
+
+    #[test]
+    fn the_radial_reset_restores_the_current_sticks_valid_default() {
+        use gamepad::{RADIAL, RadialMode, RadialStick};
+        for stick in RadialStick::ALL {
+            let mut s = Settings::default();
+            s.controller.set_radial_stick(stick);
+            s.controller.radial_mode = RadialMode::Toggle;
+            s.controller.bind(RADIAL, Some(Button::LeftBumper));
+            s.controller.bind(JUMP, Some(Button::North));
+            let before = s.controller.clone();
+            let mut ui = ui(Page::Bindings);
+            let item = Item::Bind(RADIAL);
+            let (_, y) = ui.point_at(&s, SIZE, item);
+            let cols = Columns::of(SIZE.0, SIZE.1);
+            let on_reset = (cols.list_x + cols.list_w - 10.0, y);
+            assert_eq!(
+                ui.click(&mut s, on_reset, SIZE, false, false, false),
+                [CLICK, CHANGED]
+            );
+            let expected = (stick == RadialStick::Right).then_some(Button::DPadRight);
+            assert_eq!(s.controller.binding(RADIAL), expected, "{stick:?}");
+            assert!(matches!(
+                binding(RADIAL, &s.controller, ui.screen.context.glyphs).reset,
+                Reset::Default
+            ));
+            assert_eq!(s.controller.binding(JUMP), Some(Button::North));
+            assert_eq!(s.controller.radial_stick, stick);
+            assert_eq!(s.controller.radial_mode, before.radial_mode);
+            assert_eq!(s.controller.radial, before.radial);
+            assert_eq!(PadSettings::parse(&s.controller.serialize()), s.controller);
+            // Once reset, the same location is a binding row, not a working reset.
+            assert_eq!(
+                ui.click(&mut s, on_reset, SIZE, false, false, false),
+                [CLICK, Output::Bind(Capture::Pad(RADIAL))]
+            );
+        }
     }
 
     #[test]

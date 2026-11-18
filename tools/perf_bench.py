@@ -175,8 +175,10 @@ def frames(phase, repeat, frame_ms, cpu_ms=(), gpu_ms=()):
         "p999_ms": rnd(pct(times, 0.999)), "max_ms": rnd(times[-1]),
     }
     for key, values in (("cpu_p50_ms", cpu_ms), ("gpu_p50_ms", gpu_ms)):
-        if values:
-            entry[key] = rnd(pct(sorted(values), 0.5))
+        # horizon_bench::Frames::of filters all three series; a non-finite sample would poison the report's JSON.
+        finite = sorted(value for value in values if math.isfinite(value))
+        if finite:
+            entry[key] = rnd(pct(finite, 0.5))
     entry["histogram"] = histogram
     return entry
 
@@ -538,7 +540,7 @@ class LocalServer:
     def __enter__(self):
         self.log_path = self.dir / "server.log"
         self.log = self.log_path.open("w")
-        env = lab.game_env(HORIZON_TELEMETRY_URL="off") if self.kind == "horizon" else None
+        env = lab.game_env() if self.kind == "horizon" else None
         self.proc = subprocess.Popen(self.command, cwd=self.dir, env=env, stdin=subprocess.PIPE, text=True,
                                      stdout=self.log, stderr=subprocess.STDOUT)
         deadline = time.time() + 600
@@ -610,8 +612,7 @@ def run_horizon(args, distance):
         command.append("--offscreen")
     for carry in dev_mods(args):
         command += ["--dev-mod", str(carry)]
-    # Benchmark runs stay out of the live count and send nothing (docs/telemetry.md).
-    env = lab.game_env(HORIZON_TELEMETRY_URL="off")
+    env = lab.game_env()
     if args.warm:
         # A first start to the title screen builds what later starts reuse (the content-mod
         # root, the block behaviour snapshot). It is not measured: players see it once.

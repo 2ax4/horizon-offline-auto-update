@@ -12,6 +12,10 @@ complete vanilla-like game. The Horizon layer moves to its own repository, publi
 ships with every official launcher download (see [The Horizon layer in its own repository](#the-horizon-layer-in-its-own-repository)).
 The split comes first, inside this repository, one checked step at a time. The repositories separate after that.
 
+Both checks below run in CI's verify job and in `tools/pr_ready.py`, against the baseline: the explicit
+rows and reasons in `tools/layers.json` and `tools/addresses.json`, which cover the split mod crates and the separate
+launcher, registry and telemetry-server workspaces. No engine/API refactor is implied by importing these tools.
+
 This page says:
 
 - what belongs to each layer and which layer may depend on which;
@@ -30,7 +34,7 @@ Credits:
   ("3-layer split: engine / platform / Horizon", #contributors, 2026-11-08), the portable crates (#12997, #13002),
   and the review that made the Horizon layer linked crates rather than native mods.
 - **arismoko:** the mod API owns its types and a CI property check keeps engine types out of it
-  ([arismoko/horizon](https://github.com/arismoko/horizon), arismoko/horizon#1608). Also the idea of shipping
+  (arismoko/horizon#1608). Also the idea of shipping
   Horizon's own parts from another repository as a launcher plugin.
 - **Martipops** (controllers, splitscreen): the compositor's place in the engine, and where controllers,
   splitscreen, Replay Studio, PvP & HUD and a UI page API go.
@@ -76,12 +80,16 @@ Vanilla Minecraft: Java Edition 26.3, and nothing else.
 ### Portable crates
 
 `horizon-core`, `horizon-world`, `horizon-protocol`, `horizon-items`, `horizon-command`, `horizon-client-core`
-and `horizon-assets` hold vanilla's rules and data with no desktop in them: no window, GPU, sound, gamepad or
-clipboard library, no HTTP client, and no engine crate outside this list. The platform sits on the desktop engine
+and `horizon-assets` hold vanilla's rules and data with no desktop in them. `horizon-threads` and
+`horizon-guest-stack` provide the desktop-free execution plumbing: worker scheduling, sampling and stack
+reservations, and `horizon-java-properties` reads and writes Java-properties files with the standard library alone. These portable crates have no window, GPU, sound, gamepad or clipboard library, no HTTP client,
+and no engine crate outside the portable list. The platform sits on the desktop engine
 (`wgpu`, `winit`, `cpal`), which a handheld console or a browser can't run, so a port there builds on these crates
 instead. They stay that way: the layer check fails when one takes `winit`, `wgpu`, `cpal`, `gilrs`, `arboard` or
 `ureq`, or an engine crate outside the list (#13002). Gameplay itself still lives in `horizon-client`; step P of
-the [plan](#plan) moves it here over time.
+the [plan](#plan) moves it into `horizon-gameplay` (what the server jar holds) and `horizon-client-gameplay`
+(client only) over time. `horizon-gameplay` is not on the list yet: `portable.pending` in `tools/layers.json`
+lets it take `horizon-client-lib` until the types it needs move down, and only ever shrinks.
 
 ## Platform
 
@@ -96,7 +104,7 @@ public API that mods, desktop-class ports and the Horizon layer build on.
   hooks and so on become public API with stable types (arismoko/horizon#1608's patterns). Then a mod, a port or a
   Horizon feature builds on them instead of editing or copying engine code.
 - **Examples:** `horizon-shader-api`, `horizon-shaders`, `horizon-optifine` (`cem/`), `horizon-polytone`,
-  `horizon-hdr`, `horizon-dualsense`, `horizon-mods`, `cargo-horizon-mod`, `horizon-anticheat`, `horizon-mcp`,
+  `horizon-hdr`, `horizon-dualsense`, `horizon-mods`, `horizon-anticheat`, `horizon-mcp`,
   `horizon-theme`. Still in engine crates today: `game/mod_api_host.rs`, `game/native_*.rs`, `shader_ui.rs`,
   `hdr_calibration.rs`.
 - **Never:** a built-in address (every address comes from the player, a file or a setting), anything that names
@@ -165,8 +173,10 @@ Horizon's own extras and its product, and every built-in address of an outside s
 
 ## Tools
 
-Developer tools that no player runs: `xtask`, `horizon-bots`, `horizon-mod-api-gen-tests`, and the Python in
-`tools/`. They may depend on anything, and no shipped crate depends on them.
+Developer tools that no player runs: `xtask`, `horizon-bots`, `horizon-mod-api-gen-tests`, `horizon-mod-wasm-wire-loopback`, and the Python in
+`tools/`. They may depend on anything, and no shipped crate depends on them. `cargo-horizon-mod`, the mod author's
+tool, is one: it fetches and checks Horizon's signed mod SDK, so it reads `horizon-addresses` and
+`horizon-release-sign` beside the engine's mod crates.
 
 ## Where a new feature goes
 
@@ -181,13 +191,25 @@ The rule, in order (duckybertduck's):
 A feature often splits along this rule: the part others build on is platform, and the finished feature on top of it
 is Horizon (PvP & HUD and replays, [above](#controllers-splitscreen-replays-and-ui-pages)).
 
+The mod interface follows that split too: `horizon-mod-vocab` is an engine crate, while
+`horizon-mod-api` preserves the mod-facing paths through re-exports. The build-time generator,
+procedural macros and point-shape parser are engine dependencies of that interface. Horizon's launcher
+reaches the generator and point-shape parser through `horizon-platform`'s optional `mod-build` feature.
+The launcher and registry also reach the engine's shared mod package formats through
+`horizon_platform::mod_package`. The optional `mod-index`, `mod-prebuilt` and `mod-runtime-process`
+features enable registry validation, SDK archives and native process leases respectively; native
+loading and package validation keep the same implementations as the game.
+The initial extraction also carries dispatch's crash markers, profiling, resource codec, phase access,
+and Parts registration state; it is not yet a stateless or unsafe-free interface ([arismoko/horizon#2587](https://github.com/arismoko/horizon/issues/2587)).
+
 | I add... | Layer | Where |
 |---|---|---|
 | A vanilla behaviour, block, mob, packet, command or screen | engine | the crate that owns the area ([CLAUDE.md](../CLAUDE.md) crate table) |
 | A speed-up that keeps vanilla's results | engine | next to the code it speeds up |
 | A call to a Mojang or Microsoft service vanilla makes | engine | `auth.rs`, `realms/`, `skins.rs`, `horizon-server-files` |
 | A place mods, ports or Horizon can hook into | engine + platform | an extension point in the engine crate, naming no type from above; its public face in the platform |
-| A mod hook, host method or mod format | platform | `horizon-mods`, the mod API (today: `game/mod_api_host.rs`, `game/native_*.rs`) |
+| A mod hook or host interface | engine + platform | `horizon-mod-vocab` owns the engine vocabulary and dispatch; `horizon-mod-api` re-exports it for mods and owns guest transport |
+| A mod package format | engine + platform | shared engine data in `horizon-mod-package`, exposed to products by `horizon-platform` |
 | A shader or resource pack format vanilla doesn't read | platform | `horizon-shaders`, `horizon-optifine`, `horizon-polytone`, or a new platform crate |
 | A dedicated server option (anticheat, chat filter) | platform | `horizon-anticheat`, `horizon-chat-filter` |
 | Controller support: a device, bindings, glyphs, pad menus | platform | the pad modules, on the engine's input hooks ([Controllers](#controllers-splitscreen-replays-and-ui-pages)) |
@@ -556,32 +578,38 @@ controllers and replay recording are not extras: they are platform ([above](#con
 
 ## The checks
 
-- `python3 tools/check_layers.py` (#12983) reads the workspaces' `cargo metadata` (no build, about a second) and
-  `tools/layers.json`, which gives every crate its layer and each layer what it may use. It fails on:
-  - a crate with no layer;
-  - a dependency its layer may not use that `allowed` doesn't list;
-  - a branch adding an `allowed` entry for a crate that already had a layer (a crate newly split out of another
-    may carry the old crate's exceptions);
-  - shipped code depending on a tool.
+`python3 tools/check_layers.py` runs in CI's verify job and in `tools/pr_ready.py`. It reads the `cargo metadata` of the
+four workspaces `tools/layers.json` lists (the game, `launcher/`, `crates/horizon-mod-registry/` and
+`crates/horizon-telemetry-server/`; no build, about a second) and [`tools/layers.json`](../tools/layers.json), which
+gives every crate its layer. It fails when:
 
-  Each failure names the section of this page that applies. An `allowed` entry with no dependency left is only a
-  note.
-- `python3 tools/check_addresses.py` (#12990) checks the built-in addresses ([below](#built-in-addresses)).
+- a crate has no layer;
+- a dependency goes up a layer and neither `allowed` lists it nor `optional` lists it as an optional dependency;
+- an `optional` entry's dependency is no longer optional (one mandatory declaration, for any target or as a build
+  dependency, is enough);
+- a pull request adds an entry to `allowed` or `optional` for a crate that already had a layer (a crate newly split
+  out of another may carry the old crate's exceptions, and an `allowed` entry may move to `optional`);
+- shipped code depends on a tool;
+- a `portable.pending` crate depends on anything beyond its entry, or a pull request adds to an entry.
 
-Both run in CI's verify job and in `tools/pr_ready.py`.
+Each failure names the section of this page that applies. An `allowed` or `optional` entry that has no dependency
+left is only reported: take it out when you like. `--list` prints every crate's layer and the upward dependencies
+left.
+
+`python3 tools/check_addresses.py` (horizon-rust/horizon#12990) checks the built-in addresses
+([below](#built-in-addresses)); it runs in CI's verify job and in `tools/pr_ready.py` too.
 
 ### Today's exceptions
 
-30, the `allowed` list in `tools/layers.json` on main at a89f338 (2026-11-11). That file is the source of truth:
-`python3 tools/check_layers.py` prints the current count and `--list` prints each exception.
+The current dependency inventory is in `tools/layers.json`, with fork-specific classifications and reasons in
+`_fork_baselines`. It records existing fork dependencies and the restored upstream Horizon layer dependencies. The separate launcher and registry workspaces take two engine crates: `horizon-mod-package` (the launcher's
+package, modpack and index reads; the registry's index format) and `horizon-system` (the launcher's bug reports).
+Those three edges are `allowed` rows like the launcher's other engine dependencies.
 
-| Crate | Uses, against the rule |
-|---|---|
-| `horizon-client` | platform: `horizon-anticheat`, `-chat-filter`, `-dualsense`, `-hdr`, `-mod-api-gen`, `-mods`, `-optifine`, `-shader-api`, `-shaders`, `-theme`; Horizon: `horizon-cosmetics`, `-friends`, `-telemetry` |
-| `horizon-client-lib` | platform: `horizon-anticheat`, `-hdr`, `-mcp`, `-mods`, `-optifine`, `-shader-api`, `-shaders`; Horizon: `horizon-telemetry` |
-| `horizon-client-render` | platform: `horizon-hdr`, `-optifine`, `-polytone`, `-shader-api`, `-shaders` |
-
-No platform crate depends on Horizon.
+`horizon-mod-package`'s registry index validates shader packages with `horizon-shader-api`, behind the optional
+`index` feature (the portable crates take `horizon-mod-package` without it). That edge is the one `optional` row:
+it excuses the layer check and the portable check only while the dependency stays optional, so making it mandatory
+fails both.
 
 ## Built-in addresses
 
@@ -590,8 +618,9 @@ endpoints. Every other built-in address belongs to the Horizon layer, in one lis
 `crates/horizon-addresses/src/lib.rs` (#12993). The game's Horizon crates and the launcher read it, and it moves
 with the Horizon layer. Platform code gets its addresses passed in.
 
-`tools/check_addresses.py` reads the string literals of shipped Rust and finds every host. It skips tests,
-placeholders (`example.com`, `*.test`) and local IPs. `tools/addresses.json` says where each host may be:
+`tools/check_addresses.py` runs in CI's verify job and in `tools/pr_ready.py`. It reads the string literals of shipped
+Rust and finds every host. It skips tests, placeholders (`example.com`, `*.test`) and local IPs.
+`tools/addresses.json` says where each host may be:
 
 - `homes`: the list file;
 - `vanilla`: vanilla's endpoints, allowed anywhere;
@@ -657,7 +686,6 @@ mechanical steps (checks, M1–M4) continue meanwhile. M5 and M6 started on 2026
 | 1 | This page, first version | | #12979, merged |
 | 2 | Layer check in CI and pr_ready, with the PR template's checklist | | #12983, merged |
 | 3 | Address check in CI and pr_ready | | #12990, merged |
-| 4 | File-size check in CI and pr_ready | | #13015, merged |
 | 2b | The portable crates' rule in the layer check ([Portable crates](#portable-crates)) | | #13002 (NikitaMGrimm), merged |
 | M1 | `horizon-addresses`, the address list file; the Horizon crates read it | 7 address entries | #12993, merged |
 | M2 | `horizon-system` (engine): the hardware probes leave `horizon-telemetry`, and the crash report and GPU info read them there; `horizon-platform`, the platform's public API, re-exports them for the Horizon layer | prepares M3 | #13058, merged |
@@ -665,13 +693,26 @@ mechanical steps (checks, M1–M4) continue meanwhile. M5 and M6 started on 2026
 | M4 | Cosmetics leave `horizon-client-render`: the tab list's mark through a name-decoration callback (#13094); the settings lines leave with `extras.rs` and `extras_ui.rs` in M5, as clients of the UI page API | render → cosmetics | #13094, merged; the rest in M5 |
 | M5 | Horizon's in-game parts (extras, cosmetics, emotes, Discord, Friends, ping, benchmark upload, official server) leave `horizon-client` for Horizon crates linked into the official build through platform hooks | client, client-lib → cosmetics, friends, telemetry, bench | started 2026-11-09 |
 | M6 | The engine crates stop depending on platform crates: the renderer's shader-pack, pack-format, HDR and theme code moves behind engine extension points; the mod host and agent control move to platform crates; controllers, splitscreen, replay recording and the UI page API move to platform crates on the engine's input-source, compositor and screen hooks; the launcher and `horizon-server` reach the engine through platform API (done, #13905) | the engine → platform and Horizon → engine exceptions | started 2026-11-09; HDR's part with NikitaMGrimm, below |
-| P | Optional, longer: gameplay into the portable crates. `Game` holds the world and its presentation (renderer, screens, particles, sound): split its state module by module, turn gameplay's direct particle and sound calls into level events as vanilla's server sends them, then move each clean module into a portable crate | | any time, small PRs |
+| P | Optional, longer: gameplay into the portable crates. `Game` holds the world and its presentation (renderer, screens, particles, sound): split its state module by module, turn gameplay's direct particle and sound calls into level events as vanilla's server sends them, then move each clean module into `horizon-gameplay` (server side) or `horizon-client-gameplay` (client only) | | any time, small PRs |
 | R | The Horizon layer moves to its own repository and ships in every official download (the table above) | | after the split, Ludovic's call |
 
 HDR in M6: moving HDR behind engine extension points moves the frame pipeline (float targets, tone mapping,
 present). NikitaMGrimm leads HDR, so that part is planned with them and comes after HDR's step 5 (float targets on
 by default), so the pipeline moves once. HDR off stays bit-exact.
 
-The mod API work on arismoko/horizon lands upstream as part of the platform. The API owns its types,
+The mod API is part of the platform. The API owns its types,
 `horizon-mod-runtime` gets no game dependency, and its CI property check stays as a stricter check inside the
 platform.
+
+The portable engine crate `horizon-engine-slots` owns the final registration seal socket
+and the generated point records, their copy-in constructors, typed dispatchers and activity table.
+The host installs its seal provider before engine startup and registers native API listeners
+after dependency ordering and installation. At sealing, `horizon-mod-points` installs the
+set-once dispatch provider before publishing activity flags. Ordering, owner guards,
+replacement authority and listener dispatch remain in the platform registry. Staged point
+sites name only engine-owned paths; staging does not inject point dependencies into engine manifests.
+The seal refuses repeat or re-entrant sealing and late provider installation.
+
+Engine crates import `horizon-mod-vocab` as `mod_api`. Their test-only
+`mod_platform` dependency reaches `horizon-mod-api`; dev-dependencies are exempt
+from the layer rule because tests may exercise the platform, while shipped code may not.

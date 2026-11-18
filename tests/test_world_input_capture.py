@@ -45,8 +45,10 @@ def function(source, name):
 class WorldInputCaptureTests(unittest.TestCase):
     def test_loading_completion_wiring(self):
         game = "".join((ROOT / "crates/horizon-client/src" / path).read_text(encoding="utf-8")
-                       for path in ("game/player_spawn.rs", "game/window_handler.rs", "game.rs"))
-        remote = (ROOT / "crates/horizon-client/src/game/remote.rs").read_text(encoding="utf-8")
+                       for path in ("game/world/player_spawn.rs", "game/runtime/window_handler.rs", "game.rs"))
+        remote_dir = next(ROOT.glob('crates/horizon-client/src/game/*/remote'))
+        remote = (remote_dir / "mod.rs").read_text(encoding="utf-8")
+        level_tick = (remote_dir / "client_level_tick.rs").read_text(encoding="utf-8")
         spawn = method(game, "spawn_player")
         self.assertLess(spawn.index("self.player = Some(player)"),
                         spawn.index("self.capture_loaded_world()"))
@@ -55,14 +57,18 @@ class WorldInputCaptureTests(unittest.TestCase):
         ready = remote[remote.index("    fn tick_client_load("):]
         self.assertLess(ready.index("r.loaded_sent = true"),
                         ready.index("self.capture_loaded_world()"))
-        level = remote[remote.index("    fn tick_remote_level("):]
+        level_fn = level_tick[level_tick.index("    pub(in crate::game) fn tick_remote_level("):]
+        self.assertIn("self.tick_remote_player(running, hold)", level_fn)
+        level = method(remote, "tick_remote_player")
         self.assertLess(level.index("self.tick_client_load()"),
-                        level.index("let stick = self.input_move()"))
+                        level.index("self.tick_local_player("))
+        # The extracted local-player pass owns the movement input now.
+        self.assertIn("let stick = self.pad_move()", method(remote, "tick_local_player"))
 
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_capture_lifecycle(self):
         source = "".join((ROOT / "crates/horizon-client/src" / path).read_text(encoding="utf-8")
-                         for path in ("game.rs", "game/pointer_capture.rs"))
+                         for path in ("game.rs", "game/interface/pointer_capture.rs"))
         mouse = (ROOT / "crates/horizon-client-input/src/mouse.rs").read_text(encoding="utf-8")
         fixture = r'''
 use std::cell::Cell;
@@ -83,7 +89,10 @@ mod winit {
 }
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 struct HudBatch { scale: f32 }
-impl HudBatch { fn new(_size: [u32; 2]) -> Self { Self { scale: 2.0 } } }
+struct GuiScale;
+struct Settings;
+impl Settings { fn gui_scale_inputs(&self) -> GuiScale { GuiScale } }
+impl HudBatch { fn new(_size: [u32; 2], _inputs: GuiScale) -> Self { Self { scale: 2.0 } } }
 struct Config { width: u32, height: u32 }
 struct Renderer { config: Config }
 #[derive(Default)]
@@ -137,19 +146,20 @@ struct Game {
     remote: Option<Remote>,
     studio: Studio, replay: Replay,
     mining: bool, lan_acting: Option<u32>, renderer: Option<Renderer>, cursor: (f32, f32),
-    server_packs: ServerPacks, command_prompt: Option<()>, options: Options,
+    server_packs: ServerPacks, command_prompt: Option<()>, options: Options, settings: Settings,
     unclaimed_window: bool, scripted: bool, focus_after_run: Option<bool>, applied_focus: Vec<bool>,
     unclaimed_modifiers: Option<u8>, applied_modifiers: Vec<u8>,
 }
 impl Default for Game {
     fn default() -> Self {
-        Self { focused: true, agent_pointer: false, window: Some(Window::default()),
+        Self { focused: true, agent_pointer: false,
+            window: Some(Window { focus: Cell::new(true), ..Window::default() }),
             keyboard_mouse: true, split_window: false, view_at: [0, 0],
             mouse: Mouse::default(), captured: false, capture_mode: None, regrab_on_refocus: false, title: None,
             screen: Screen::Playing, remote: None, studio: Studio::default(), replay: Replay::default(),
             mining: false, lan_acting: None,
             renderer: None, cursor: (0.0, 0.0), server_packs: ServerPacks::default(),
-            command_prompt: None, options: Options::default(),
+            command_prompt: None, options: Options::default(), settings: Settings,
             unclaimed_window: false, scripted: false, focus_after_run: None, applied_focus: Vec::new(),
             unclaimed_modifiers: None, applied_modifiers: Vec::new() }
     }
@@ -177,6 +187,53 @@ impl Game {
 METHODS
 }
 fn main() {
+    // A direct grab while the title screen is open leaves the native pointer alone.
+    {
+        let mut game = Game::default();
+        game.title = Some(());
+        game.window.as_ref().unwrap().visible.set(true);
+        game.capture(true);
+        assert!(!game.captured);
+        let window = game.window.as_ref().unwrap();
+        assert_eq!((window.grabs.get(), window.warps.get()), (0, 0));
+        assert!(window.visible.get());
+    }
+    // The game can still capture logically on the title screen in internal runs.
+    for (offscreen, unclaimed, scripted) in [
+        (true, false, false), (false, true, false), (false, false, true),
+    ] {
+        let mut game = Game::default();
+        game.title = Some(());
+        game.options.offscreen = offscreen;
+        game.unclaimed_window = unclaimed;
+        game.scripted = scripted;
+        game.agent_pointer = true;
+        let window = game.window.as_ref().unwrap();
+        window.focus.set(false);
+        window.visible.set(true);
+        game.capture(true);
+        assert!(game.captured);
+        assert!(game.mouse.ignore_first);
+        assert!(!game.agent_pointer);
+        assert!(game.capture_mode.is_none());
+        let window = game.window.as_ref().unwrap();
+        assert_eq!((window.grabs.get(), window.warps.get()), (0, 0));
+        assert!(window.visible.get());
+    }
+    // A window opened in the background has not sent a focus-loss event yet.
+    {
+        let mut game = Game::default();
+        game.window.as_ref().unwrap().focus.set(false);
+        game.window.as_ref().unwrap().visible.set(true);
+        game.capture(true);
+        assert!(!game.captured);
+        let window = game.window.as_ref().unwrap();
+        assert_eq!((window.grabs.get(), window.warps.get()), (0, 0));
+        assert!(window.visible.get());
+        window.focus.set(true);
+        game.capture(true);
+        assert!(game.captured);
+    }
     // The server pack prompt keeps the pointer: nothing grabs it while it is open.
     {
         let mut game = Game::default();
@@ -398,6 +455,7 @@ fn main() {
     {
         let mut game = Game::default();
         game.unclaimed_window = true;
+        game.window.as_ref().unwrap().focus.set(false);
         game.claim_window(&Loop);
         assert_eq!(game.applied_focus, vec![false]);
         game.capture(true);
@@ -518,7 +576,10 @@ fn main() {
         capture = method(source, "capture").replace(
             "horizon_client::mouse::mouse_position_after_grab_change",
             "mouse_position_after_grab_change")
-        fixture = fixture.replace("HELPER", function(mouse, "mouse_position_after_grab_change"))
+        grab_start = source.index("struct Grab {")
+        grab_helpers = source[grab_start:source.index("\n#[cfg(test)]", grab_start)]
+        fixture = fixture.replace("HELPER", function(mouse, "mouse_position_after_grab_change") +
+                                  "\n" + grab_helpers)
         fixture = fixture.replace("METHODS", capture + "\n" +
                                   method(source, "capture_loaded_world") + "\n" +
                                   method(source, "regrab_on_refocus") + "\n" +
@@ -538,7 +599,7 @@ fn main() {
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_native_split_mouse_turns_only_its_owner(self):
         source = "".join((ROOT / "crates/horizon-client/src" / path).read_text(encoding="utf-8")
-                         for path in ("game/window_handler.rs", "game.rs"))
+                          for path in ("game/runtime/window_handler.rs", "game.rs"))
         fixture = r'''
 use std::time::Instant;
 #[path = "MOUSE_PATH"] mod mouse;
@@ -610,7 +671,7 @@ fn main() {
 
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_split_layout_keeps_capture_in_the_same_window(self):
-        source = (ROOT / "crates/horizon-client/src/game/split/windows.rs").read_text(encoding="utf-8")
+        source = (next(ROOT.glob('crates/horizon-client/src/game/*/split/windows.rs'))).read_text(encoding="utf-8")
         body = function(source.replace("pub(super) fn", "pub fn"), "into_window").replace("Game<'_>", "Game")
         fixture = r'''
 use std::sync::Arc;

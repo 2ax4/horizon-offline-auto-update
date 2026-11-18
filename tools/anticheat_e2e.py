@@ -44,7 +44,7 @@ Checks:
 
 Each server runs in a fresh folder with fresh HORIZON_HOME and XDG folders (lab.game_env), on a free port,
 in a flat world (creative unless the check says otherwise: the bots fly). Build first:
-    cargo build --profile fast -p horizon-client -p horizon-client-lib --bin horizon-client --bin horizon-ctl
+    cargo build --profile fast -p horizon-game -p horizon-client-lib --bin horizon-client --bin horizon-ctl
     cargo build --profile fast -p horizon-bots
 """
 import argparse
@@ -58,7 +58,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
@@ -96,6 +95,23 @@ OFF = '[anticheat]\nenabled = false\n'
 
 class Failed(Exception):
     pass
+
+
+def player_lines(log, name, check):
+    """The lines of the flag log where player `name` failed `check`, in order: `[time] name failed check (VL ...): ...`."""
+    return [line for line in log.splitlines() if f'] {name} failed {check} (' in line]
+
+
+def warned_of_ban(log, name, check):
+    """Whether `check` kicked `name` with the warning of the ban the next kick brings (`kicked (1 of 2 before a ban)`)."""
+    return any('kicked (1 of 2 before a ban)' in line for line in player_lines(log, name, check))
+
+
+def kicked_before_banned(log, name, check):
+    """Whether `check` kicked `name` with the warning of the ban, then banned it."""
+    lines = player_lines(log, name, check)
+    kick = next((i for i, line in enumerate(lines) if 'kicked (1 of 2 before a ban)' in line), None)
+    return kick is not None and any(', banned' in line for line in lines[kick + 1:])
 
 
 def start(bins, folder, anticheat, out, name, **extra):
@@ -289,7 +305,7 @@ def check_ground(bins, scratch, out, seconds):
         if 'disconnected' not in (cheater['error'] or ''):
             raise Failed(f'ground: {cheater["name"]} was not kicked ({cheater["error"]})')
         # The defaults act: the first kick warns of the ban the second brings.
-        if f'{cheater["name"]} failed ground' not in log or 'kicked (1 of 2 before a ban)' not in log:
+        if not warned_of_ban(log, cheater['name'], 'ground'):
             raise Failed(f'ground: {cheater["name"]}: no kick with its ban count in the log:\n{log}')
     if 'sent back' in log:
         raise Failed(f'ground: a player was sent back (ground only drops the claim):\n{log}')
@@ -870,8 +886,7 @@ def check_combat(bins, scratch, out, seconds):
     if 'banned' not in (refused['per_bot'][0]['error'] or '').lower():
         raise Failed(f'combat: banned NoSwing logged in again ({refused["per_bot"][0]["error"]})')
     lines = (folder / 'logs/anticheat.log').read_text()
-    if not all(f'{n}0 failed combat' in lines and 'kicked (1 of 2 before a ban)' in lines and ', banned' in lines
-               for n in ('NoSwing', 'Aura')):
+    if not all(kicked_before_banned(lines, f'{n}0', 'combat') for n in ('NoSwing', 'Aura')):
         raise Failed(f'combat: the log doesn\'t show the kick before the ban:\n{lines}')
     print(f'combat: the no-swing and two-target bots are flagged, their attacks dropped, and kicked; back, they '
           f'cheat again and are banned, then refused; the fair bot attacked {fair["attacks"]} times, never '
@@ -981,7 +996,7 @@ def main():
     # One set of scratch HORIZON_HOME and XDG folders for every server below.
     os.environ.update(lab.game_env())
     failed = []
-    with tempfile.TemporaryDirectory(prefix='anticheat-e2e-') as scratch:
+    with lab.temp_folder('anticheat-e2e-') as scratch:
         for name in args.check or DEFAULT:
             try:
                 CHECKS[name](bins, Path(scratch), out, args.seconds)

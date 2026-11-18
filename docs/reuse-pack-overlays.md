@@ -1,5 +1,9 @@
 # Reusing resource-pack overlays
 
+This page records the previous materializing loader and its benchmark baseline. The game now resolves
+resource packs and passive jar layers in place; see [resource-packs.md](resource-packs.md). The overlay
+helpers remain for development comparisons and do not run during game startup or reload.
+
 `packs::build_overlay` reuses a completed overlay through a versioned sibling JSON marker and persistent OS lock. Pack sources/order, overlay roots, filters, source topology and materialized vanilla inputs determine validity. The marker is removed before rebuilding and published only after a successful build and stable input checks.
 
 On Unix, ZIPs and materialized inputs use length, modification time, device/inode and change-time stamps. Cache hits do not read archive bytes or traverse generated output. Directory packs still validate their topology; ordinary linked files and untouched vanilla subtrees remain live. Materialized vanilla directory stamps detect membership changes without listing them again. Only marker identity resolves paths; the builder retains the caller's original symlink targets and root aliases.
@@ -8,7 +12,7 @@ On non-Unix platforms, materialized files retain content hashing because portabl
 
 ## Real pack measurements
 
-The ignored test measures the actual production `resource_root` entry point against its original selection/key/build sequence. Two warmups and 11 alternating samples use identical prepared Minecraft 26.3 resources (manifest schema 7). Complete materialized output bytes and symlink identities are compared outside timing. Cold means an absent marker with warm filesystem caches, rather than cold storage.
+The ignored test measures the then-production `resource_root` entry point against its original selection/key/build sequence. Two warmups and 11 alternating samples use identical prepared Minecraft 26.3 resources (manifest schema 7). Complete materialized output bytes and symlink identities are compared outside timing. Cold means an absent marker with warm filesystem caches, rather than cold storage.
 
 Linux x86_64/ext4/NVMe, Ryzen 5 5600X, Rust 1.99.0, Cargo `fast`, measured 2026-10-15:
 

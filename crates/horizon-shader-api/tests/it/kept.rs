@@ -205,7 +205,13 @@ fn a_resource_has_one_shape() {
         ))
         .unwrap();
     }
-    for format in ["rgba16float", "r32float", "rgba32float", "rgba32uint"] {
+    for format in [
+        "rgba16float",
+        "r32float",
+        "rgba32float",
+        "rgba32uint",
+        "r32uint",
+    ] {
         parse(&resource(
             "r",
             &format!("format = \"{format}\"\nscale = 0.5"),
@@ -273,14 +279,59 @@ fn counts_and_memory_are_bounded() {
         "fixed-size [[resource]] textures take 33554440 bytes with both versions; a pack may \
          keep 33554432",
     );
-    // An R-relative texture takes 2 of the 6 render-size textures post targets may use, at
-    // any scale.
-    let scaled = "format = \"rgba16float\"\nscale = 0.5";
-    parse(&many(3, scaled)).unwrap();
+    // `r32uint` is 4 bytes a texel: 2048² of it with both versions is the whole budget.
+    let words = "format = \"r32uint\"\nsize = [2048, 2048]";
+    parse(&many(1, words)).unwrap();
     refused(
-        &many(4, scaled),
-        "post targets take 8 render-size rgba16float textures (an `output` its scale², an \
-         R-relative [[resource]] texture 2); a pack may use 6; largest: r0 2, r1 2, r2 2",
+        &format!("{}{texel}", many(1, words)),
+        "fixed-size [[resource]] textures take 33554440 bytes with both versions",
+    );
+}
+
+/// An R-relative kept texture takes its two versions at their size of the 6 render-size
+/// `rgba16float` textures post targets may use: `2 × scale² × bytes a texel / 8`.
+#[test]
+fn kept_textures_take_their_size_of_the_post_budget() {
+    let kept = |list: &[(&str, &str, f32)]| -> String {
+        (list.iter())
+            .map(|&(name, format, scale)| {
+                resource(name, &format!("format = \"{format}\"\nscale = {scale}"))
+            })
+            .collect()
+    };
+    // Radiant's port: a full-size history (2), god rays at half size (0.5 each) and a bloom
+    // pyramid (0.5, 0.125) take 3.625; at 2 each they took 10.
+    let radiant = kept(&[
+        ("taa_history", "rgba16float", 1.0),
+        ("godray_raw", "rgba16float", 0.5),
+        ("godray", "rgba16float", 0.5),
+        ("bloom_half", "rgba16float", 0.5),
+        ("bloom_quarter", "rgba16float", 0.25),
+    ]);
+    parse(&radiant).unwrap();
+    refused(
+        &format!("{radiant}{}", outputs(&[None, None, None])),
+        "post targets take 6.625 render-size rgba16float textures",
+    );
+    // `r32uint` at scale 1 takes 1: six fill the budget; a quarter-size output more is over.
+    let words = kept(&["w0", "w1", "w2", "w3", "w4", "w5"].map(|n| (n, "r32uint", 1.0)));
+    parse(&words).unwrap();
+    refused(
+        &format!("{words}{}", outputs(&[Some(0.25)])),
+        "post targets take 6.0625 render-size rgba16float textures (an `output` its scale², an \
+         R-relative [[resource]] texture 2 × scale² × bytes a texel / 8); a pack may use 6; \
+         largest: w0 1, w1 1, w2 1",
+    );
+    // `rgba32float` takes 4 at scale 1 and 1 at half: two and one take 9, where they took 6.
+    refused(
+        &kept(&[
+            ("a", "rgba32float", 1.0),
+            ("b", "rgba32float", 0.5),
+            ("c", "rgba32float", 1.0),
+        ]),
+        "post targets take 9 render-size rgba16float textures (an `output` its scale², an \
+         R-relative [[resource]] texture 2 × scale² × bytes a texel / 8); a pack may use 6; \
+         largest: a 4, c 4, b 1",
     );
 }
 
@@ -312,12 +363,13 @@ fn post_targets_are_counted_by_memory() {
     refused(
         &format!("{histories}{}", outputs(&[None, None, Some(0.5)])),
         "post targets take 6.25 render-size rgba16float textures (an `output` its scale², an \
-         R-relative [[resource]] texture 2); a pack may use 6; largest: gi 2, gi_moments 2, o0 1",
+         R-relative [[resource]] texture 2 × scale² × bytes a texel / 8); a pack may use 6; \
+         largest: gi 2, gi_moments 2, o0 1",
     );
 }
 
 /// Every pack the count of 4 took (an output 1, an R-relative kept texture 2, of any format and
-/// scale) still passes.
+/// scale) still passes, but two 16-byte textures at scale 1, which take 8 at their size.
 #[test]
 fn what_four_targets_took_still_passes() {
     for format in Format::ALL {
@@ -327,11 +379,15 @@ fn what_four_targets_took_still_passes() {
                 let resources: String = (0..kept)
                     .map(|i| resource(&format!("r{i}"), &shape))
                     .collect();
-                parse(&format!(
-                    "{resources}{}",
-                    outputs(&vec![None; 4 - 2 * kept])
-                ))
-                .unwrap();
+                let pack = format!("{resources}{}", outputs(&vec![None; 4 - 2 * kept]));
+                if kept == 2 && scale == 1.0 && format.bytes() == 16 {
+                    refused(
+                        &pack,
+                        "post targets take 8 render-size rgba16float textures",
+                    );
+                } else {
+                    parse(&pack).unwrap();
+                }
             }
         }
     }
@@ -377,11 +433,15 @@ fn an_output_writes_a_kept_texture_at_its_size() {
     parse(&output("output = \"tex\"")).unwrap();
     refused(&output("output = \"tex\"\nscale = 0.5"), "with no `scale`");
     refused(&output("output = \"buf\""), "is a kept buffer");
-    let uint = resource("ints", "format = \"rgba32uint\"\nsize = [4, 4]");
-    refused(
-        &format!("{uint}[[post]]\nfile = \"a.wgsl\"\noutput = \"ints\"\n"),
-        "is an rgba32uint texture: a pass draws floats, so only a compute pass writes one",
-    );
+    for format in ["rgba32uint", "r32uint"] {
+        let uint = resource("ints", &format!("format = \"{format}\"\nsize = [4, 4]"));
+        refused(
+            &format!("{uint}[[post]]\nfile = \"a.wgsl\"\noutput = \"ints\"\n"),
+            &format!(
+                "is an {format} texture: a pass draws floats, so only a compute pass writes one"
+            ),
+        );
+    }
     refused(
         &output("output = \"tex_previous\""),
         "is last frame's: nothing writes it",

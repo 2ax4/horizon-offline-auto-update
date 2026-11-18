@@ -12,11 +12,11 @@ That callback synchronously removes section membership and tracked ID/UUID
 lookup. `Entity.shouldBeSaved` rejects the discarded removal reason; that
 policy also applies when a passenger is written.
 
-The regression uses an actual prepared-resource Game, the normal API37
-`native_remove_mob`, actual `/tick freeze`, parsed selectors, ordinary
+The regression uses an actual prepared-resource Game, the typed
+`EntityRef::discard`, actual `/tick freeze`, parsed selectors, ordinary
 `execute unless entity` commands (including a UUID target), and normal
 `save_every_entity` chunk-save assembly. Positive checks precede removal; no
-entity/world tick intervenes. It also checks wrong-dimension rejection, repeated
+entity/world tick intervenes. It also checks stale-epoch rejection, repeated
 removal, no lethal damage/loot/XP, retained UUID visibility for a dying but
 nonremoved mob, immediate UUID reuse, and exclusion of a discarded passenger
 from an otherwise savable vehicle.
@@ -46,13 +46,13 @@ The harness gives Game fresh private homes and writes its logs, compared
 outputs, source/JAR hashes and report under `.local/rust-mob-discard-parity`.
 Nothing from those proprietary/private inputs is committed.
 
-Remaining boundary: `native_remove_mob` still marks the list entry removed;
+Remaining boundary: `EntityRef::discard` still marks the list entry removed;
 normal sweep, leave notifications and tracking cleanup retain their existing
 scheduling. This change does not implement synchronous `stopRiding`/passenger
 detachment, seat updates or the complete lifecycle of live riders when their
 vehicle is discarded. The new save guard prevents a discarded passenger from
 being serialized regardless of that transient mount state.
 
-Validation passed: the actual Game regression, all eight compared fields on
+Original upstream validation (not a claim about the mod API merge): the actual Game regression, all eight compared fields on
 both real26.3 JARs, full `horizon-client` library/test Clippy with warnings
 denied and no exceptions, workspace formatting, public-tree and diff checks.

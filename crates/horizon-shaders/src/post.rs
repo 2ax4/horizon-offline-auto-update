@@ -1183,16 +1183,33 @@ fn load_shadow(
     ];
     // A program's compute stages count as its other stages do: Iris 1.11.7 drew the shadow map
     // for a probe pack of ours whose only reader of it was `prepare.csh` (#10490).
+    let image_reads = |interface: &crate::Interface| {
+        interface.images.iter().any(|image| {
+            matches!(
+                image.before.as_deref().unwrap_or(&image.name),
+                "shadowcolorimg0" | "shadowcolorimg1"
+            )
+        })
+    };
     let reads = (post.programs.iter())
         .chain(gbuffers.into_iter().flatten())
         .flat_map(|p| {
             let stages = p.program.iter().map(|q| &q.interface);
             stages.chain(p.compute.iter().map(|(_, c)| &c.interface))
         })
-        .flat_map(|i| &i.samplers)
-        .any(|s| {
-            SHADOW_SAMPLERS.contains(&s.name.as_str())
-                || config::shadow_color(&s.name).is_some_and(|n| n < loader.post.shadow_colors)
+        .any(|i| {
+            i.samplers.iter().any(|s| {
+                SHADOW_SAMPLERS.contains(&s.name.as_str())
+                    || config::shadow_color(&s.name).is_some_and(|n| n < loader.post.shadow_colors)
+            }) || image_reads(i)
+        })
+        || post.lines.iter().any(|program| {
+            program
+                .program
+                .iter()
+                .map(|stage| &stage.interface)
+                .chain(program.compute.iter().map(|(_, stage)| &stage.interface))
+                .any(image_reads)
         });
     let forced = match loader.properties.get("shadow.enabled").map(str::trim) {
         Some("true") => Some(true),
@@ -2832,6 +2849,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
     /// The shadow pass runs when a program reads a shadow buffer or `shadow.enabled` says so;
     /// then `shadow`, `shadow_water` and the `shadowcomp` series load, writing shadowcolor0/1.
     #[test]
+    #[ignore = "daily"]
     fn shadow_programs_load_when_a_shadow_buffer_is_read() {
         let reads = "#version 120\nuniform sampler2D shadowtex0;\nvarying vec2 uv;\n\
                      void main() { gl_FragColor = texture2D(shadowtex0, uv); }\n";
@@ -2979,6 +2997,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
     /// Without the feature, outputs stop at shadowcolor1 as before. As in Iris 1.11.7 with
     /// probe packs p7951a to c (the PR has the readings).
     #[test]
+    #[ignore = "daily"]
     fn higher_shadowcolor_gives_shadow_programs_eight_buffers() {
         let shadow_vsh = "#version 120\nvoid main() {\ngl_Position = ftransform();\n}\n";
         let writes = |targets: Option<&str>| {
@@ -3492,6 +3511,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
     }
 
     #[test]
+    #[ignore = "daily"]
     fn water_falls_back_to_terrain_and_blends() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/terrain-test");
         let pack = Pack::open(&dir).unwrap();
@@ -3717,3 +3737,75 @@ mod buffer_blend_tests;
 
 #[cfg(test)]
 mod material_variant_tests;
+
+#[cfg(test)]
+mod shadow_image_demand_tests {
+    use super::*;
+
+    fn check_image_demand(line: bool) {
+        for (name, demand) in [
+            ("shadowcolorimg0", true),
+            ("shadowcolorimg1", true),
+            ("colorimg2", false),
+            ("shadowcolorimg2", false),
+        ] {
+            for (properties, enabled) in [("", demand), ("shadow.enabled=false", false)] {
+                let stage = if line {
+                    ""
+                } else {
+                    "layout(local_size_x=1) in;\n"
+                };
+                let output = if line {
+                    "gl_FragData[0]=vec4(0.5);"
+                } else {
+                    ""
+                };
+                let shader = format!(
+                    "#version 430\n{stage}layout(rgba8) writeonly uniform image2D {name};\nvoid main() {{ imageStore({name},ivec2(0),vec4(0.25)); {output} }}"
+                );
+                let mut files = vec![("shaders/shaders.properties", properties)];
+                if line {
+                    files.push((
+                        "shaders/gbuffers_line.vsh",
+                        "#version 430\nvoid main() { gl_Position=vec4(0,0,0,1); }",
+                    ));
+                    files.push(("shaders/gbuffers_line.fsh", shader.as_str()));
+                } else {
+                    files.push(("shaders/prepare.csh", shader.as_str()));
+                }
+                let pack =
+                    Pack::from_zip_bytes("original-shadow-demand", crate::pack::tests::zip(&files))
+                        .unwrap();
+                let mut macros = Macros::standard();
+                let (properties, _) = crate::read_properties(&pack, &mut macros);
+                let inputs = GameInputs {
+                    lines: line.then(GbuffersInputs::default),
+                    ..Default::default()
+                };
+                let post = load_post(&pack, "", &properties, &macros, &inputs);
+                assert_eq!(
+                    post.programs.len(),
+                    usize::from(!line),
+                    "line={line}, {name}: {:?}",
+                    post.notes
+                );
+                assert_eq!(post.lines.is_some(), line, "{name}: {:?}", post.notes);
+                assert_eq!(
+                    post.shadow_pass, enabled,
+                    "line={line}, {name}: {:?}",
+                    post.notes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shadow_images_request_shadow_buffers_without_a_sampler_and_respect_disable() {
+        check_image_demand(false);
+    }
+
+    #[test]
+    fn line_images_request_shadow_buffers_and_respect_disable() {
+        check_image_demand(true);
+    }
+}

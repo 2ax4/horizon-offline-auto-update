@@ -534,6 +534,18 @@ fn a_compute_file_keeps_the_api_s_rules() {
     );
 }
 
+/// `storageBarrier()` is WGSL's, as `workgroupBarrier()` is: the check takes it in a compute
+/// pass, reached by every invocation, between a write to a kept buffer and a read of it.
+#[test]
+fn a_compute_pass_may_order_its_buffer_writes_with_a_storage_barrier() {
+    let ordered = "override bounces: i32 = 1;\nfn compute(input: ComputeInput) {\n    \
+                   if input.in_bounds {\n        cache[input.cell.x] = vec4<u32>(1u);\n    }\n    \
+                   storageBarrier();\n    \
+                   if input.in_bounds && input.local == 0u {\n        \
+                   cache[input.cell.x] = cache[input.cell.x] + vec4<u32>(1u);\n    }\n}\n";
+    check(&example_with("cache_update.wgsl", ordered)).unwrap();
+}
+
 #[test]
 fn pass_counts_are_bounded() {
     let before = |i: usize| {
@@ -624,7 +636,7 @@ fn a_compute_entry_is_a_dispatch_in_the_chain() {
     );
     for key in [
         "compute = true",
-        "reads = [\"tex\"]",
+        "writes = [\"buf\"]",
         "dispatch = \"pixels\"",
     ] {
         refused(
@@ -739,15 +751,21 @@ fn compute_work_is_capped_per_dispatch_and_per_frame() {
     );
 }
 
-/// An `rgba32uint` kept texture: written by a compute pass as storage, read as
-/// `texture_2d<u32>` with `textureLoad`, `_previous` too.
+/// An integer kept texture, `rgba32uint` or `r32uint`: written by a compute pass as storage,
+/// read as `texture_2d<u32>` with `textureLoad`, `_previous` too.
 #[test]
-fn an_rgba32uint_texture_is_written_by_compute_and_loaded_as_u32() {
+fn an_integer_texture_is_written_by_compute_and_loaded_as_u32() {
+    for format in ["rgba32uint", "r32uint"] {
+        integer_texture(format);
+    }
+}
+
+fn integer_texture(format: &str) {
     let manifest = format!(
         "{}[[post]]\nfile = \"c.wgsl\"\ncompute = true\ndispatch = [4, 4, 1]\n\
          workgroup = [4, 4, 1]\nwrites = [\"ints\"]\n\
          [[post]]\nfile = \"last.wgsl\"\nreads = [\"ints\", \"ints_previous\"]\n",
-        resource("ints", "format = \"rgba32uint\"\nsize = [4, 4]")
+        resource("ints", &format!("format = \"{format}\"\nsize = [4, 4]"))
     );
     let write = "fn compute(input: ComputeInput) {\n    \
                  if input.in_bounds { textureStore(ints, input.cell.xy, vec4<u32>(input.cell.x)); }\n}\n";
@@ -761,8 +779,8 @@ fn an_rgba32uint_texture_is_written_by_compute_and_loaded_as_u32() {
         let c = compose(&p, kind, file);
         c.text[c.parts[0].1.clone()].to_owned()
     };
-    let written = "@group(3) @binding(64) var ints: texture_storage_2d<rgba32uint, write>;";
-    assert!(prelude(StageKind::Compute, "c.wgsl").contains(written));
+    let written = format!("@group(3) @binding(64) var ints: texture_storage_2d<{format}, write>;");
+    assert!(prelude(StageKind::Compute, "c.wgsl").contains(&written));
     let last = prelude(StageKind::Post, "last.wgsl");
     assert!(last.contains("@group(3) @binding(64) var ints: texture_2d<u32>;"));
     assert!(last.contains("@group(3) @binding(65) var ints_previous: texture_2d<u32>;"));
