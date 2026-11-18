@@ -1,4 +1,4 @@
-From 1b44acff67770bdd0794fa5eab2537a2dbc1d1c2 Mon Sep 17 00:00:00 2001
+From 11d11dfb25eb7c98da17bd86a38da0476558d6f5 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
@@ -44,3 +44,6 @@ index b445ee45..c6405cd6 100644
                  }
              };
              let explicit = folder.is_some() || profile.is_some();
+-- 
+2.47.3
+

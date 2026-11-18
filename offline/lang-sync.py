@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Keep every launcher language table in parity with the offline build's UI.
+"""Keep the launcher's language tables in shape for the offline build.
 
 Upstream re-translates launcher/lang/*.json constantly, so the patches touch Rust
-only. Right after git am the release workflow runs this script: it applies the key
-operations in lang-overrides.json (drop every "delete" key, add every "add" key,
-English fallback for languages the data does not know), then auto-adds every
-tr()/trf() key the patched code asks for but a table lacks, as English, mirroring
-the launcher's own i18n parity test. Auto-added keys live in the release commit's
-tables only, never in the data file. Idempotent; round-trips upstream's layout.
+only. Right after git am the release workflow runs this script: it applies the
+key operations in lang-overrides.json (drop every "delete" key, add every "add"
+key with the per-language text, English fallback for languages the data does not
+know). The launcher's own tables are sparse by design: a key a table lacks shows
+in English at runtime, and its i18n test counts missing/stale entries as
+coverage information instead of failing. So keys the patched code asks for that
+no table knows are reported, not written — dummy English entries in every table
+would only bury them and block real translations later. Idempotent;
+round-trips upstream's layout.
 
 Usage: python3 offline/lang-sync.py [--lang-dir launcher/lang] [--overrides FILE]
                                     [--no-auto-add]
@@ -196,7 +199,7 @@ def main() -> int:
     parser.add_argument("--root", default=str(here.parent),
                         help="the repo root (default: the parent of offline/)")
     parser.add_argument("--no-auto-add", action="store_true",
-                        help="do not fill keys the code asks for but the data lacks")
+                        help="do not scan and report keys no table knows yet")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -232,41 +235,26 @@ def main() -> int:
             touched += 1
             print(f"lang-sync: {path.name}: -{len(dropped)} +{added}")
 
-    # Auto-add: keep a new upstream release from failing the launcher's i18n
-    # parity test when upstream ships UI strings the data does not know yet.
+    # Sparse tables: report keys the patched code asks for that no table knows.
+    # They show in English at runtime (the launcher's own fallback), so writing
+    # them into every table is not needed and would only add dummy entries.
     if not args.no_auto_add:
         src_dir = root / "launcher" / "src"
         if src_dir.is_dir():
             wanted = asked_keys(src_dir)
             present = set().union(*(set(t) for t in loaded.values()))
-            missing = sorted(k for k in wanted if k and k not in present)
-            for key in missing:
-                if key in deletes:
-                    print(f"lang-sync: warning: {key!r} is listed under delete "
-                          "but the code asks for it; the code wins")
-            if missing:
-                for key in missing:
-                    print(f"lang-sync: auto-add (English fallback): {key!r}")
-                for path, table in loaded.items():
-                    fresh = [key for key in missing if key not in table]
-                    if not fresh:
-                        continue
-                    for key in fresh:
-                        table[key] = key
-                    path.write_text(
-                        json.dumps(table, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8")
-                    touched += 1
-                print(f"lang-sync: auto-added {len(missing)} key(s) as English "
-                      f"to all {len(tables)} tables; add real translations to "
-                      "offline/lang-overrides.json when convenient")
+            unknown = sorted(k for k in wanted if k and k not in present)
+            for key in unknown[:12]:
+                print(f"lang-sync: no table knows {key!r} yet")
+            if len(unknown) > 12:
+                print(f"lang-sync: ... and {len(unknown) - 12} more")
+            if unknown:
+                print(f"lang-sync: {len(unknown)} code key(s) are in no table; "
+                      "the launcher shows them in English until they are "
+                      "translated (offline/lang-overrides.json)")
 
-    keysets = {frozenset(table) for table in loaded.values()}
-    if len(keysets) != 1:
-        print("lang-sync: language tables left with differing key sets",
-              file=sys.stderr)
-        return 1
-    print(f"lang-sync: {touched} table(s) updated; all {len(tables)} tables in parity")
+    print(f"lang-sync: {touched} table(s) updated; sparse tables are fine, "
+          "missing keys fall back to English at runtime")
     return 0
 
 

@@ -1,14 +1,15 @@
-From d863d6afdef56ff882966ea40d8174c071e7c67b Mon Sep 17 00:00:00 2001
+From b6d71349e14d066309209f43bba8ccaf8f8aba58 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 2/9] Offline updates follow the fork's releases
 
 ---
- crates/horizon-release-sign/release-keys.txt  |  1 +
- launcher/src/backend.rs                       | 31 +++++-
- launcher/src/backend/release_loading_tests.rs | 90 +++++++++++++----
- launcher/src/signed.rs                        | 96 ++++++++++++++-----
- 4 files changed, 171 insertions(+), 47 deletions(-)
+ crates/horizon-release-sign/release-keys.txt  |   1 +
+ launcher/src/backend.rs                       |  53 ++++++---
+ launcher/src/backend/release_loading_tests.rs | 111 +++++++++++++-----
+ launcher/src/backend/release_selection.rs     |   4 +-
+ launcher/src/signed.rs                        | 100 ++++++++++++----
+ 5 files changed, 199 insertions(+), 70 deletions(-)
 
 diff --git a/crates/horizon-release-sign/release-keys.txt b/crates/horizon-release-sign/release-keys.txt
 index c39be443..c5101542 100644
@@ -20,10 +21,57 @@ index c39be443..c5101542 100644
  MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
 +DfcWSiaD14ScBMxU0btrJMPDSspw+flKz43XoXHSsh4=
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 3bd6ff62..f780d25f 100644
+index 3bd6ff62..6961783c 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -1056,7 +1056,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
+@@ -660,6 +660,7 @@ fn release_list() -> Result<serde_json::Value, String> {
+ 
+ /// The releases in `list` whose tag passes `keep`, newest first, with the asset named `asset`.
+ pub(crate) fn parse_releases(
++    repo: &str,
+     list: &serde_json::Value,
+     asset: Option<&str>,
+     keep: fn(&str) -> bool,
+@@ -673,7 +674,7 @@ pub(crate) fn parse_releases(
+         let found = r["assets"].as_array().into_iter().flatten().find_map(|a| {
+             let name = a["name"].as_str()?;
+             (Some(name) == asset)
+-                .then(|| Some((crate::signed::asset_url(tag, name), a["size"].as_u64()?)))?
++                .then(|| Some((crate::signed::asset_url(repo, tag, name), a["size"].as_u64()?)))?
+         });
+         out.push(Release {
+             tag: tag.into(),
+@@ -734,10 +735,10 @@ fn game_releases_with(
+     fallback: Option<&str>,
+ ) -> Vec<Release> {
+     let keep = |tag: &str| is_game_tag(tag) || horizon_release_sign::is_nightly(tag);
+-    let mut out = parse_releases(list, asset, keep);
++    let mut out = parse_releases(REPO, list, asset, keep);
+     if fallback.is_some() {
+         // The same releases in the same order: only the asset looked for differs.
+-        for (r, other) in out.iter_mut().zip(parse_releases(list, fallback, keep)) {
++        for (r, other) in out.iter_mut().zip(parse_releases(REPO, list, fallback, keep)) {
+             if r.asset.is_none() && r.tag == other.tag {
+                 r.asset = other.asset;
+             }
+@@ -768,7 +769,7 @@ fn launcher_releases_in_with(
+     list: &serde_json::Value,
+     json: impl Fn(String) -> Result<Option<serde_json::Value>, String>,
+ ) -> Vec<Release> {
+-    let found = parse_releases(list, launcher_asset(), is_launcher_tag);
++    let found = parse_releases(LAUNCHER_REPO, list, launcher_asset(), is_launcher_tag);
+     if found.iter().any(|r| r.asset.is_some()) {
+         return found;
+     }
+@@ -785,6 +786,7 @@ fn launcher_releases_in_with(
+     for tag in tags.into_iter().take(3) {
+         if let Ok(Some(release)) = json(format!("{api}/releases/tags/{tag}")) {
+             let one = parse_releases(
++                LAUNCHER_REPO,
+                 &serde_json::json!([release]),
+                 launcher_asset(),
+                 is_launcher_tag,
+@@ -1056,7 +1058,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
  
  /// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
  fn signed_digest(tag: &str, asset: &str) -> Result<String, String> {
@@ -40,7 +88,7 @@ index 3bd6ff62..f780d25f 100644
          tag,
          asset,
          &horizon_release_sign::trusted_keys_for(REPO),
-@@ -1180,7 +1189,8 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String>
+@@ -1180,7 +1191,8 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String>
                          &[("title", &format!("{:?}", release.name))],
                      )
                  })?;
@@ -50,7 +98,7 @@ index 3bd6ff62..f780d25f 100644
                  github_tag,
                  &version,
                  asset,
-@@ -3237,13 +3247,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
+@@ -3237,13 +3249,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
  pub fn releases_and_updates(
      on_releases: impl FnOnce(Result<Vec<Release>, String>),
  ) -> Result<Updates, String> {
@@ -77,7 +125,7 @@ index 3bd6ff62..f780d25f 100644
      on_releases: impl FnOnce(Result<Vec<Release>, String>),
  ) -> Result<Updates, String> {
      let list = match load() {
-@@ -3257,10 +3279,11 @@ fn releases_and_updates_with(
+@@ -3257,10 +3281,11 @@ fn releases_and_updates_with(
      let installed_versions = installed();
      let horizon = horizon_update(&installable_updates(&releases), &installed_versions)
          .or_else(|| architecture_update(&releases, &installed_versions));
@@ -90,7 +138,7 @@ index 3bd6ff62..f780d25f 100644
      })
  }
  
-@@ -3819,7 +3842,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
+@@ -3819,7 +3844,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
      {
          return Ok(None);
      }
@@ -99,11 +147,77 @@ index 3bd6ff62..f780d25f 100644
      let work = update_work_dir();
      remove_abandoned_stages(&work, std::time::SystemTime::now(), process_alive);
      let stage = new_stage_folder(&work)?;
+@@ -5189,7 +5214,7 @@ pub fn {f}("
+             {"tag_name": "launcher@0.30.0", "assets": [asset(x64)]},
+             {"tag_name": "launcher@0.29.0", "assets": [asset(x64), asset(arm)]},
+         ]);
+-        let releases = parse_releases(&list, Some(arm), is_launcher_tag);
++        let releases = parse_releases(REPO, &list, Some(arm), is_launcher_tag);
+         assert!(launcher_update_from(&releases, "launcher@0.29.0").is_none());
+         let update = launcher_update_from(&releases, "launcher@0.28.0").unwrap();
+         assert_eq!(update.tag, "launcher@0.29.0");
+@@ -5363,12 +5388,12 @@ pub fn {f}("
+             {"tag_name": "v2026.10.13", "assets": []},
+             {"tag_name": "launcher-v0.0.1", "draft": true, "assets": []},
+         ]);
+-        let game: Vec<_> = parse_releases(&list, ASSET, is_game_tag)
++        let game: Vec<_> = parse_releases(REPO, &list, ASSET, is_game_tag)
+             .into_iter()
+             .map(|r| r.tag)
+             .collect();
+         assert_eq!(game, ["v2026.10.13", "v2026.10.12"]);
+-        let launcher: Vec<_> = parse_releases(&list, LAUNCHER_ASSET, is_launcher_tag)
++        let launcher: Vec<_> = parse_releases(LAUNCHER_REPO, &list, LAUNCHER_ASSET, is_launcher_tag)
+             .into_iter()
+             .map(|r| r.tag)
+             .collect();
+@@ -5385,7 +5410,7 @@ pub fn {f}("
+             {"tag_name": "v2026.10.15", "assets": [{"name": asset, "browser_download_url": "good", "size": 1}]},
+             {"tag_name": "v2026.10.14", "assets": [{"name": asset, "browser_download_url": "old", "size": 1}]},
+         ]);
+-        let releases = parse_releases(&list, Some(asset), is_game_tag);
++        let releases = parse_releases(REPO, &list, Some(asset), is_game_tag);
+         assert!(releases.iter().all(|r| r.tag != "v2026.10.15.1"));
+         assert_eq!(
+             latest(&releases).map(|r| r.tag.as_str()),
+@@ -5412,7 +5437,7 @@ pub fn {f}("
+             {"tag_name": "v0.2.12", "prerelease": true, "assets": [{"name": asset, "browser_download_url": "a", "size": 1}]},
+             {"tag_name": "v0.2.0", "assets": [{"name": asset, "browser_download_url": "s", "size": 1}]},
+         ]);
+-        let releases = parse_releases(&list, Some(asset), is_game_tag);
++        let releases = parse_releases(REPO, &list, Some(asset), is_game_tag);
+         assert_eq!(
+             releases.iter().map(|r| r.prerelease).collect::<Vec<_>>(),
+             [false, true, false]
+@@ -5979,7 +6004,7 @@ pub fn {f}("
+             {"tag_name": "v2026.10.21", "prerelease": true, "assets": [{"name": asset, "browser_download_url": "d", "size": 1}]},
+             {"tag_name": "v2026.10.19.15", "assets": [{"name": asset, "browser_download_url": "s", "size": 1}]},
+         ]);
+-        let releases = parse_releases(&list, Some(asset), is_game_tag);
++        let releases = parse_releases(REPO, &list, Some(asset), is_game_tag);
+         let installed = ["v2026.10.19.15".to_string(), "v2026.10.12".to_string()];
+         // A pre-release 0.2.0 is not an update; once published as the release, it is one.
+         let offered = |releases: &[Release]| {
 diff --git a/launcher/src/backend/release_loading_tests.rs b/launcher/src/backend/release_loading_tests.rs
-index 00dc1d0e..4eb9df0d 100644
+index 00dc1d0e..a1b3ac37 100644
 --- a/launcher/src/backend/release_loading_tests.rs
 +++ b/launcher/src/backend/release_loading_tests.rs
-@@ -42,33 +42,74 @@ fn baseline(load: impl Fn() -> Result<serde_json::Value, String>) -> (Vec<Releas
+@@ -30,45 +30,86 @@ fn installed_fixture() -> Vec<String> {
+ 
+ // The former startup paths: each decodes its own response; the update path parses games again.
+ fn baseline(load: impl Fn() -> Result<serde_json::Value, String>) -> (Vec<Release>, Updates) {
+-    let releases = parse_releases(&load().unwrap(), ASSET, is_game_tag);
++    let releases = parse_releases(REPO, &load().unwrap(), ASSET, is_game_tag);
+     let list = load().unwrap();
+     let updates = Updates {
+         horizon: horizon_update(
+-            &parse_releases(&list, ASSET, is_game_tag),
++            &parse_releases(REPO, &list, ASSET, is_game_tag),
+             &installed_fixture(),
+         ),
+-        launcher: launcher_update(&parse_releases(&list, LAUNCHER_ASSET, is_launcher_tag)),
++        launcher: launcher_update(&parse_releases(LAUNCHER_REPO, &list, LAUNCHER_ASSET, is_launcher_tag)),
+     };
      (releases, updates)
  }
  
@@ -116,7 +230,8 @@ index 00dc1d0e..4eb9df0d 100644
      let updates = releases_and_updates_with(
          load,
          installed_fixture,
-         |list| parse_releases(list, LAUNCHER_ASSET, is_launcher_tag),
+-        |list| parse_releases(list, LAUNCHER_ASSET, is_launcher_tag),
++        |list| parse_releases(LAUNCHER_REPO, list, LAUNCHER_ASSET, is_launcher_tag),
 +        fork_load,
          |r| releases = Some(r.unwrap()),
      )
@@ -145,7 +260,7 @@ index 00dc1d0e..4eb9df0d 100644
 +    let updates = releases_and_updates_with(
 +        || Ok(serde_json::from_str(&text).unwrap()),
 +        installed_fixture,
-+        |list| parse_releases(list, LAUNCHER_ASSET, is_launcher_tag),
++        |list| parse_releases(LAUNCHER_REPO, list, LAUNCHER_ASSET, is_launcher_tag),
 +        || Ok(serde_json::from_str(&fork_fixture()).unwrap()),
 +        |r| published = Some(r.unwrap()),
 +    )
@@ -251,7 +366,49 @@ index 00dc1d0e..4eb9df0d 100644
              |r| published = Some(r.unwrap()),
          )
          .unwrap();
-@@ -297,7 +342,7 @@ fn benchmark_shared_startup_response() {
+@@ -170,6 +215,7 @@ fn empty_or_prebuilt_only_fork_has_no_game_or_launcher_update() {
+                         Ok(missing.clone())
+                     })
+                 },
++                || Ok(serde_json::Value::Null),
+                 |result| games = Some(result.unwrap()),
+             )
+             .unwrap();
+@@ -221,7 +267,7 @@ fn each_platform_download_is_bound_to_the_fork_not_the_provider_url() {
+                 "launcher@0.9.9",
+             ),
+         ] {
+-            let parsed = parse_releases(&list, Some(asset), keep);
++            let parsed = parse_releases(REPO, &list, Some(asset), keep);
+             assert_eq!(parsed.len(), 1);
+             assert_eq!(
+                 parsed[0].asset,
+@@ -252,7 +298,7 @@ fn decoy_asset_names_never_replace_the_exact_platform_asset() {
+                 {"name": decoy, "size": 1, "browser_download_url": "https://evil.test/first"},
+                 {"name": asset, "size": 2, "browser_download_url": "https://evil.test/second"}
+             ]}]);
+-            let got = parse_releases(&list, Some(asset), is_game_tag);
++            let got = parse_releases(REPO, &list, Some(asset), is_game_tag);
+             assert_eq!(
+                 got[0].asset,
+                 Some((
+@@ -273,13 +319,14 @@ fn decoy_asset_names_never_replace_the_exact_platform_asset() {
+         assert!(got.is_empty());
+     }
+     let draft = parse_releases(
++        REPO,
+         &serde_json::json!([{"tag_name": "v1", "draft": true, "assets": [{"name": asset, "size": 1}]}]),
+         Some(asset),
+         is_game_tag,
+     );
+     assert!(draft.is_empty());
+     assert_eq!(
+-        crate::signed::asset_url("../../x", "../evil.zip"),
++        crate::signed::asset_url(REPO, "../../x", "../evil.zip"),
+         "https://github.com/horizon-rust/horizon/releases/download/..%2F..%2Fx/..%2Fevil.zip"
+     );
+ }
+@@ -297,7 +344,7 @@ fn benchmark_shared_startup_response() {
          serde_json::from_str(black_box(&text)).map_err(|e| e.to_string())
      };
      let old = || baseline(|| load(Duration::ZERO));
@@ -260,7 +417,27 @@ index 00dc1d0e..4eb9df0d 100644
      assert_eq!(
          serde_json::to_value(old()).unwrap(),
          serde_json::to_value(new()).unwrap()
-@@ -327,7 +372,12 @@ fn benchmark_shared_startup_response() {
+@@ -305,16 +352,17 @@ fn benchmark_shared_startup_response() {
+     let concurrent_old = || {
+         std::thread::scope(|scope| {
+             let releases = scope.spawn(|| {
+-                parse_releases(&load(Duration::from_millis(5)).unwrap(), ASSET, is_game_tag)
++                parse_releases(REPO, &load(Duration::from_millis(5)).unwrap(), ASSET, is_game_tag)
+             });
+             let updates = scope.spawn(|| {
+                 let list = load(Duration::from_millis(5)).unwrap();
+                 Updates {
+                     horizon: horizon_update(
+-                        &parse_releases(&list, ASSET, is_game_tag),
++                        &parse_releases(REPO, &list, ASSET, is_game_tag),
+                         &installed_fixture(),
+                     ),
+                     launcher: launcher_update(&parse_releases(
++                        LAUNCHER_REPO,
+                         &list,
+                         LAUNCHER_ASSET,
+                         is_launcher_tag,
+@@ -327,7 +375,12 @@ fn benchmark_shared_startup_response() {
      let threaded_new = || {
          std::thread::scope(|scope| {
              scope
@@ -274,7 +451,7 @@ index 00dc1d0e..4eb9df0d 100644
                  .join()
                  .unwrap()
          })
-@@ -367,7 +417,7 @@ fn benchmark_shared_startup_response() {
+@@ -367,7 +420,7 @@ fn benchmark_shared_startup_response() {
              measure(threaded_new, &requests),
          ),
      ] {
@@ -283,10 +460,35 @@ index 00dc1d0e..4eb9df0d 100644
          println!(
              "{label}: before={} after={} ratio={:.3}x requests={}->{}",
              before.0,
+diff --git a/launcher/src/backend/release_selection.rs b/launcher/src/backend/release_selection.rs
+index 0b5cc579..6764af2d 100644
+--- a/launcher/src/backend/release_selection.rs
++++ b/launcher/src/backend/release_selection.rs
+@@ -47,9 +47,9 @@ fn snapshot_in(
+     fallback: Option<&str>,
+ ) -> Option<Release> {
+     let keep = |tag: &str| Channel::of(tag) == Some(Channel::Snapshot);
+-    let mut found = super::parse_releases(list, asset, keep)
++    let mut found = super::parse_releases(super::REPO, list, asset, keep)
+         .into_iter()
+-        .chain(super::parse_releases(list, fallback, keep))
++        .chain(super::parse_releases(super::REPO, list, fallback, keep))
+         .filter(|r| r.tag == tag);
+     let mut snapshot = found.next()?;
+     if snapshot.asset.is_none() {
 diff --git a/launcher/src/signed.rs b/launcher/src/signed.rs
-index 30ba8dd6..d068a399 100644
+index 30ba8dd6..f9794582 100644
 --- a/launcher/src/signed.rs
 +++ b/launcher/src/signed.rs
+@@ -8,7 +8,7 @@ use crate::backend::REPO;
+ use horizon_release_sign::{Channel, PublicKey, SIGNATURE, SIGNATURE_V2, SUMS};
+ 
+ /// Where a release's attached file downloads from (GitHub's fixed address for it).
+-pub fn asset_url(tag: &str, name: &str) -> String {
++pub fn asset_url(repo: &str, tag: &str, name: &str) -> String {
+     // Metadata supplies path components, never URL syntax or another repository.
+     let component = |text: &str| -> String {
+         text.bytes()
 @@ -21,7 +21,7 @@ pub fn asset_url(tag: &str, name: &str) -> String {
              .collect()
      };
@@ -334,6 +536,15 @@ index 30ba8dd6..d068a399 100644
          .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
      horizon_release_sign::build_digest(
          channel,
+@@ -89,7 +91,7 @@ mod tests {
+ 
+     #[test]
+     fn metadata_cannot_escape_the_fork_download_path() {
+-        assert_eq!(asset_url("v1/../../other?x#y", "a%b.zip"),
++        assert_eq!(asset_url(REPO, "v1/../../other?x#y", "a%b.zip"),
+             "https://github.com/horizon-rust/horizon/releases/download/v1%2F..%2F..%2Fother%3Fx%23y/a%25b.zip");
+     }
+ 
 @@ -127,7 +129,13 @@ mod tests {
          .is_none());
          // The launcher's own repository is upstream, so its pinned digest wins over anything fetched.
@@ -484,3 +695,6 @@ index 30ba8dd6..d068a399 100644
                  "{tag}"
              );
          }
+-- 
+2.47.3
+
