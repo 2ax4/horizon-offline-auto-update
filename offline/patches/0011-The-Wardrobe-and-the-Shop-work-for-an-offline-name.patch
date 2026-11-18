@@ -1,4 +1,4 @@
-From 5b6f2aee2e557e84560941a591796a3565cebd73 Mon Sep 17 00:00:00 2001
+From 8057cbae5c11aeb03b2b922cabea5c108fd599b4 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 9/9] The Wardrobe and the Shop work for an offline name
@@ -8,7 +8,7 @@ Subject: [PATCH 9/9] The Wardrobe and the Shop work for an offline name
  1 file changed, 122 insertions(+), 6 deletions(-)
 
 diff --git a/launcher/src/wardrobe_page.rs b/launcher/src/wardrobe_page.rs
-index cb9d2d451c..a369a72234 100644
+index 785222b3..3de7fa71 100644
 --- a/launcher/src/wardrobe_page.rs
 +++ b/launcher/src/wardrobe_page.rs
 @@ -18,7 +18,9 @@ use crate::glass_ui as ui;
@@ -20,9 +20,9 @@ index cb9d2d451c..a369a72234 100644
 +    Catalogue, Change, Claim, ClaimState, Error, Me, Saved, Service, Session,
 +};
  use horizon_theme::glass::{fill, ink, radius};
+ use servers_page::Field;
  use std::collections::HashMap;
- use std::sync::Arc;
-@@ -86,6 +88,9 @@ struct Trip {
+@@ -87,6 +89,9 @@ struct Trip {
      saved: Saved,
      items: HashMap<String, Arc<Item>>,
      session: Option<Arc<Session>>,
@@ -32,7 +32,7 @@ index cb9d2d451c..a369a72234 100644
      result: Result<(), Error>,
  }
  
-@@ -321,6 +326,25 @@ fn fetch_items(service: &Service, catalogue: &Catalogue) -> HashMap<String, Arc<
+@@ -322,6 +327,25 @@ fn fetch_items(service: &Service, catalogue: &Catalogue) -> HashMap<String, Arc<
          .collect()
  }
  
@@ -58,7 +58,7 @@ index cb9d2d451c..a369a72234 100644
  /// The catalogue (the kept one's items if the service isn't reached), a session proved with
  /// Mojang, what waits sent, then the account's own answer with anything still waiting on top.
  fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Result<(), Error> {
-@@ -344,6 +368,71 @@ fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Re
+@@ -345,6 +369,71 @@ fn refresh(service: &Service, account: &account::Account, trip: &mut Trip) -> Re
      )
  }
  
@@ -130,7 +130,7 @@ index cb9d2d451c..a369a72234 100644
  /// `founder_visor` → "Founder Visor", for the preview's made-up names.
  fn title_case(id: &str) -> String {
      id.split('_')
-@@ -424,12 +513,19 @@ impl Launcher {
+@@ -425,12 +514,19 @@ impl Launcher {
          let session = keep.as_ref().and_then(|w| w.session.clone());
          // The view keeps its camera from the last visit.
          let viewer = keep.as_ref().and_then(|w| w.viewer.clone());
@@ -151,7 +151,7 @@ index cb9d2d451c..a369a72234 100644
              status: Status::Loading,
              busy: true,
              slot,
-@@ -445,9 +541,14 @@ impl Launcher {
+@@ -446,9 +542,14 @@ impl Launcher {
                  saved,
                  items: HashMap::new(),
                  session,
@@ -167,7 +167,7 @@ index cb9d2d451c..a369a72234 100644
              if let Err(e) = trip.saved.save(&dir(), &account.uuid) {
                  eprintln!("Horizon: the outfit is not saved: {e}");
              }
-@@ -525,9 +626,22 @@ impl Launcher {
+@@ -526,9 +627,22 @@ impl Launcher {
          .detach();
      }
  
@@ -192,7 +192,7 @@ index cb9d2d451c..a369a72234 100644
      }
  
      /// A trip came back: keep what it learnt, say how it went.
-@@ -541,7 +655,7 @@ impl Launcher {
+@@ -542,7 +656,7 @@ impl Launcher {
          }
          w.session = trip.session;
          w.saved = trip.saved;
@@ -201,7 +201,7 @@ index cb9d2d451c..a369a72234 100644
              tell_the_game(&w.uuid, &w.saved);
          }
          w.status = match trip.result {
-@@ -635,6 +749,7 @@ impl Launcher {
+@@ -636,6 +750,7 @@ impl Launcher {
                  saved,
                  items: HashMap::new(),
                  session: None,
@@ -209,7 +209,7 @@ index cb9d2d451c..a369a72234 100644
                  result,
              }
          });
-@@ -680,6 +795,7 @@ impl Launcher {
+@@ -681,6 +796,7 @@ impl Launcher {
                  saved,
                  items: HashMap::new(),
                  session: None,
@@ -217,6 +217,3 @@ index cb9d2d451c..a369a72234 100644
                  // The page itself still stands when the service refuses: say why instead.
                  result: result.or_else(|e| if e.retry_later() { Err(e) } else { Ok(()) }),
              };
--- 
-2.47.3
-

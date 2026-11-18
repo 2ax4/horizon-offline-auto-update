@@ -1,20 +1,45 @@
-From ec47e64742da6180ce3daa9c461076812a19b1ab Mon Sep 17 00:00:00 2001
+From 7e2fa1f85161d60f3545c23ddc4c9967cf97f1b1 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 6/9] Offline build: the glass look keeps only the offline
  account
 
 ---
- launcher/src/frame.rs         |  48 ++----
- launcher/src/glass_account.rs | 309 ++++++++++++++++++++--------------
- launcher/src/main.rs          |   7 +-
- 3 files changed, 198 insertions(+), 166 deletions(-)
+ launcher/src/blocks_play.rs   |   7 +-
+ launcher/src/frame.rs         |  52 ++----
+ launcher/src/glass_account.rs | 315 +++++++++++++++++++---------------
+ 3 files changed, 199 insertions(+), 175 deletions(-)
 
+diff --git a/launcher/src/blocks_play.rs b/launcher/src/blocks_play.rs
+index 64fe0643..98ccb568 100644
+--- a/launcher/src/blocks_play.rs
++++ b/launcher/src/blocks_play.rs
+@@ -245,7 +245,7 @@ impl Launcher {
+                 &t,
+             )),
+             // The glass look's Overview ends with the screenshots and the patch log: Prepare is in
+-            // Play's ⋯ menu, the Minecraft folder in the folder menu, signing in in the top bar.
++            // Play's ⋯ menu, the Minecraft folder in the folder menu.
+             None if t.glass => rows,
+             None => rows
+                 .child(index_row(
+@@ -267,9 +267,8 @@ impl Launcher {
+                 &t,
+             )),
+         };
+-        // The top bar shows who plays; a row only when there is something to do about it: no
+-        // account that owns the game (Play needs one), or offline. The glass look's top bar has
+-        // Sign in with Microsoft and says Offline itself.
++        // The top bar shows who plays; a row only when there is something to do about it. The
++        // glass look's top bar says Offline itself.
+         if !t.glass {
+             if self.owner == Some(false) {
+                 rows = rows.child(index_row(
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index ae452dad92..42389116f8 100644
+index b70195de..a8855a03 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
-@@ -661,38 +661,13 @@ impl Launcher {
+@@ -1051,41 +1051,13 @@ impl Launcher {
                      }
                      cx.notify();
                  }));
@@ -35,16 +60,19 @@ index ae452dad92..42389116f8 100644
 -                    .items_center()
 -                    .gap(px(10.))
 -                    .h(px(44.))
--                    .px(px(16.))
+-                    .px(px(if tight { 14. } else { 16. }))
 -                    .rounded(px(radius::ROW))
 -                    .bg(white(fill::BUTTON))
 -                    .hover(|s| s.bg(white(fill::BUTTON_HOVER)))
 -                    .cursor_pointer()
 -                    .child(microsoft::logo(16.))
--                    .child(
--                        ui::text(14., FontWeight::MEDIUM, ink::FULL)
--                            .child(tr("Sign in with Microsoft")),
--                    )
+-                    .when(!tight, |d| {
+-                        d.child(
+-                            ui::text(14., FontWeight::MEDIUM, ink::FULL)
+-                                .child(tr("Sign in with Microsoft")),
+-                        )
+-                    })
+-                    .when(tight, |d| d.tooltip(ui::tip(tr("Sign in with Microsoft"))))
 -                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 -                        this.start_sign_in();
 -                        cx.notify();
@@ -52,18 +80,19 @@ index ae452dad92..42389116f8 100644
 -                &t,
 -            )
 -        });
-         let settings = ui::icon_button(
-             "nav-Settings",
-             "sliders-horizontal",
-@@ -749,7 +724,6 @@ impl Launcher {
-                     .gap(px(6.))
-                     .children(build_log)
+         // Search: the palette (⌘K or Ctrl+K anywhere), as a field-shaped button.
+         let sid = SharedString::from("topbar-search");
+         let key: &str = if cfg!(target_os = "macos") {
+@@ -1168,7 +1140,7 @@ impl Launcher {
+                     .gap(px(8.))
+                     .child(search)
                      .child(account)
--                    .children(sign_in)
-                     .child(settings),
+-                    .children(sign_in),
++                    .child(settings),
              )
      }
-@@ -798,12 +772,18 @@ impl Launcher {
+ 
+@@ -1216,12 +1188,18 @@ impl Launcher {
                                  .size(px(30.))
                                  .rounded(px(8.))
                                  .overflow_hidden()
@@ -89,10 +118,10 @@ index ae452dad92..42389116f8 100644
                          .child(
                              div()
 diff --git a/launcher/src/glass_account.rs b/launcher/src/glass_account.rs
-index d00857fde1..40d799b544 100644
+index e9bd43f1..e3174d5b 100644
 --- a/launcher/src/glass_account.rs
 +++ b/launcher/src/glass_account.rs
-@@ -1,48 +1,50 @@
+@@ -1,52 +1,50 @@
  //! Settings' Account card in the glass look, as the mockup's: who plays now (a big head, the
 -//! name, how), and the Microsoft card beside it with its white Sign in with Microsoft button.
 +//! name, how), and the offline names as chips with a field to add one. The offline build has
@@ -115,6 +144,10 @@ index d00857fde1..40d799b544 100644
 +    /// the field to add one. The offline build has no Microsoft card beside them.
      pub(super) fn glass_account(&mut self, cx: &mut Context<Self>) -> Div {
 -        let wide = self.window_width >= crate::glass_home::WIDE;
+-        // Signed out, "who plays" would only repeat the Microsoft card's call to sign in.
+-        if self.accounts.selected().is_none() {
+-            return div().child(self.glass_microsoft_card(cx).w_full());
+-        }
 -        let left = self.glass_who_plays();
 -        let right = self.glass_microsoft_card(cx);
 -        if wide {
@@ -161,20 +194,20 @@ index d00857fde1..40d799b544 100644
              ),
 -            None => (
 +            Player::Offline(name) => (
-                 None,
--                tr("Sign in with Microsoft").to_string(),
--                (Tone::Off, tr(account::NEEDS_OWNER)),
++                None,
 +                name.clone(),
 +                (Tone::Off, tr("Offline · single player and LAN worlds")),
 +            ),
 +            Player::GameName => (
-+                None,
+                 None,
+-                tr("Sign in with Microsoft").to_string(),
+-                (Tone::Off, tr(account::NEEDS_OWNER)),
 +                self.offline_name.clone().unwrap_or_else(|| "Player".into()),
 +                (Tone::Off, tr("Offline · single player and LAN worlds")),
              ),
          };
          let head = div()
-@@ -86,112 +88,163 @@ impl Launcher {
+@@ -92,114 +90,163 @@ impl Launcher {
                  ),
          );
  
@@ -332,6 +365,8 @@ index d00857fde1..40d799b544 100644
              .flex_col()
 -            .rounded(px(16.))
 -            .bg(white(0.045))
+-            .border_1()
+-            .border_color(white(ui::edge::REST))
 -            .p(px(24.))
 -            .when(has_accounts, |d| {
 -                d.child(rows.mx(px(-16.)).mt(px(-16.)).mb(px(16.)))
@@ -435,31 +470,3 @@ index d00857fde1..40d799b544 100644
 +        .on_click(on_click)
      }
  }
-diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index b342a3b31e..982952b3bb 100644
---- a/launcher/src/main.rs
-+++ b/launcher/src/main.rs
-@@ -3508,7 +3508,7 @@ impl Launcher {
-                 &t,
-             )),
-             // The glass look's Overview ends with the screenshots and the patch log: Prepare is in
--            // Play's ⋯ menu, the Minecraft folder in the folder menu, signing in in the top bar.
-+            // Play's ⋯ menu, the Minecraft folder in the folder menu.
-             None if t.glass => rows,
-             None => rows
-                 .child(index_row(
-@@ -3530,9 +3530,8 @@ impl Launcher {
-                 &t,
-             )),
-         };
--        // The top bar shows who plays; a row only when there is something to do about it: no
--        // account that owns the game (Play needs one), or offline. The glass look's top bar has
--        // Sign in with Microsoft and says Offline itself.
-+        // The top bar shows who plays; a row only when there is something to do about it. The
-+        // glass look's top bar says Offline itself.
-         if !t.glass {
-             if self.owner == Some(false) {
-                 rows = rows.child(index_row(
--- 
-2.47.3
-

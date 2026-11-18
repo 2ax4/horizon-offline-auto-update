@@ -1,37 +1,42 @@
-From 00a15b7d80aad36ca2c2ed4261c33d29b2660186 Mon Sep 17 00:00:00 2001
+From e852e6d0de5e555ee7b41398de1fe337415628e5 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
 
 ---
- docs/launcher-commands.md     |  35 ++++-
- launcher/src/account.rs       | 187 +++++++++++++++--------
- launcher/src/account/tests.rs | 272 ++++++++++++++++++++++------------
- launcher/src/cli.rs           | 169 ++++++++++++++++++---
- launcher/src/frame.rs         |  18 ++-
- launcher/src/home.rs          |   2 +-
- launcher/src/instances.rs     |  28 ++++
- launcher/src/lib.rs           |   1 +
- launcher/src/main.rs          |  69 ++++++++-
- launcher/src/mcp.rs           |   1 -
- launcher/src/owner_page.rs    |  49 ++++--
- launcher/src/profile_heads.rs |  54 ++++++-
- launcher/src/servers_page.rs  |  20 ++-
- launcher/src/skin_page.rs     | 264 +++++++++++++++++++++++++++++++++
- launcher/src/skins.rs         | 183 +++++++++++++++++++++++
- launcher/src/skins/tests.rs   | 124 ++++++++++++++++
- launcher/src/switch_page.rs   | 219 ++++++++++++++++++++++++---
- launcher/tests/owner_gate.rs  |  53 ++++---
- 18 files changed, 1504 insertions(+), 244 deletions(-)
+ docs/launcher-commands.md       |  35 +++-
+ launcher/src/account.rs         | 187 +++++++++++++++-------
+ launcher/src/account/tests.rs   | 272 +++++++++++++++++++++-----------
+ launcher/src/blocks_chrome.rs   |   8 +-
+ launcher/src/blocks_settings.rs |   4 +-
+ launcher/src/cli.rs             | 169 +++++++++++++++++---
+ launcher/src/developer_play.rs  |   9 +-
+ launcher/src/frame.rs           |  18 ++-
+ launcher/src/home.rs            |  10 +-
+ launcher/src/instances.rs       |  28 ++++
+ launcher/src/launcher_play.rs   |   9 +-
+ launcher/src/launcher_setup.rs  |   7 +-
+ launcher/src/lib.rs             |   1 +
+ launcher/src/main.rs            |  37 +++++
+ launcher/src/mcp.rs             |   1 -
+ launcher/src/owner_page.rs      |  49 ++++--
+ launcher/src/profile_heads.rs   |  54 ++++++-
+ launcher/src/servers_page.rs    |  50 +++++-
+ launcher/src/skin_page.rs       | 264 +++++++++++++++++++++++++++++++
+ launcher/src/skins.rs           | 183 +++++++++++++++++++++
+ launcher/src/skins/tests.rs     | 124 +++++++++++++++
+ launcher/src/switch_page.rs     | 219 ++++++++++++++++++++++---
+ launcher/tests/owner_gate.rs    |  53 ++++---
+ 23 files changed, 1540 insertions(+), 251 deletions(-)
  create mode 100644 launcher/src/skin_page.rs
  create mode 100644 launcher/src/skins.rs
  create mode 100644 launcher/src/skins/tests.rs
 
 diff --git a/docs/launcher-commands.md b/docs/launcher-commands.md
-index e528b8967c..cfac379d32 100644
+index 116d641b..1775f220 100644
 --- a/docs/launcher-commands.md
 +++ b/docs/launcher-commands.md
-@@ -188,14 +188,45 @@ MCP: `account_sign_out`, needs `confirm: true`.
+@@ -230,14 +230,45 @@ MCP: `account_sign_out`, needs `confirm: true`.
  
  ## `horizon-launcher account select`
  
@@ -78,9 +83,9 @@ index e528b8967c..cfac379d32 100644
 +
  ## `horizon-launcher settings`
  
- Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), native-cache-gib N (combined native compilation cache limit in GiB, default 30; 0 disables automatic cleanup), native-profile performance|dev|release (the profile native mods build with: performance is incremental, dev rebuilds a mod quickest for a slow game, release is slowest to build and slightly faster to play).
+ Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), cache-limit-gib N (managed cache limit in GiB: 10, 25 (default), 50, 100; 0 disables automatic cleanup).
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index b4172bf099..b1569ba486 100644
+index b4172bf0..b1569ba4 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -6,8 +6,6 @@
@@ -354,7 +359,7 @@ index b4172bf099..b1569ba486 100644
  }
  
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 14b0d21e0a..9c66eae202 100644
+index 14b0d21e..9c66eae2 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -686,80 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
@@ -683,11 +688,60 @@ index 14b0d21e0a..9c66eae202 100644
      );
      assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
      assert_eq!(accounts.selected.as_deref(), Some(UUID));
+diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
+index 59560ab6..eee031d3 100644
+--- a/launcher/src/blocks_chrome.rs
++++ b/launcher/src/blocks_chrome.rs
+@@ -26,9 +26,13 @@ impl Launcher {
+                 ),
+             );
+         }
+-        // A signed-in account shows its face (its skin, else its UUID's default).
++        // Only a signed-in account says "Microsoft account"; otherwise an offline name, or the
++        // one the game made up. A signed-in one shows its face (its skin, else its UUID's default).
+         let (name, how) = self.who_plays();
+-        let face = self.accounts.selected().map(|a| a.uuid.clone());
++        let face = match self.accounts.player() {
++            account::Player::Microsoft(_) => self.accounts.selected().map(|a| a.uuid.clone()),
++            _ => Some(profile_heads::offline_key(&name)),
++        };
+         let picture = match face {
+             Some(uuid) => (self.profile_heads)
+                 .draw(Some(&uuid), 28., self.scale, &t)
+diff --git a/launcher/src/blocks_settings.rs b/launcher/src/blocks_settings.rs
+index e7e8785c..d1b728b0 100644
+--- a/launcher/src/blocks_settings.rs
++++ b/launcher/src/blocks_settings.rs
+@@ -188,6 +188,7 @@ impl Launcher {
+             );
+         }
+         let (accounts, n) = self.account_rows(cx);
++        let (offline, n) = self.offline_rows(n, cx);
+         let group = |label: &'static str, icon: &'static str| {
+             section_title(label, icon, &t).mt(px(20.)).mb(px(12.))
+         };
+@@ -206,6 +207,7 @@ impl Launcher {
+                     .flex_col()
+                     .child(group("Account", "user").mt_0())
+                     .child(accounts)
++                    .child(offline)
+                     .child(group("Updates", "reload"))
+                     .child(index_row(n + 1, "Horizon", Some(plain(&horizon)), horizon_action, &t))
+                     .child(index_row(
+@@ -627,7 +629,7 @@ impl Launcher {
+                 actions = actions.child(
+                     button(format!("select-{i}"), "Play as", Kind::Secondary, &t).on_click(
+                         cx.listener(move |this, _: &ClickEvent, _, cx| {
+-                            this.play_as(&uuid);
++                            this.play_as(account::Player::Microsoft(uuid.clone()));
+                             cx.notify();
+                         }),
+                     ),
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index a02b24bc59..20abb06ef0 100644
+index 9ad0f8aa..b445ee45 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
-@@ -126,8 +126,35 @@ enum AccountCmd {
+@@ -140,8 +140,35 @@ enum AccountCmd {
          /// Its name or UUID
          who: String,
      },
@@ -725,7 +779,7 @@ index a02b24bc59..20abb06ef0 100644
  }
  
  #[derive(Subcommand)]
-@@ -1499,23 +1526,26 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+@@ -1529,23 +1556,26 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
                  after_exit(&instance, &vars);
                  return played;
              }
@@ -760,7 +814,7 @@ index a02b24bc59..20abb06ef0 100644
              instances::apply(&mut cmd, &instance)?;
              if let Some(code) = join {
                  backend::join_friend(&mut cmd, &code)?;
-@@ -1533,6 +1563,10 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
+@@ -1563,6 +1593,10 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
              }
              cmd.args(arg);
              let started = std::time::Instant::now();
@@ -770,8 +824,8 @@ index a02b24bc59..20abb06ef0 100644
 +            cmd.envs(accounts.look_env());
              let vars = instance.vars(cmd.get_program());
              cmd.envs(vars.iter().map(|(k, v)| (k, v)));
-             let played = attached(horizon_launcher::launch::wrap(cmd, &instance.launch));
-@@ -1909,13 +1943,18 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+             horizon_launcher::jars::prepare_launch(
+@@ -1962,13 +1996,18 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                          "selected": accounts.selected.as_ref() == Some(&a.uuid),
                          "authentication": account::session::status(account::store(), &a.uuid),
                      })).collect::<Vec<_>>(),
@@ -793,7 +847,7 @@ index a02b24bc59..20abb06ef0 100644
                  );
              } else {
                  for a in &accounts.accounts {
-@@ -1932,11 +1971,19 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -1985,11 +2024,19 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                      };
                      println!("{mark} {}  {}  {}{why}", a.name, a.uuid, status.label());
                  }
@@ -816,7 +870,7 @@ index a02b24bc59..20abb06ef0 100644
                      );
                  }
              }
-@@ -2015,10 +2062,94 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -2068,10 +2115,94 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
              println!("Signed out {}.", a.name);
          }
          AccountCmd::Select { who } => {
@@ -914,8 +968,35 @@ index a02b24bc59..20abb06ef0 100644
          }
      }
      Ok(())
+diff --git a/launcher/src/developer_play.rs b/launcher/src/developer_play.rs
+index 0a8b2ad8..90837032 100644
+--- a/launcher/src/developer_play.rs
++++ b/launcher/src/developer_play.rs
+@@ -26,7 +26,9 @@ impl Launcher {
+                 }
+             };
+             if let Some(account::GameSession { file, offline, env }) = pass {
+-                self.owner = Some(true);
++                if file.is_some() {
++                    self.owner = Some(true);
++                }
+                 if let Some(file) = file {
+                     cmd.arg("--session-file").arg(file);
+                 }
+@@ -49,6 +51,11 @@ impl Launcher {
+                 self.client_error = Some(tr(horizon_launcher::developer_offline::NOTICE).into());
+             }
+             self.accounts = Accounts::load();
++            // An offline name the player picked (the quick switch).
++            if let Some(name) = self.accounts.name_arg() {
++                cmd.arg("--name").arg(name);
++            }
++            cmd.envs(self.accounts.look_env());
+             // A pack's Play button plays that pack; Play plays the selected instance.
+             let pack = self.starting_pack.take();
+             let instance = match &pack {
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index f05372abcc..25d468fdfe 100644
+index cd1767a6..b57807f1 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -6,6 +6,7 @@ use super::*;
@@ -926,7 +1007,7 @@ index f05372abcc..25d468fdfe 100644
  use horizon_launcher::instances::{Icon, Instance, Kind as InstanceKind};
  use horizon_theme::glass::{fill, ink, radius};
  use std::cell::RefCell;
-@@ -630,7 +631,10 @@ impl Launcher {
+@@ -1007,7 +1008,10 @@ impl Launcher {
          let strip = self.nav_strip.render(tabs, &t, performance, window);
  
          let (name, how) = self.who_plays();
@@ -936,9 +1017,9 @@ index f05372abcc..25d468fdfe 100644
 +            _ => Some(profile_heads::offline_key(&name)),
 +        };
          let open = self.account_menu;
-         let chip =
-             div()
-@@ -787,7 +791,7 @@ impl Launcher {
+         // Signed out, the chip is only the face: the Sign in with Microsoft button beside it
+         // says it once, and the page tabs keep their room.
+@@ -1196,7 +1200,7 @@ impl Launcher {
          }
          let t = self.theme;
          let soft = self.look.accent_soft;
@@ -947,7 +1028,7 @@ index f05372abcc..25d468fdfe 100644
          let mut menu = ui::popover(250.)
              .id("account-menu")
              .occlude()
-@@ -797,7 +801,13 @@ impl Launcher {
+@@ -1206,7 +1210,13 @@ impl Launcher {
                  cx.notify();
              }));
          for (i, (who, name, how)) in self.players().into_iter().enumerate() {
@@ -962,7 +1043,7 @@ index f05372abcc..25d468fdfe 100644
              let id = SharedString::from(format!("account-pick-{i}"));
              menu = menu.child(keyboard(
                  track_hover(
-@@ -843,7 +853,7 @@ impl Launcher {
+@@ -1252,7 +1262,7 @@ impl Launcher {
                              d.child(ui::icon("tick-02", 16., ui::color(soft)).relative())
                          })
                          .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -972,23 +1053,31 @@ index f05372abcc..25d468fdfe 100644
                          })),
                      id,
 diff --git a/launcher/src/home.rs b/launcher/src/home.rs
-index e670d9b028..71719ee44e 100644
+index 11e06689..8a949f3c 100644
 --- a/launcher/src/home.rs
 +++ b/launcher/src/home.rs
-@@ -243,7 +243,7 @@ impl Launcher {
+@@ -243,15 +243,7 @@ impl Launcher {
              .child(label(
                  tr(if running { "Running" } else { "Play" }).to_string(),
              ));
--        match play_press(ready, self.owner, self.preparing || running) {
+-        match play_press(
+-            ready,
+-            if horizon_launcher::developer_offline::selected() {
+-                Some(true)
+-            } else {
+-                self.owner
+-            },
+-            self.preparing || running,
+-        ) {
 +        match play_press(ready, self.preparing || running) {
              PlayPress::Nothing => play = disabled(play),
              PlayPress::Play => {
                  play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/instances.rs b/launcher/src/instances.rs
-index 2dd022b3a5..4d6da0a10b 100644
+index 39c5249d..1e8dc966 100644
 --- a/launcher/src/instances.rs
 +++ b/launcher/src/instances.rs
-@@ -710,6 +710,34 @@ fn follow_player(game_home: &Path, home: &Path) {
+@@ -757,6 +757,34 @@ fn follow_player(game_home: &Path, home: &Path) {
      }
  }
  
@@ -1023,95 +1112,13 @@ index 2dd022b3a5..4d6da0a10b 100644
  #[path = "instances/switch.rs"]
  mod switch;
  pub use switch::{switch, unkept, Plays, Unkept};
-diff --git a/launcher/src/lib.rs b/launcher/src/lib.rs
-index 93e4b818b0..d505ab07a5 100644
---- a/launcher/src/lib.rs
-+++ b/launcher/src/lib.rs
-@@ -51,6 +51,7 @@ pub mod setup_args;
- pub mod shop;
- pub mod shortcut;
- pub mod signed;
-+pub mod skins;
- pub mod sources;
- pub mod tailscale;
- pub mod telemetry;
-diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 4dd3a7fd0b..3605cb7b82 100644
---- a/launcher/src/main.rs
-+++ b/launcher/src/main.rs
-@@ -77,6 +77,7 @@ mod switch_page;
- mod theme;
- mod themes_page;
- mod titlebar;
-+mod skin_page;
- mod wardrobe_page;
- mod while_playing;
- mod worlds_page;
-@@ -319,6 +320,8 @@ struct Launcher {
-     /// Where the mouse went down to close a menu by pressing outside it, so that the
-     /// same press, ending on the menu's own button, doesn't open it again.
-     menu_closed_at: Option<Point<Pixels>>,
-+    /// Settings > Account's skin panel for an offline name (`skin_page.rs`).
-+    skin: Option<skin_page::SkinPanel>,
-     /// The Wardrobe page's account and outfit (`wardrobe_page.rs`).
-     wardrobe: Option<wardrobe_page::Wardrobe>,
-     /// Name tag styles' marks; they outlive the account's `wardrobe`.
-@@ -499,6 +502,8 @@ struct Launcher {
-     aside: while_playing::Aside,
-     /// The selected instance's desktop shortcut (`shortcut_page.rs`).
-     shortcuts: shortcut_page::Shortcuts,
-+    /// The name the game made up for an offline player (`horizon-player.txt`), for the top bar.
-+    offline_name: Option<String>,
-     /// The player's servers, for the sidebar until the Servers page has read them.
-     side_servers: Vec<horizon_launcher::servers::Entry>,
-     /// The pixel art made for this window (`art.rs`), and pictures downloaded by URL.
-@@ -635,6 +640,8 @@ impl Launcher {
-             notes_open: Default::default(),
-             notes: Default::default(),
-             picker: glass_home::PickerState::default(),
-+            skin: None,
-+            offline_name: offline_name(),
-             accent_strip: false,
-             look_sliders: Default::default(),
-             hue_area: std::rc::Rc::new(std::cell::Cell::new(None)),
-@@ -874,8 +881,9 @@ impl Launcher {
-     }
+diff --git a/launcher/src/launcher_play.rs b/launcher/src/launcher_play.rs
+index 23a2de31..11db4c3c 100644
+--- a/launcher/src/launcher_play.rs
++++ b/launcher/src/launcher_play.rs
+@@ -353,8 +353,15 @@ impl Launcher {
  
-     fn go(&mut self, page: Page) {
--        // The CLI or another window may have changed the accounts: read them again (a small
--        // file, once a switch).
-+        // The game may have made up a name since, and the CLI or another window may have
-+        // changed the accounts: read them again (small files, once a switch).
-+        self.offline_name = offline_name();
-         self.accounts = Accounts::load();
-         // Each check reads the keychain (a prompt on macOS): page switches check every account
-         // at most once a minute, and an account added meanwhile at once.
-@@ -1257,7 +1265,9 @@ impl Launcher {
-                                 continue;
-                             }
-                         };
--                        self.owner = Some(true);
-+                        if file.is_some() {
-+                            self.owner = Some(true);
-+                        }
-                         if let Some(file) = file {
-                             cmd.arg("--session-file").arg(file);
-                         }
-@@ -1269,6 +1279,11 @@ impl Launcher {
-                             self.client_error = Some(e);
-                         }
-                         self.accounts = Accounts::load();
-+                        // An offline name the player picked (the quick switch).
-+                        if let Some(name) = self.accounts.name_arg() {
-+                            cmd.arg("--name").arg(name);
-+                        }
-+                        cmd.envs(self.accounts.look_env());
-                         // A pack's Play button plays that pack; Play plays the selected instance.
-                         let (profile, run) = match self.starting_pack.take() {
-                             Some(work) => {
-@@ -1958,8 +1973,15 @@ impl Launcher {
- 
-     fn load_profile_heads(&mut self) {
+     pub(crate) fn load_profile_heads(&mut self) {
          let resources = self.game_resources();
 +        // Offline names wear their own skin's face, or the default skin of their offline UUID.
 +        let offline: Vec<String> = self
@@ -1125,11 +1132,83 @@ index 4dd3a7fd0b..3605cb7b82 100644
 +            .request(&self.accounts.accounts, &offline, resources, &self.tx);
      }
  
-     fn begin_auth_job(&mut self, uuid: &str) -> Option<u64> {
-@@ -2782,6 +2804,21 @@ fn centered(text_: &str, t: &Theme) -> Div {
-         .child(text(theme::UI).text_color(t.muted).child(text_.to_string()))
+     pub(crate) fn begin_auth_job(&mut self, uuid: &str) -> Option<u64> {
+diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
+index cb108e54..11920906 100644
+--- a/launcher/src/launcher_setup.rs
++++ b/launcher/src/launcher_setup.rs
+@@ -158,6 +158,8 @@ impl Launcher {
+             notes: Default::default(),
+             technical_open: Default::default(),
+             picker: glass_home::PickerState::default(),
++            skin: None,
++            offline_name: offline_name(),
+             accent_strip: false,
+             look_sliders: Default::default(),
+             hue_area: std::rc::Rc::new(std::cell::Cell::new(None)),
+@@ -413,8 +415,9 @@ impl Launcher {
+     }
+ 
+     pub(crate) fn go(&mut self, page: Page) {
+-        // The CLI or another window may have changed the accounts: read them again (a small
+-        // file, once a switch).
++        // The game may have made up a name since, and the CLI or another window may have
++        // changed the accounts: read them again (small files, once a switch).
++        self.offline_name = offline_name();
+         self.accounts = Accounts::load();
+         // Each check reads the keychain (a prompt on macOS): page switches check every account
+         // at most once a minute, and an account added meanwhile at once.
+diff --git a/launcher/src/lib.rs b/launcher/src/lib.rs
+index 1debd53a..a3911846 100644
+--- a/launcher/src/lib.rs
++++ b/launcher/src/lib.rs
+@@ -57,6 +57,7 @@ pub mod setup_args;
+ pub mod shop;
+ pub mod shortcut;
+ pub mod signed;
++pub mod skins;
+ pub mod sources;
+ pub mod tailscale;
+ pub mod telemetry;
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index 8b345dac..7645ec4d 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -93,6 +93,8 @@ mod switch_page;
+ mod theme;
+ mod themes_page;
+ mod titlebar;
++mod skin_page;
++mod skin_page;
+ mod wardrobe_page;
+ mod welcome;
+ mod while_playing;
+@@ -383,6 +385,10 @@ struct Launcher {
+     /// Where the mouse went down to close a menu by pressing outside it, so that the
+     /// same press, ending on the menu's own button, doesn't open it again.
+     menu_closed_at: Option<Point<Pixels>>,
++    /// Settings > Account's skin panel for an offline name (`skin_page.rs`).
++    skin: Option<skin_page::SkinPanel>,
++    /// Settings > Account's skin panel for an offline name (`skin_page.rs`).
++    skin: Option<skin_page::SkinPanel>,
+     /// The Wardrobe page's account and outfit (`wardrobe_page.rs`).
+     wardrobe: Option<wardrobe_page::Wardrobe>,
+     /// Name tag styles' marks; they outlive the account's `wardrobe`.
+@@ -578,6 +584,10 @@ struct Launcher {
+     aside: while_playing::Aside,
+     /// The selected instance's desktop shortcut (`shortcut_page.rs`).
+     shortcuts: shortcut_page::Shortcuts,
++    /// The name the game made up for an offline player (`horizon-player.txt`), for the top bar.
++    offline_name: Option<String>,
++    /// The name the game made up for an offline player (`horizon-player.txt`), for the top bar.
++    offline_name: Option<String>,
+     /// The player's servers, for the sidebar until the Servers page has read them.
+     side_servers: Vec<horizon_launcher::servers::Entry>,
+     /// The pixel art made for this window (`art.rs`), and pictures downloaded by URL.
+@@ -660,6 +670,21 @@ fn closed_by_press(closed_at: Option<Point<Pixels>>, event: &ClickEvent) -> bool
  }
  
+ #[cfg(test)]
 +/// The name the game made up for a player without an account, once it has run.
 +fn offline_name() -> Option<String> {
 +    player_name(&std::fs::read_to_string(backend::game_home().join("horizon-player.txt")).ok()?)
@@ -1145,51 +1224,10 @@ index 4dd3a7fd0b..3605cb7b82 100644
 +        .map(str::to_owned)
 +}
 +
- /// `1234` as `1,234`.
- fn thousands(n: u64) -> String {
-     let digits = n.to_string();
-@@ -2845,9 +2882,13 @@ impl Launcher {
-                 ),
-             );
-         }
--        // A signed-in account shows its face (its skin, else its UUID's default).
-+        // Only a signed-in account says "Microsoft account"; otherwise an offline name, or the
-+        // one the game made up. A signed-in one shows its face (its skin, else its UUID's default).
-         let (name, how) = self.who_plays();
--        let face = self.accounts.selected().map(|a| a.uuid.clone());
-+        let face = match self.accounts.player() {
-+            account::Player::Microsoft(_) => self.accounts.selected().map(|a| a.uuid.clone()),
-+            _ => None,
-+        };
-         let picture = match face {
-             Some(uuid) => (self.profile_heads)
-                 .draw(Some(&uuid), 28., self.scale, &t)
-@@ -3990,6 +4031,7 @@ impl Launcher {
-             );
-         }
-         let (accounts, n) = self.account_rows(cx);
-+        let (offline, n) = self.offline_rows(n, cx);
-         let group = |label: &'static str, icon: &'static str| {
-             section_title(label, icon, &t).mt(px(20.)).mb(px(12.))
-         };
-@@ -4008,6 +4050,7 @@ impl Launcher {
-                     .flex_col()
-                     .child(group("Account", "user").mt_0())
-                     .child(accounts)
-+                    .child(offline)
-                     .child(group("Updates", "reload"))
-                     .child(index_row(n + 1, "Horizon", Some(plain(&horizon)), horizon_action, &t))
-                     .child(index_row(
-@@ -4449,7 +4492,7 @@ impl Launcher {
-                 actions = actions.child(
-                     button(format!("select-{i}"), "Play as", Kind::Secondary, &t).on_click(
-                         cx.listener(move |this, _: &ClickEvent, _, cx| {
--                            this.play_as(&uuid);
-+                            this.play_as(account::Player::Microsoft(uuid.clone()));
-                             cx.notify();
-                         }),
-                     ),
-@@ -5988,6 +6031,18 @@ mod tests {
+ mod tests {
+     #[test]
+     fn an_unopenable_data_folder_starts_on_settings_instead_of_exiting() {
+@@ -895,6 +920,18 @@ mod tests {
          ));
      }
  
@@ -1209,10 +1247,10 @@ index 4dd3a7fd0b..3605cb7b82 100644
      fn counts_get_thousands_separators() {
          let shown: Vec<String> = [0, 7, 999, 1000, 12_300, 1_234_500]
 diff --git a/launcher/src/mcp.rs b/launcher/src/mcp.rs
-index 4867e439be..128691529b 100644
+index 588457f7..94037cbd 100644
 --- a/launcher/src/mcp.rs
 +++ b/launcher/src/mcp.rs
-@@ -210,7 +210,6 @@ impl Session {
+@@ -230,7 +230,6 @@ impl Session {
                      // where it refused them (`secrets_file`: the file holds a sign-in).
                      "keychain": account::store().persistent(),
                      "secrets_file": account::in_secrets_file(),
@@ -1221,10 +1259,10 @@ index 4867e439be..128691529b 100644
                      "sign_in": sign_in,
                  }))
 diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
-index d274cd229e..7430b2f0e6 100644
+index ce952235..aa659a7d 100644
 --- a/launcher/src/owner_page.rs
 +++ b/launcher/src/owner_page.rs
-@@ -1,15 +1,10 @@
+@@ -1,16 +1,11 @@
  //! The owner gate in the window (`horizon_launcher::account::launch`): the screen that asks for a
 -//! Microsoft account that owns Minecraft: Java Edition. It covers the launcher once for players
 -//! without one (those who played offline before the gate), and again whenever Play is refused.
@@ -1235,13 +1273,14 @@ index d274cd229e..7430b2f0e6 100644
 -    /// Whether the screen covers the window: no owner, and either Play was refused or the player
 -    /// hasn't read it yet. The data question comes first.
      pub(crate) fn asking_owner(&self) -> bool {
-         (self.owner == Some(false) || sign_in_preview())
+         (!horizon_launcher::developer_offline::selected() || sign_in_preview())
+             && (self.owner == Some(false) || sign_in_preview())
 -            && (self.owner_screen_open || !self.settings.owner_notice_seen || sign_in_preview())
 +            && self.owner_screen_open
              && !self.asking_consent()
              && self.opening.is_none()
      }
-@@ -24,10 +19,8 @@ impl Launcher {
+@@ -30,10 +25,8 @@ impl Launcher {
      fn close_owner_screen(&mut self) {
          self.cancel_sign_in();
          self.owner_screen_open = false;
@@ -1254,7 +1293,7 @@ index d274cd229e..7430b2f0e6 100644
      }
  
      pub(crate) fn owner_screen(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
-@@ -37,7 +30,7 @@ impl Launcher {
+@@ -43,7 +36,7 @@ impl Launcher {
          // The screenshot preview shows a code without asking Microsoft for one.
          let state = match &self.sign_in_state {
              _ if sign_in_preview() => Shown::Code("https://www.microsoft.com/link", "K7Q-4MXR"),
@@ -1263,7 +1302,7 @@ index d274cd229e..7430b2f0e6 100644
              Some(SignInState::Starting) => Shown::Starting("Asking Microsoft…"),
              Some(SignInState::Working(phase)) => Shown::Starting(phase.label()),
              Some(SignInState::Code(code)) => Shown::Code(&code.verification_uri, &code.user_code),
-@@ -74,6 +67,14 @@ impl Launcher {
+@@ -80,6 +73,14 @@ impl Launcher {
              .child(line(
                  "No Minecraft install needed: Horizon downloads it from Mojang for your account.",
                  n.ink_soft,
@@ -1278,7 +1317,7 @@ index d274cd229e..7430b2f0e6 100644
              ));
          let raised = || {
              div()
-@@ -196,7 +197,7 @@ impl Launcher {
+@@ -202,7 +203,7 @@ impl Launcher {
                  )
              }
              Shown::Starting(_) => None,
@@ -1287,7 +1326,7 @@ index d274cd229e..7430b2f0e6 100644
              _ => Some(
                  microsoft::sign_in_button("owner-sign-in", &t).on_click(cx.listener(
                      |this, _: &ClickEvent, _, cx| {
-@@ -218,6 +219,25 @@ impl Launcher {
+@@ -224,6 +225,25 @@ impl Launcher {
              .gap(px(10.))
              .mt(px(14.))
              .children(main)
@@ -1313,7 +1352,7 @@ index d274cd229e..7430b2f0e6 100644
              .child(
                  shell::action("owner-later", shell::Action::Quiet, &t)
                      .child(shell::label(tr("Not now").to_string()))
-@@ -312,7 +332,10 @@ impl Launcher {
+@@ -318,7 +338,10 @@ impl Launcher {
                      )))
                      .child(ui::text(14., FontWeight::NORMAL, ink::BODY).child(tr(
                          "No Minecraft install needed: Horizon downloads it from Mojang for your account.",
@@ -1326,7 +1365,7 @@ index d274cd229e..7430b2f0e6 100644
          card = match state {
              Shown::Code(uri, user_code) => {
 diff --git a/launcher/src/profile_heads.rs b/launcher/src/profile_heads.rs
-index 8a83d1544a..c8119426ab 100644
+index 8a83d154..c8119426 100644
 --- a/launcher/src/profile_heads.rs
 +++ b/launcher/src/profile_heads.rs
 @@ -23,11 +23,59 @@ struct Head {
@@ -1393,10 +1432,10 @@ index 8a83d1544a..c8119426ab 100644
              let url = account.skin.as_ref().map(|s| s.0.clone());
              if self.0.get(&account.uuid).is_some_and(|h| {
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 496fa8fcda..94d87fb858 100644
+index 839fe1b9..b05084a1 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
-@@ -59,6 +59,8 @@ pub(super) enum Field {
+@@ -74,6 +74,8 @@ pub(super) enum Field {
      PostExit,
      /// Home's memory row (`launch_page.rs`).
      MemoryLimit,
@@ -1405,20 +1444,47 @@ index 496fa8fcda..94d87fb858 100644
      DeleteServer,
      /// Settings' accent as hex (`themes_page.rs`).
      AccentHex,
-@@ -67,10 +69,11 @@ pub(super) enum Field {
+@@ -87,6 +89,39 @@ pub(super) enum Field {
+     WindowHeight,
  }
  
- impl Field {
--    const ALL: [Field; 24] = [
-+    const ALL: [Field; 25] = [
-         Field::Name,
-         Field::Seed,
-         Field::Players,
++impl Field {
++    const ALL: [Field; 29] = [
++        Field::Name,
++        Field::Seed,
++        Field::Players,
 +        Field::OfflineName,
-         Field::Command,
-         Field::AddPlayer,
-         Field::Motd,
-@@ -399,9 +402,13 @@ pub(super) fn keep_running_through_update() {
++        Field::Command,
++        Field::AddPlayer,
++        Field::Motd,
++        Field::Port,
++        Field::Token,
++        Field::Email,
++        Field::InstanceName,
++        Field::InstanceGroup,
++        Field::InstanceVersion,
++        Field::InstanceModsFilter,
++        Field::ServerName,
++        Field::ServerAddress,
++        Field::ConsoleSearch,
++        Field::PreLaunch,
++        Field::Wrapper,
++        Field::LaunchEnv,
++        Field::PostExit,
++        Field::MemoryLimit,
++        Field::DeleteServer,
++        Field::AccentHex,
++        Field::ShopGift,
++        Field::WardrobeSearch,
++        Field::JavaArgs,
++        Field::WindowWidth,
++        Field::WindowHeight,
++    ];}
++
+ #[derive(Clone, Copy, PartialEq, Debug)]
+ pub(super) enum Tab {
+     Overview,
+@@ -393,9 +428,13 @@ pub(super) fn keep_running_through_update() {
      STARTED_HERE.lock().unwrap().clear();
  }
  
@@ -1433,8 +1499,8 @@ index 496fa8fcda..94d87fb858 100644
 +        .or_else(crate::offline_name)
  }
  
- fn bytes(n: u64) -> String {
-@@ -1124,7 +1131,7 @@ impl Launcher {
+ impl Launcher {
+@@ -1089,7 +1128,7 @@ impl Launcher {
                          .font_weight(FontWeight::MEDIUM)
                  })
                  // The friend field sits in its chip, on the chip's fill.
@@ -1443,7 +1509,7 @@ index 496fa8fcda..94d87fb858 100644
                      d.h_full().px(px(14.)).bg(gpui::transparent_black())
                  })
                  // The server's command line: the field is the line's middle, on its fill, in mono.
-@@ -1139,7 +1146,9 @@ impl Launcher {
+@@ -1104,7 +1143,9 @@ impl Launcher {
                  // The mockup's focus ring (`:focus-visible`, 2 px of the accent's soft shade) on a
                  // field of its own, drawn inside its edge: GPUI has no outline.
                  .when(
@@ -1454,7 +1520,7 @@ index 496fa8fcda..94d87fb858 100644
                      |d| {
                          let small = matches!(
                              f,
-@@ -1284,6 +1293,7 @@ impl Launcher {
+@@ -1254,6 +1295,7 @@ impl Launcher {
                  self.save_launch()
              }
              Field::MemoryLimit => self.memory_enter(),
@@ -1464,7 +1530,7 @@ index 496fa8fcda..94d87fb858 100644
          }
 diff --git a/launcher/src/skin_page.rs b/launcher/src/skin_page.rs
 new file mode 100644
-index 0000000000..d4bcb8a9e6
+index 00000000..d4bcb8a9
 --- /dev/null
 +++ b/launcher/src/skin_page.rs
 @@ -0,0 +1,264 @@
@@ -1734,7 +1800,7 @@ index 0000000000..d4bcb8a9e6
 +}
 diff --git a/launcher/src/skins.rs b/launcher/src/skins.rs
 new file mode 100644
-index 0000000000..a70933aa86
+index 00000000..a70933aa
 --- /dev/null
 +++ b/launcher/src/skins.rs
 @@ -0,0 +1,183 @@
@@ -1923,7 +1989,7 @@ index 0000000000..a70933aa86
 +mod tests;
 diff --git a/launcher/src/skins/tests.rs b/launcher/src/skins/tests.rs
 new file mode 100644
-index 0000000000..69f957b74f
+index 00000000..69f957b7
 --- /dev/null
 +++ b/launcher/src/skins/tests.rs
 @@ -0,0 +1,124 @@
@@ -2052,7 +2118,7 @@ index 0000000000..69f957b74f
 +    std::fs::remove_dir_all(&root).unwrap();
 +}
 diff --git a/launcher/src/switch_page.rs b/launcher/src/switch_page.rs
-index 4062a2e719..c8258dc1a8 100644
+index 4062a2e7..c8258dc1 100644
 --- a/launcher/src/switch_page.rs
 +++ b/launcher/src/switch_page.rs
 @@ -1,19 +1,30 @@
@@ -2330,7 +2396,7 @@ index 4062a2e719..c8258dc1a8 100644
 +    }
  }
 diff --git a/launcher/tests/owner_gate.rs b/launcher/tests/owner_gate.rs
-index 7c59068c3c..8f263f93b1 100644
+index 7c59068c..8f263f93 100644
 --- a/launcher/tests/owner_gate.rs
 +++ b/launcher/tests/owner_gate.rs
 @@ -1,25 +1,18 @@
@@ -2425,6 +2491,3 @@ index 7c59068c3c..8f263f93b1 100644
 +    assert!(!said.contains(REFUSED), "{said}");
      let _ = std::fs::remove_dir_all(&root);
  }
--- 
-2.47.3
-

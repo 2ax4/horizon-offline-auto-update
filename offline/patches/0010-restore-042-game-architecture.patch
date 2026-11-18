@@ -1,41 +1,19 @@
-From cdc444297dbba7f26f7ed5207553494c481b5acd Mon Sep 17 00:00:00 2001
+From 1b44acff67770bdd0794fa5eab2537a2dbc1d1c2 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
  prune orphaned translations
 
 ---
- launcher/src/cli.rs  | 4 ++--
- launcher/src/main.rs | 2 +-
+ launcher/src/blocks_chrome.rs | 2 +-
+ launcher/src/cli.rs           | 4 ++--
  2 files changed, 3 insertions(+), 3 deletions(-)
 
-diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index 20abb06ef0..e9929bf685 100644
---- a/launcher/src/cli.rs
-+++ b/launcher/src/cli.rs
-@@ -1347,7 +1347,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
-                     // The instance's version is never looked at here: the newest installed
-                     // release or Nightly, or that one with `--update` (never a native build).
-                     None => native_mods::base_for(None, &backend::installed(), update)
--                        .ok_or_else(backend::no_version_installed)?,
-+                        .ok_or_else(|| tr("No version is installed yet."))?,
-                 };
-                 let built = native_mods::build_server(
-                     &base,
-@@ -1389,7 +1389,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
-                 None => {
-                     let plays = target.resolve_version(None).ok();
-                     native_mods::base_for(plays.as_deref(), &backend::installed(), update)
--                        .ok_or_else(backend::no_version_installed)?
-+                        .ok_or("No version is installed yet.")?
-                 }
-             };
-             let folder = match folder {
-diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 8f350b5084..81fc217990 100644
---- a/launcher/src/main.rs
-+++ b/launcher/src/main.rs
-@@ -3162,7 +3162,7 @@ impl Launcher {
+diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
+index 530901ff..f5dc246c 100644
+--- a/launcher/src/blocks_chrome.rs
++++ b/launcher/src/blocks_chrome.rs
+@@ -355,7 +355,7 @@ impl Launcher {
                  .id("launcher-version")
                  .px(px(8.))
                  .pt(px(6.))
@@ -44,6 +22,25 @@ index 8f350b5084..81fc217990 100644
          );
          // Custom title bars carry the mark and name already.
          let brand = (!titlebar::draws_brand(window)).then(|| {
--- 
-2.47.3
-
+diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
+index b445ee45..c6405cd6 100644
+--- a/launcher/src/cli.rs
++++ b/launcher/src/cli.rs
+@@ -1395,7 +1395,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
+                     // The instance's version is never looked at here: the newest installed
+                     // release or Nightly, or that one with `--update` (never a native build).
+                     None => native_mods::base_for(None, &backend::installed(), update)
+-                        .ok_or_else(backend::no_version_installed)?,
++                        .ok_or_else(|| tr("No version is installed yet."))?,
+                 };
+                 let built = native_mods::build_server(
+                     &base,
+@@ -1436,7 +1436,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
+                 None => {
+                     let plays = target.resolve_version(None).ok();
+                     native_mods::base_for(plays.as_deref(), &backend::installed(), update)
+-                        .ok_or_else(backend::no_version_installed)?
++                        .ok_or("No version is installed yet.")?
+                 }
+             };
+             let explicit = folder.is_some() || profile.is_some();

@@ -1,24 +1,22 @@
-From 83cb47bc9596afbb63560f45d972150fd546655e Mon Sep 17 00:00:00 2001
+From 6984d25087099d54fea5777dbc074f92bacbb137 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 4/9] Offline build: quiet sign-in notices and fork repo
 
 ---
- launcher/src/backend.rs | 1 +
- 1 file changed, 1 insertion(+)
+ launcher/src/backend.rs | 2 ++
+ 1 file changed, 2 insertions(+)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 75249bebd6..e6830e0b03 100644
+index c5aa45bb..78ca1107 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -11,6 +11,7 @@ use std::sync::mpsc::Sender;
- use std::sync::{Arc, Mutex};
- 
+@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
+ /// Authority for game, launcher and native SDK release reads on this fork.
  pub const REPO: &str = "horizon-rust/horizon";
+ 
 +pub const LAUNCHER_REPO: &str = "2ax4/horizon-offline-auto-update";
- pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
- /// The players' page on connecting an AI agent (the website's docs/agents.md).
- pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
--- 
-2.47.3
-
++
+ /// Where a crash is reported.
+ pub fn issues_url() -> String {
+     format!("https://github.com/{REPO}/issues")

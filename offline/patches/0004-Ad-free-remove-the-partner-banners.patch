@@ -1,21 +1,23 @@
-From 4d032aac7d01f2a4d537a2d272615d470375e170 Mon Sep 17 00:00:00 2001
+From 919a35ae6727e0a0e9393d1e13fbd1ebaae67d97 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 11:44:12 +0000
 Subject: [PATCH 3/9] Ad-free: remove the partner banners
 
 ---
- launcher/src/backend.rs       |  7 -----
- launcher/src/frame.rs         | 30 -------------------
- launcher/src/glass_servers.rs | 43 ---------------------------
- launcher/src/main.rs          | 56 -----------------------------------
- launcher/src/servers_page.rs  | 31 +++----------------
- 5 files changed, 4 insertions(+), 163 deletions(-)
+ launcher/src/backend.rs        |  7 ------
+ launcher/src/blocks_chrome.rs  | 28 ----------------------
+ launcher/src/frame.rs          | 21 -----------------
+ launcher/src/glass_servers.rs  | 43 ----------------------------------
+ launcher/src/launcher_setup.rs | 24 -------------------
+ launcher/src/main.rs           |  1 -
+ launcher/src/servers_page.rs   | 31 ++++--------------------
+ 7 files changed, 4 insertions(+), 151 deletions(-)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 8bce637ed9..75249bebd6 100644
+index f780d25f..c5aa45bb 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -4479,13 +4479,6 @@ pub struct Settings {
+@@ -4264,13 +4264,6 @@ pub struct Settings {
      /// one now (the owner gate's screen).
      #[serde(default)]
      pub owner_notice_seen: bool,
@@ -29,49 +31,79 @@ index 8bce637ed9..75249bebd6 100644
      /// What the window does while the game runs. Stays by default.
      #[serde(default)]
      pub while_playing: WhilePlaying,
-diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 25d468fdfe..ae452dad92 100644
---- a/launcher/src/frame.rs
-+++ b/launcher/src/frame.rs
-@@ -476,36 +476,6 @@ impl Launcher {
+diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
+index eee031d3..530901ff 100644
+--- a/launcher/src/blocks_chrome.rs
++++ b/launcher/src/blocks_chrome.rs
+@@ -310,34 +310,6 @@ impl Launcher {
+             }
              _ => {}
          }
- 
--        // Sculk's card (not in the mockup, kept: a sponsor), where the old sidebar had it: at
--        // the sidebar's foot above the links, on every page (Servers shows the wide banner too).
--        // Tall where the sidebar has the height for it besides its rows, compact otherwise.
--        if !self.settings.partner_hidden {
--            let rows = self.instances.list.len() + servers.len();
+-        // Sculk's card above the links: seen without scrolling, on every page but Servers, which shows
+-        // its wide banner. Tall where the sidebar has the height for it besides the wordmark, its rows
+-        // (52 high each, under headings of 40) and the links, compact otherwise. After a while on
+-        // screen a "Hide" beside its label puts it away for good.
+-        if self.page != Page::Servers && !self.settings.partner_hidden {
 -            let free = f32::from(window.viewport_size().height)
--                - 2. * MARGIN
--                - 52.
--                - 56. * rows as f32
--                - 190.;
--            let mut side = div().relative().mt(px(12.)).child(partner::card(
+-                - theme::TOPBAR
+-                - 40. * headings as f32
+-                - 52. * rows as f32
+-                - 110.;
+-            let mut side = div().relative().mb(px(8.)).child(partner::card(
 -                "partner-side",
--                SIDEBAR - 20.,
+-                theme::SIDEBAR - 20.,
 -                free < partner::TALL_HEIGHT,
 -                &t,
 -            ));
 -            if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
--                side = side.child(
--                    partner::hide_button("partner-hide", &t).on_click(cx.listener(
--                        |this, _: &ClickEvent, _, cx| {
--                            this.settings.partner_hidden = true;
--                            this.save_settings();
--                            cx.notify();
--                        },
--                    )),
--                );
+-                let hide = partner::hide_button("partner-hide", &t).on_click(cx.listener(
+-                    |this, _: &ClickEvent, _, cx| {
+-                        this.settings.partner_hidden = true;
+-                        this.save_settings();
+-                        cx.notify();
+-                    },
+-                ));
+-                side = side.child(hide);
 -            }
 -            foot = foot.child(side);
 -        }
--
-         if !self.links.discord.is_empty() {
-             let url = self.links.discord.clone();
-             foot = foot.child(keyboard(
+         if !self.links.sponsor.is_empty() {
+             foot = foot.child(link(
+                 "sponsor",
+diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
+index b57807f1..b70195de 100644
+--- a/launcher/src/frame.rs
++++ b/launcher/src/frame.rs
+@@ -678,27 +678,6 @@ impl Launcher {
+         };
+         if open {
+             foot = foot.children(self.rail_update_card(soft, cx));
+-            // Sculk's card (a sponsor), only where the rail is wide enough to show it.
+-            // When the instances already overflow the rail, the list keeps the room.
+-            if !self.settings.partner_hidden && p > 0.98 && !overflows {
+-                let free = f32::from(window.viewport_size().height) - 420. - 52. * rows as f32;
+-                let mut side = div().relative().mb(px(6.)).child(partner::card(
+-                    "partner-side",
+-                    RAIL_OPEN - 24.,
+-                    free < partner::TALL_HEIGHT,
+-                    &t,
+-                ));
+-                if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
+-                    side = side.child(partner::hide_button("partner-hide", &t).on_click(
+-                        cx.listener(|this, _: &ClickEvent, _, cx| {
+-                            this.settings.partner_hidden = true;
+-                            this.save_settings();
+-                            cx.notify();
+-                        }),
+-                    ));
+-                }
+-                foot = foot.child(side);
+-            }
+         }
+ 
+         // Discord keeps its own blurple in every theme, as the icon at rest and the fill under the
 diff --git a/launcher/src/glass_servers.rs b/launcher/src/glass_servers.rs
-index 2f1fb53ce2..46b7f3bfbf 100644
+index fc72b286..0b7d6d05 100644
 --- a/launcher/src/glass_servers.rs
 +++ b/launcher/src/glass_servers.rs
 @@ -66,9 +66,6 @@ impl Launcher {
@@ -84,7 +116,7 @@ index 2f1fb53ce2..46b7f3bfbf 100644
          if let Some(dir) = &open {
              page = page.child(self.glass_server_tabs(dir, &status, cx));
          }
-@@ -773,46 +770,6 @@ impl Launcher {
+@@ -806,46 +803,6 @@ impl Launcher {
                  d.child(self.internet_invites(port_of(self), cx).relative())
              })
      }
@@ -131,19 +163,11 @@ index 2f1fb53ce2..46b7f3bfbf 100644
  }
  
  /// The open server's port.
-diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 3605cb7b82..57a535d9b6 100644
---- a/launcher/src/main.rs
-+++ b/launcher/src/main.rs
-@@ -57,7 +57,6 @@ mod new_instance;
- mod notes_cache;
- mod owner_page;
- mod packs_page;
--mod partner;
- mod perf;
- mod picture_cache;
- mod plate;
-@@ -533,30 +532,6 @@ impl Launcher {
+diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
+index 11920906..8e55a9c2 100644
+--- a/launcher/src/launcher_setup.rs
++++ b/launcher/src/launcher_setup.rs
+@@ -24,30 +24,6 @@ impl Launcher {
              }
          })
          .detach();
@@ -174,63 +198,23 @@ index 3605cb7b82..57a535d9b6 100644
          let mut settings = Settings::load();
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
-@@ -3002,7 +2977,6 @@ impl Launcher {
-             },
-         ));
-         let items = self.instance_items(heading, cx);
--        let mut rows = items.len();
-         let list = div()
-             .flex()
-             .flex_col()
-@@ -3018,8 +2992,6 @@ impl Launcher {
-         if !servers.is_empty() {
-             list = list.child(heading(tr("SERVERS").into()));
-         }
--        rows += servers.len();
--        let headings = 1 + usize::from(!servers.is_empty());
-         for e in servers {
-             let up = self.servers.is_up(&e.dir);
-             let open = self.page == Page::Servers && self.servers.open.as_ref() == Some(&e.dir);
-@@ -3166,34 +3138,6 @@ impl Launcher {
-             }
-             _ => {}
-         }
--        // Sculk's card above the links: seen without scrolling, on every page but Servers, which shows
--        // its wide banner. Tall where the sidebar has the height for it besides the wordmark, its rows
--        // (52 high each, under headings of 40) and the links, compact otherwise. After a while on
--        // screen a "Hide" beside its label puts it away for good.
--        if self.page != Page::Servers && !self.settings.partner_hidden {
--            let free = f32::from(window.viewport_size().height)
--                - theme::TOPBAR
--                - 40. * headings as f32
--                - 52. * rows as f32
--                - 110.;
--            let mut side = div().relative().mb(px(8.)).child(partner::card(
--                "partner-side",
--                theme::SIDEBAR - 20.,
--                free < partner::TALL_HEIGHT,
--                &t,
--            ));
--            if self.settings.partner_seen_secs >= partner::SEEN_BEFORE_HIDE {
--                let hide = partner::hide_button("partner-hide", &t).on_click(cx.listener(
--                    |this, _: &ClickEvent, _, cx| {
--                        this.settings.partner_hidden = true;
--                        this.save_settings();
--                        cx.notify();
--                    },
--                ));
--                side = side.child(hide);
--            }
--            foot = foot.child(side);
--        }
-         if !self.links.sponsor.is_empty() {
-             foot = foot.child(link(
-                 "sponsor",
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index 7645ec4d..6d5963c7 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -75,7 +75,6 @@ mod new_instance;
+ mod notes_cache;
+ mod owner_page;
+ mod packs_page;
+-mod partner;
+ mod perf;
+ mod picture_cache;
+ mod plate;
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 94d87fb858..c41966793a 100644
+index b05084a1..85cd0b81 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
-@@ -1450,34 +1450,11 @@ impl Launcher {
+@@ -1452,34 +1452,11 @@ impl Launcher {
          {
              page = page.child(self.problem_notice(p, cx));
          }
@@ -261,14 +245,14 @@ index 94d87fb858..c41966793a 100644
 -        if self.servers.list.is_empty() {
 -            return page
 -                .child(centered(
--                    tr("No server yet. Create one: it takes a few seconds, and with the defaults (tick the EULA, press Create) you get a friends-only survival world."),
+-                    tr("No server yet. Create one: it takes a few seconds, and with the defaults (accept Minecraft's terms, press Create) you get a friends-only survival world."),
 -                    &t,
 -                ))
 -                .children(partner);
          }
          let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
          for (i, e) in self.servers.list.clone().into_iter().enumerate() {
-@@ -1523,7 +1500,7 @@ impl Launcher {
+@@ -1525,7 +1502,7 @@ impl Launcher {
                  &t,
              ));
          }
@@ -277,6 +261,3 @@ index 94d87fb858..c41966793a 100644
      }
  
      fn add_server_folder(&mut self, cx: &mut Context<Self>) {
--- 
-2.47.3
-

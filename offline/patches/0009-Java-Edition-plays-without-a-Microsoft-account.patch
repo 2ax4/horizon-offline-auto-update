@@ -1,42 +1,48 @@
-From 9a8f88b146bb2ae49ba86dd624dfb46efe50fb52 Mon Sep 17 00:00:00 2001
+From 3d2c4f3009afb31af57299628c7a1ba00be30856 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
 
 ---
- launcher/Cargo.lock     |   1 +
- launcher/Cargo.toml     |   1 +
- launcher/src/account.rs |  44 ++++++++++++++-
- launcher/src/backend.rs | 119 ++++++++++++++++------------------------
- launcher/src/main.rs    |  32 +++++++----
- 5 files changed, 112 insertions(+), 85 deletions(-)
+ launcher/Cargo.lock         |   1 +
+ launcher/Cargo.toml         |   6 ++
+ launcher/src/account.rs     |  44 +++++++++++++-
+ launcher/src/backend.rs     | 117 +++++++++++++++---------------------
+ launcher/src/blocks_play.rs |  29 ++++++---
+ launcher/src/widgets.rs     |   3 -
+ 6 files changed, 116 insertions(+), 84 deletions(-)
 
 diff --git a/launcher/Cargo.lock b/launcher/Cargo.lock
-index 23fa3d48c8..49349df0e1 100644
+index b9301b2b..60abcf1c 100644
 --- a/launcher/Cargo.lock
 +++ b/launcher/Cargo.lock
-@@ -2821,6 +2821,7 @@ dependencies = [
-  "horizon-mods",
+@@ -2940,6 +2940,7 @@ dependencies = [
+  "horizon-mod-vocab",
   "horizon-platform",
   "horizon-port-pack",
 + "horizon-protocol",
   "horizon-release-sign",
+  "horizon-server-launch",
   "horizon-shader-api",
-  "horizon-telemetry",
 diff --git a/launcher/Cargo.toml b/launcher/Cargo.toml
-index c000f0fd06..b9268ce221 100644
+index 640646aa..f2461e10 100644
 --- a/launcher/Cargo.toml
 +++ b/launcher/Cargo.toml
-@@ -55,6 +55,7 @@ horizon-mcp = { path = "../crates/horizon-mcp" }
+@@ -62,6 +62,12 @@ horizon-mcp = { path = "../crates/horizon-mcp" }
  horizon-friends = { path = "../crates/horizon-friends" }
  # Import modpack: the porting pipeline, run on the player's own files (docs/modpacks.md).
  horizon-port-pack = { path = "../crates/horizon-port-pack" }
++<<<<<<< HEAD
++=======
 +horizon-protocol = { path = "../crates/horizon-protocol" }
- # Horizon's mod registry: its index and the checks a download passes before install.
- horizon-mods = { path = "../crates/horizon-mods", features = ["index"] }
++# Horizon's mod registry: its index and the checks a download passes before install.
++horizon-mods = { path = "../crates/horizon-mods", features = ["index"] }
++>>>>>>> b41b82be (Java Edition plays without a Microsoft account)
  # Use the game's manifest validation for native shader identities.
+ horizon-shader-api = { path = "../crates/horizon-shader-api" }
+ # Signed updates: archives are checked against the release's signed checksums (docs/security.md).
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index b1569ba486..91929232cc 100644
+index b1569ba4..91929232 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -2382,7 +2382,10 @@ pub struct GameSession {
@@ -111,10 +117,10 @@ index b1569ba486..91929232cc 100644
  #[cfg(test)]
  mod tests;
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index e6830e0b03..1f167338fa 100644
+index 78ca1107..096c7d67 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -2115,9 +2115,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
+@@ -1994,9 +1994,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
      binary.is_file().then_some(binary)
  }
  
@@ -127,7 +133,7 @@ index e6830e0b03..1f167338fa 100644
  fn download_for_owner(
      pins: &sources::Pins,
      dir: &Path,
-@@ -2125,7 +2125,6 @@ fn download_for_owner(
+@@ -2004,7 +2004,6 @@ fn download_for_owner(
      log: &dyn Fn(String),
  ) -> Result<(), String> {
      let mut accounts = account::Accounts::load();
@@ -135,7 +141,7 @@ index e6830e0b03..1f167338fa 100644
      let pass = account::launch(
          &account::Endpoints::live(),
          account::client_id().as_deref(),
-@@ -2135,12 +2134,12 @@ fn download_for_owner(
+@@ -2014,12 +2013,12 @@ fn download_for_owner(
      if let Err(e) = accounts.save_renewed() {
          log(format!("Horizon: the accounts are not saved: {e}"));
      }
@@ -151,7 +157,7 @@ index e6830e0b03..1f167338fa 100644
  pub fn download_version_for_owner(
      id: &str,
      manifest_sha1: &str,
-@@ -2161,9 +2160,10 @@ pub fn download_version_for_owner(
+@@ -2040,9 +2039,10 @@ pub fn download_version_for_owner(
      Ok(dir)
  }
  
@@ -165,7 +171,7 @@ index e6830e0b03..1f167338fa 100644
  /// instance's folder. The caller wraps it (`launch::wrap`) and never logs it: it holds the token.
  /// A Java instance's game, ready to start; `server` (`host[:port]`) is joined once it has.
  pub fn java_game(
-@@ -2256,50 +2256,42 @@ pub fn java_game(
+@@ -2135,50 +2135,42 @@ pub fn java_game(
      )
  }
  
@@ -235,7 +241,7 @@ index e6830e0b03..1f167338fa 100644
  }
  
  /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
-@@ -3174,9 +3166,6 @@ pub fn play_step(step: &str) {
+@@ -3089,9 +3081,6 @@ pub fn play_step(step: &str) {
      eprintln!("Horizon: Play: {step}…");
  }
  
@@ -245,17 +251,8 @@ index e6830e0b03..1f167338fa 100644
  pub fn client(tag: &str) -> Result<Command, String> {
      client_as(tag, None)
  }
-@@ -3185,7 +3174,7 @@ pub fn client(tag: &str) -> Result<Command, String> {
- pub const SIGN_IN_HINT: &str = "Sign in with `horizon-launcher account sign-in`.";
- 
- /// [`client`], playing as `who` for this launch only (`play --account`).
--pub fn client_as(tag: &str, who: Option<&str>) -> Result<Command, String> {
-+pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, String> {
-     if let Some(error) = game_architecture_launch_error(tag) {
-         return Err(error);
-     }
-@@ -4792,11 +4781,11 @@ mod tests {
-         fs::remove_dir_all(&dir).unwrap();
+@@ -4604,11 +4593,11 @@ mod tests {
+         }
      }
  
 -    /// The launcher downloads Mojang's game files (client jar, libraries, assets) only for an
@@ -270,7 +267,7 @@ index e6830e0b03..1f167338fa 100644
          let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
          let _ = fs::remove_dir_all(&dir);
          let pins = sources::Pins::read(&serde_json::json!({ "minecraft": {
-@@ -4812,17 +4801,15 @@ mod tests {
+@@ -4624,17 +4613,15 @@ mod tests {
          };
          let log = |_: String| {};
          let no_owner = || Ok(account::Launch::default());
@@ -296,7 +293,7 @@ index e6830e0b03..1f167338fa 100644
          let owner = account::Account {
              uuid: "069a79f444e94726a5befca90e38aaf5".into(),
              name: "Notch".into(),
-@@ -4837,22 +4824,9 @@ mod tests {
+@@ -4649,22 +4636,9 @@ mod tests {
              owner: Some((owner, secrets)),
              ..Default::default()
          });
@@ -321,7 +318,7 @@ index e6830e0b03..1f167338fa 100644
          let _ = fs::remove_dir_all(&dir);
  
          // In the sources: one call downloads the game, in `download_for`, and the only caller
-@@ -4889,7 +4863,10 @@ mod tests {
+@@ -4701,7 +4675,10 @@ mod tests {
          };
          assert!(body("download_for").contains("mojang::download("));
          assert!(body("download_for_owner").contains("account::launch("));
@@ -333,22 +330,11 @@ index e6830e0b03..1f167338fa 100644
          // `download_for` is defined once and called once, by `download_for_owner`.
          assert_eq!(backend.matches("download_for(").count(), 2);
          assert!(body("download_for_owner").contains("download_for("));
-diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 982952b3bb..8f350b5084 100644
---- a/launcher/src/main.rs
-+++ b/launcher/src/main.rs
-@@ -2507,10 +2507,7 @@ fn segments<T: Copy + PartialEq + 'static>(
- #[derive(Clone, Copy, Debug, PartialEq, Eq)]
- enum PlayPress {
-     Play,
--    /// Not prepared, for an account that owns the game: prepare it (from the player's install,
--    /// else downloaded from Mojang for that account), then play, as the official launcher does.
-     PrepareThenPlay,
--    /// Not prepared and no owner (signing in comes first), or busy preparing or playing.
-     Nothing,
- }
- 
-@@ -3380,8 +3377,6 @@ impl Launcher {
+diff --git a/launcher/src/blocks_play.rs b/launcher/src/blocks_play.rs
+index 98ccb568..6cc0b5e6 100644
+--- a/launcher/src/blocks_play.rs
++++ b/launcher/src/blocks_play.rs
+@@ -116,8 +116,6 @@ impl Launcher {
          let left = self.download_left();
          let steps = self.preparing.then(|| self.steps(&version, left));
  
@@ -357,7 +343,7 @@ index 982952b3bb..8f350b5084 100644
          let first = (!prepared && !self.preparing)
              .then_some(self.owner)
              .flatten();
-@@ -3398,7 +3393,7 @@ impl Launcher {
+@@ -134,7 +132,7 @@ impl Launcher {
                  &[("version", &version)],
              ),
              Some(false) => trf(
@@ -366,7 +352,7 @@ index 982952b3bb..8f350b5084 100644
                  &[("version", &version)],
              ),
              None => backend::resources_summary(prepared, !silent, &version),
-@@ -3457,12 +3452,25 @@ impl Launcher {
+@@ -193,12 +191,25 @@ impl Launcher {
                          cx.notify();
                      })),
                  ),
@@ -398,6 +384,18 @@ index 982952b3bb..8f350b5084 100644
              None => div().child(prepare),
          };
          let owner = self.owner == Some(true);
--- 
-2.47.3
-
+diff --git a/launcher/src/widgets.rs b/launcher/src/widgets.rs
+index 8a0acc2f..34eb3a83 100644
+--- a/launcher/src/widgets.rs
++++ b/launcher/src/widgets.rs
+@@ -476,10 +476,7 @@ pub(crate) fn segments<T: Copy + PartialEq + 'static>(
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(crate) enum PlayPress {
+     Play,
+-    /// Not prepared, for an account that owns the game: prepare it (from the player's install,
+-    /// else downloaded from Mojang for that account), then play, as the official launcher does.
+     PrepareThenPlay,
+-    /// Not prepared and no owner (signing in comes first), or busy preparing or playing.
+     Nothing,
+ }
+ 

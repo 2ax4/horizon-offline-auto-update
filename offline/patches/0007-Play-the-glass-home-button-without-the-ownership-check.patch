@@ -1,57 +1,32 @@
-From 70b29dd7c6c2117b474c5c89c04ea74e88ba33b7 Mon Sep 17 00:00:00 2001
+From 9f4df29cc11a9048da4fb0a8b93f56712935cd60 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 5/9] Play the glass home button without the ownership check
 
 ---
  launcher/src/glass_home.rs |  2 +-
- launcher/src/main.rs       | 29 +++++++++--------------------
- 2 files changed, 10 insertions(+), 21 deletions(-)
+ launcher/src/main.rs       | 30 ++++++++++--------------------
+ launcher/src/widgets.rs    | 10 ++++------
+ 3 files changed, 15 insertions(+), 27 deletions(-)
 
 diff --git a/launcher/src/glass_home.rs b/launcher/src/glass_home.rs
-index c4aeb2581c..3b25287207 100644
+index 9bad6410..de3211e2 100644
 --- a/launcher/src/glass_home.rs
 +++ b/launcher/src/glass_home.rs
-@@ -444,7 +444,7 @@ impl Launcher {
-                     Some(_) => (tr("Update"), "download-04"),
-                     None => (tr("Play"), "play"),
+@@ -625,7 +625,7 @@ impl Launcher {
+                 } else {
+                     (ready, owner)
                  };
--                let press = play_press(ready, self.owner, false);
+-                let press = play_press(ready, owner, false);
 +                let press = play_press(ready, false);
-                 let main = body(label.into(), icon).id("play").cursor_pointer();
-                 let main = match (&update, press) {
-                     (Some(_), _) => main.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                 let build_first =
+                     needs_build && update.is_none() && matches!(press, PlayPress::Play);
+                 let (label, icon) = match &update {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 57a535d9b6..b342a3b31e 100644
+index 6d5963c7..ec3f6cab 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -2557,13 +2557,11 @@ fn sign_in_change(shown: &mut Option<SignInState>, next: SignInState) -> Option<
-     Some(next)
- }
- 
--/// `owner`: whether an account here owns the game, by the keychain (`Launcher::owner`).
--fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
--    match (prepared, owner) {
-+fn play_press(prepared: bool, busy: bool) -> PlayPress {
-+    match (prepared, busy) {
-         _ if busy => PlayPress::Nothing,
-         (true, _) => PlayPress::Play,
--        (false, Some(true)) => PlayPress::PrepareThenPlay,
--        (false, _) => PlayPress::Nothing,
-+        (false, _) => PlayPress::PrepareThenPlay,
-     }
- }
- 
-@@ -2571,7 +2569,7 @@ fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
- /// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
- /// the game would open on half-written files.
- fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
--    play_press(prepared, None, preparing || running) == PlayPress::Play
-+    play_press(prepared, preparing || running) == PlayPress::Play
- }
- 
- /// Whether `tag` can start being deleted now: it is installed, no install is writing it, and it
-@@ -5902,22 +5900,13 @@ mod tests {
+@@ -809,33 +809,23 @@ mod tests {
          );
      }
  
@@ -78,7 +53,50 @@ index 57a535d9b6..b342a3b31e 100644
 +        assert_eq!(play_press(false, true), PlayPress::Nothing);
      }
  
+-    /// Home's one button never says Play over a click that prepares, or that cannot play.
++    /// Home's one button never says Play over a click that prepares, and never asks for a
++    /// sign-in: an offline build plays without an owner.
+     #[test]
+     fn play_says_what_it_will_do() {
+         use super::{play_label, play_press};
+-        let say = |prepared, owner| play_label(play_press(prepared, owner, false), owner);
+-        assert_eq!(say(true, Some(true)), "Play");
+-        assert_eq!(say(false, Some(true)), "Prepare & play");
+-        assert_eq!(say(false, Some(false)), "Sign in to play");
+-        assert_eq!(say(false, None), "Play");
++        let say = |prepared, busy| play_label(play_press(prepared, busy), Some(false));
++        assert_eq!(say(true, false), "Play");
++        assert_eq!(say(false, false), "Prepare & play");
+     }
+ 
      /// A server's Join (and every other shortcut) waits like Play: not while the version's
--- 
-2.47.3
-
+diff --git a/launcher/src/widgets.rs b/launcher/src/widgets.rs
+index f70f9212..8a0acc2f 100644
+--- a/launcher/src/widgets.rs
++++ b/launcher/src/widgets.rs
+@@ -529,13 +529,11 @@ pub(crate) fn sign_in_change(
+     Some(next)
+ }
+ 
+-/// `owner`: whether an account here owns the game, by the keychain (`Launcher::owner`).
+-pub(crate) fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
+-    match (prepared, owner) {
++pub(crate) fn play_press(prepared: bool, busy: bool) -> PlayPress {
++    match (prepared, busy) {
+         _ if busy => PlayPress::Nothing,
+         (true, _) => PlayPress::Play,
+-        (false, Some(true)) => PlayPress::PrepareThenPlay,
+-        (false, _) => PlayPress::Nothing,
++        (false, _) => PlayPress::PrepareThenPlay,
+     }
+ }
+ 
+@@ -554,7 +552,7 @@ pub(crate) fn play_label(press: PlayPress, owner: Option<bool>) -> &'static str
+ /// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
+ /// the game would open on half-written files.
+ pub(crate) fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
+-    play_press(prepared, None, preparing || running) == PlayPress::Play
++    play_press(prepared, preparing || running) == PlayPress::Play
+ }
+ 
+ /// Whether `tag` can start being deleted now: it is installed, no instance plays it (`used_by`),
