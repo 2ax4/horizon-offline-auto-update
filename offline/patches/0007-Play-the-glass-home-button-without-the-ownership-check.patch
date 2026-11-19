@@ -1,4 +1,4 @@
-From b7ed0352c5432122e01009f3d845a1a2d62384e7 Mon Sep 17 00:00:00 2001
+From a2da550e469df7437a1edc7940d9d4d6815dd0cc Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 5/9] Play the glass home button without the ownership check
@@ -10,10 +10,10 @@ Subject: [PATCH 5/9] Play the glass home button without the ownership check
  3 files changed, 15 insertions(+), 27 deletions(-)
 
 diff --git a/launcher/src/glass_home.rs b/launcher/src/glass_home.rs
-index 9bad6410..de3211e2 100644
+index 87a7cba19d..d6f37b1083 100644
 --- a/launcher/src/glass_home.rs
 +++ b/launcher/src/glass_home.rs
-@@ -625,7 +625,7 @@ impl Launcher {
+@@ -642,7 +642,7 @@ impl Launcher {
                  } else {
                      (ready, owner)
                  };
@@ -23,10 +23,10 @@ index 9bad6410..de3211e2 100644
                      needs_build && update.is_none() && matches!(press, PlayPress::Play);
                  let (label, icon) = match &update {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index c364d90e..19c144b2 100644
+index e0f8ca9aad..cf0bc10bf0 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -805,33 +805,23 @@ mod tests {
+@@ -817,33 +817,23 @@ mod tests {
          );
      }
  
@@ -71,7 +71,7 @@ index c364d90e..19c144b2 100644
  
      /// A server's Join (and every other shortcut) waits like Play: not while the version's
 diff --git a/launcher/src/widgets.rs b/launcher/src/widgets.rs
-index f70f9212..8a0acc2f 100644
+index f70f92121f..8a0acc2fdb 100644
 --- a/launcher/src/widgets.rs
 +++ b/launcher/src/widgets.rs
 @@ -529,13 +529,11 @@ pub(crate) fn sign_in_change(
@@ -100,6 +100,3 @@ index f70f9212..8a0acc2f 100644
  }
  
  /// Whether `tag` can start being deleted now: it is installed, no instance plays it (`used_by`),
--- 
-2.47.3
-

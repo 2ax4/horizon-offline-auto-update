@@ -1,4 +1,4 @@
-From de630f335fd4d4a28fa8cbbf0fd5328173cbfd6c Mon Sep 17 00:00:00 2001
+From f572c6eacc65f3bc099591cdc0e9cb9e51c06b28 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 6/9] Offline build: the glass look keeps only the offline
@@ -11,7 +11,7 @@ Subject: [PATCH 6/9] Offline build: the glass look keeps only the offline
  3 files changed, 198 insertions(+), 175 deletions(-)
 
 diff --git a/launcher/src/blocks_play.rs b/launcher/src/blocks_play.rs
-index 64fe0643..98ccb568 100644
+index bbb4a0fdf6..be30796035 100644
 --- a/launcher/src/blocks_play.rs
 +++ b/launcher/src/blocks_play.rs
 @@ -245,7 +245,7 @@ impl Launcher {
@@ -36,10 +36,10 @@ index 64fe0643..98ccb568 100644
              if self.owner == Some(false) {
                  rows = rows.child(index_row(
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index b70195de..32a8094b 100644
+index 6324e0f291..a18221054e 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
-@@ -1051,41 +1051,13 @@ impl Launcher {
+@@ -1053,41 +1053,13 @@ impl Launcher {
                      }
                      cx.notify();
                  }));
@@ -83,7 +83,7 @@ index b70195de..32a8094b 100644
          // Search: the palette (⌘K or Ctrl+K anywhere), as a field-shaped button.
          let sid = SharedString::from("topbar-search");
          let key: &str = if cfg!(target_os = "macos") {
-@@ -1168,7 +1140,6 @@ impl Launcher {
+@@ -1170,7 +1142,6 @@ impl Launcher {
                      .gap(px(8.))
                      .child(search)
                      .child(account)
@@ -91,7 +91,7 @@ index b70195de..32a8094b 100644
              )
      }
  
-@@ -1216,12 +1187,18 @@ impl Launcher {
+@@ -1218,12 +1189,18 @@ impl Launcher {
                                  .size(px(30.))
                                  .rounded(px(8.))
                                  .overflow_hidden()
@@ -117,7 +117,7 @@ index b70195de..32a8094b 100644
                          .child(
                              div()
 diff --git a/launcher/src/glass_account.rs b/launcher/src/glass_account.rs
-index e9bd43f1..e3174d5b 100644
+index e9bd43f124..e3174d5b99 100644
 --- a/launcher/src/glass_account.rs
 +++ b/launcher/src/glass_account.rs
 @@ -1,52 +1,50 @@
@@ -469,6 +469,3 @@ index e9bd43f1..e3174d5b 100644
 +        .on_click(on_click)
      }
  }
--- 
-2.47.3
-

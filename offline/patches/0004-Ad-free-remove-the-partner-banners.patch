@@ -1,4 +1,4 @@
-From 9831547019f3d4d23b1ff85ccdc3a479d373f47c Mon Sep 17 00:00:00 2001
+From bdb90701b9e5cd12b69f23b1083754df6b8f4c59 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 11:44:12 +0000
 Subject: [PATCH 3/9] Ad-free: remove the partner banners
@@ -14,10 +14,10 @@ Subject: [PATCH 3/9] Ad-free: remove the partner banners
  7 files changed, 4 insertions(+), 151 deletions(-)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 6961783c..6ee84d1e 100644
+index b82865348c..ff56f8b554 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -4266,13 +4266,6 @@ pub struct Settings {
+@@ -4287,13 +4287,6 @@ pub struct Settings {
      /// one now (the owner gate's screen).
      #[serde(default)]
      pub owner_notice_seen: bool,
@@ -32,7 +32,7 @@ index 6961783c..6ee84d1e 100644
      #[serde(default)]
      pub while_playing: WhilePlaying,
 diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
-index eee031d3..530901ff 100644
+index eee031d3fd..530901ff5d 100644
 --- a/launcher/src/blocks_chrome.rs
 +++ b/launcher/src/blocks_chrome.rs
 @@ -310,34 +310,6 @@ impl Launcher {
@@ -71,10 +71,10 @@ index eee031d3..530901ff 100644
              foot = foot.child(link(
                  "sponsor",
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index b57807f1..b70195de 100644
+index 018aefd021..6324e0f291 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
-@@ -678,27 +678,6 @@ impl Launcher {
+@@ -680,27 +680,6 @@ impl Launcher {
          };
          if open {
              foot = foot.children(self.rail_update_card(soft, cx));
@@ -103,7 +103,7 @@ index b57807f1..b70195de 100644
  
          // Discord keeps its own blurple in every theme, as the icon at rest and the fill under the
 diff --git a/launcher/src/glass_servers.rs b/launcher/src/glass_servers.rs
-index fc72b286..0b7d6d05 100644
+index fc72b28698..0b7d6d051a 100644
 --- a/launcher/src/glass_servers.rs
 +++ b/launcher/src/glass_servers.rs
 @@ -66,9 +66,6 @@ impl Launcher {
@@ -164,7 +164,7 @@ index fc72b286..0b7d6d05 100644
  
  /// The open server's port.
 diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
-index d2056330..52b2296b 100644
+index 8fd3c140c1..8c30471d9f 100644
 --- a/launcher/src/launcher_setup.rs
 +++ b/launcher/src/launcher_setup.rs
 @@ -24,30 +24,6 @@ impl Launcher {
@@ -199,10 +199,10 @@ index d2056330..52b2296b 100644
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 3b32333d..c364d90e 100644
+index c1d6ca6af7..e0f8ca9aad 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -75,7 +75,6 @@ mod new_instance;
+@@ -76,7 +76,6 @@ mod new_instance;
  mod notes_cache;
  mod owner_page;
  mod packs_page;
@@ -211,7 +211,7 @@ index 3b32333d..c364d90e 100644
  mod picture_cache;
  mod plate;
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index b05084a1..85cd0b81 100644
+index b05084a1d3..85cd0b817b 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -1452,34 +1452,11 @@ impl Launcher {
@@ -261,6 +261,3 @@ index b05084a1..85cd0b81 100644
      }
  
      fn add_server_folder(&mut self, cx: &mut Context<Self>) {
--- 
-2.47.3
-
