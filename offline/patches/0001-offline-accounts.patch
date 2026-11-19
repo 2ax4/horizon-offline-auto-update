@@ -1,11 +1,40 @@
-From 67490c41bffdca5b3023f18a25694460a17a0b18 Mon Sep 17 00:00:00 2001
+From a95ea689bd0ec4cdb25f295f837f4b6b40f7bfae Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
 
 ---
+ docs/launcher-commands.md              |  35 +++-
+ launcher/src/account.rs                | 187 +++++++++++------
+ launcher/src/account/tests.rs          | 272 ++++++++++++++++---------
+ launcher/src/backend/developer_play.rs |   2 +-
+ launcher/src/blocks_chrome.rs          |   8 +-
+ launcher/src/blocks_settings.rs        |   4 +-
+ launcher/src/cli.rs                    | 169 +++++++++++++--
+ launcher/src/developer_play.rs         |   9 +-
+ launcher/src/frame.rs                  |  18 +-
+ launcher/src/home.rs                   |  10 +-
+ launcher/src/instances.rs              |  28 +++
+ launcher/src/launcher_play.rs          |   9 +-
+ launcher/src/launcher_setup.rs         |   7 +-
+ launcher/src/lib.rs                    |   1 +
+ launcher/src/main.rs                   |  35 +++-
+ launcher/src/mcp.rs                    |   1 -
+ launcher/src/owner_page.rs             |  49 +++--
+ launcher/src/profile_heads.rs          |  54 ++++-
+ launcher/src/servers_page.rs           |  50 ++++-
+ launcher/src/skin_page.rs              | 264 ++++++++++++++++++++++++
+ launcher/src/skins.rs                  | 183 +++++++++++++++++
+ launcher/src/skins/tests.rs            | 124 +++++++++++
+ launcher/src/switch_page.rs            | 219 ++++++++++++++++++--
+ launcher/tests/owner_gate.rs           |  76 ++++---
+ 24 files changed, 1553 insertions(+), 261 deletions(-)
+ create mode 100644 launcher/src/skin_page.rs
+ create mode 100644 launcher/src/skins.rs
+ create mode 100644 launcher/src/skins/tests.rs
+
 diff --git a/docs/launcher-commands.md b/docs/launcher-commands.md
-index 116d641b96..1775f220a3 100644
+index 116d641..1775f22 100644
 --- a/docs/launcher-commands.md
 +++ b/docs/launcher-commands.md
 @@ -230,14 +230,45 @@ MCP: `account_sign_out`, needs `confirm: true`.
@@ -57,7 +86,7 @@ index 116d641b96..1775f220a3 100644
  
  Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), cache-limit-gib N (managed cache limit in GiB: 10, 25 (default), 50, 100; 0 disables automatic cleanup).
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index b4172bf099..b1569ba486 100644
+index b4172bf..b1569ba 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -6,8 +6,6 @@
@@ -331,7 +360,7 @@ index b4172bf099..b1569ba486 100644
  }
  
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 14b0d21e0a..9c66eae202 100644
+index 14b0d21..9c66eae 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -686,80 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
@@ -661,7 +690,7 @@ index 14b0d21e0a..9c66eae202 100644
      assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
      assert_eq!(accounts.selected.as_deref(), Some(UUID));
 diff --git a/launcher/src/backend/developer_play.rs b/launcher/src/backend/developer_play.rs
-index 49ab9791fe..0ccd0e70f9 100644
+index 49ab979..0ccd0e7 100644
 --- a/launcher/src/backend/developer_play.rs
 +++ b/launcher/src/backend/developer_play.rs
 @@ -2,7 +2,7 @@
@@ -674,7 +703,7 @@ index 49ab9791fe..0ccd0e70f9 100644
          return Err(error);
      }
 diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
-index 59560ab679..eee031d3fd 100644
+index 59560ab..eee031d 100644
 --- a/launcher/src/blocks_chrome.rs
 +++ b/launcher/src/blocks_chrome.rs
 @@ -26,9 +26,13 @@ impl Launcher {
@@ -694,7 +723,7 @@ index 59560ab679..eee031d3fd 100644
              Some(uuid) => (self.profile_heads)
                  .draw(Some(&uuid), 28., self.scale, &t)
 diff --git a/launcher/src/blocks_settings.rs b/launcher/src/blocks_settings.rs
-index e7e8785c23..d1b728b075 100644
+index e7e8785..d1b728b 100644
 --- a/launcher/src/blocks_settings.rs
 +++ b/launcher/src/blocks_settings.rs
 @@ -188,6 +188,7 @@ impl Launcher {
@@ -723,7 +752,7 @@ index e7e8785c23..d1b728b075 100644
                          }),
                      ),
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index 54a98f56d9..d0e6ac8ef0 100644
+index 54a98f5..d0e6ac8 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
 @@ -140,8 +140,35 @@ enum AccountCmd {
@@ -954,7 +983,7 @@ index 54a98f56d9..d0e6ac8ef0 100644
      }
      Ok(())
 diff --git a/launcher/src/developer_play.rs b/launcher/src/developer_play.rs
-index f0f404f87e..2f971eddd9 100644
+index f0f404f..2f971ed 100644
 --- a/launcher/src/developer_play.rs
 +++ b/launcher/src/developer_play.rs
 @@ -26,7 +26,9 @@ impl Launcher {
@@ -981,7 +1010,7 @@ index f0f404f87e..2f971eddd9 100644
              let pack = self.starting_pack.take();
              let instance = match &pack {
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index e356cf7bc1..018aefd021 100644
+index e356cf7..018aefd 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -6,6 +6,7 @@ use super::*;
@@ -1038,7 +1067,7 @@ index e356cf7bc1..018aefd021 100644
                          })),
                      id,
 diff --git a/launcher/src/home.rs b/launcher/src/home.rs
-index 0534232fcc..fa1d433f3a 100644
+index 0534232..fa1d433 100644
 --- a/launcher/src/home.rs
 +++ b/launcher/src/home.rs
 @@ -260,15 +260,7 @@ impl Launcher {
@@ -1059,7 +1088,7 @@ index 0534232fcc..fa1d433f3a 100644
              PlayPress::Play => {
                  play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/instances.rs b/launcher/src/instances.rs
-index ceee3f8276..f5aca59125 100644
+index ceee3f8..f5aca59 100644
 --- a/launcher/src/instances.rs
 +++ b/launcher/src/instances.rs
 @@ -763,6 +763,34 @@ fn follow_player(game_home: &Path, home: &Path) {
@@ -1098,7 +1127,7 @@ index ceee3f8276..f5aca59125 100644
  mod switch;
  pub use switch::{switch, unkept, Plays, Unkept};
 diff --git a/launcher/src/launcher_play.rs b/launcher/src/launcher_play.rs
-index 70e05ef895..45f16abf90 100644
+index 70e05ef..45f16ab 100644
 --- a/launcher/src/launcher_play.rs
 +++ b/launcher/src/launcher_play.rs
 @@ -421,8 +421,15 @@ impl Launcher {
@@ -1119,7 +1148,7 @@ index 70e05ef895..45f16abf90 100644
  
      pub(crate) fn begin_auth_job(&mut self, uuid: &str) -> Option<u64> {
 diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
-index 6eddbec4f7..8fd3c140c1 100644
+index 6eddbec..8fd3c14 100644
 --- a/launcher/src/launcher_setup.rs
 +++ b/launcher/src/launcher_setup.rs
 @@ -160,6 +160,8 @@ impl Launcher {
@@ -1144,7 +1173,7 @@ index 6eddbec4f7..8fd3c140c1 100644
          // Each check reads the keychain (a prompt on macOS): page switches check every account
          // at most once a minute, and an account added meanwhile at once.
 diff --git a/launcher/src/lib.rs b/launcher/src/lib.rs
-index 1debd53ac1..a3911846ae 100644
+index 1debd53..a391184 100644
 --- a/launcher/src/lib.rs
 +++ b/launcher/src/lib.rs
 @@ -57,6 +57,7 @@ pub mod setup_args;
@@ -1156,7 +1185,7 @@ index 1debd53ac1..a3911846ae 100644
  pub mod tailscale;
  pub mod telemetry;
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 6e52c5f99a..c1d6ca6af7 100644
+index 6e52c5f..c1d6ca6 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -95,6 +95,7 @@ mod switch_page;
@@ -1230,7 +1259,7 @@ index 6e52c5f99a..c1d6ca6af7 100644
      fn counts_get_thousands_separators() {
          let shown: Vec<String> = [0, 7, 999, 1000, 12_300, 1_234_500]
 diff --git a/launcher/src/mcp.rs b/launcher/src/mcp.rs
-index 92d7960fc9..57cfb999a1 100644
+index 92d7960..57cfb99 100644
 --- a/launcher/src/mcp.rs
 +++ b/launcher/src/mcp.rs
 @@ -230,7 +230,6 @@ impl Session {
@@ -1242,7 +1271,7 @@ index 92d7960fc9..57cfb999a1 100644
                      "sign_in": sign_in,
                  }))
 diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
-index ce952235a1..aa659a7d20 100644
+index ce95223..aa659a7 100644
 --- a/launcher/src/owner_page.rs
 +++ b/launcher/src/owner_page.rs
 @@ -1,16 +1,11 @@
@@ -1348,7 +1377,7 @@ index ce952235a1..aa659a7d20 100644
          card = match state {
              Shown::Code(uri, user_code) => {
 diff --git a/launcher/src/profile_heads.rs b/launcher/src/profile_heads.rs
-index 8a83d1544a..c8119426ab 100644
+index 8a83d15..c811942 100644
 --- a/launcher/src/profile_heads.rs
 +++ b/launcher/src/profile_heads.rs
 @@ -23,11 +23,59 @@ struct Head {
@@ -1415,7 +1444,7 @@ index 8a83d1544a..c8119426ab 100644
              let url = account.skin.as_ref().map(|s| s.0.clone());
              if self.0.get(&account.uuid).is_some_and(|h| {
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 839fe1b97a..b05084a1d3 100644
+index 839fe1b..b05084a 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -74,6 +74,8 @@ pub(super) enum Field {
@@ -1513,7 +1542,7 @@ index 839fe1b97a..b05084a1d3 100644
          }
 diff --git a/launcher/src/skin_page.rs b/launcher/src/skin_page.rs
 new file mode 100644
-index 0000000000..d4bcb8a9e6
+index 0000000..d4bcb8a
 --- /dev/null
 +++ b/launcher/src/skin_page.rs
 @@ -0,0 +1,264 @@
@@ -1783,7 +1812,7 @@ index 0000000000..d4bcb8a9e6
 +}
 diff --git a/launcher/src/skins.rs b/launcher/src/skins.rs
 new file mode 100644
-index 0000000000..a70933aa86
+index 0000000..a70933a
 --- /dev/null
 +++ b/launcher/src/skins.rs
 @@ -0,0 +1,183 @@
@@ -1972,7 +2001,7 @@ index 0000000000..a70933aa86
 +mod tests;
 diff --git a/launcher/src/skins/tests.rs b/launcher/src/skins/tests.rs
 new file mode 100644
-index 0000000000..69f957b74f
+index 0000000..69f957b
 --- /dev/null
 +++ b/launcher/src/skins/tests.rs
 @@ -0,0 +1,124 @@
@@ -2101,7 +2130,7 @@ index 0000000000..69f957b74f
 +    std::fs::remove_dir_all(&root).unwrap();
 +}
 diff --git a/launcher/src/switch_page.rs b/launcher/src/switch_page.rs
-index 4062a2e719..c8258dc1a8 100644
+index 4062a2e..c8258dc 100644
 --- a/launcher/src/switch_page.rs
 +++ b/launcher/src/switch_page.rs
 @@ -1,19 +1,30 @@
@@ -2379,7 +2408,7 @@ index 4062a2e719..c8258dc1a8 100644
 +    }
  }
 diff --git a/launcher/tests/owner_gate.rs b/launcher/tests/owner_gate.rs
-index 110c688240..ace12c7e62 100644
+index 110c688..7dd7091 100644
 --- a/launcher/tests/owner_gate.rs
 +++ b/launcher/tests/owner_gate.rs
 @@ -1,25 +1,18 @@
@@ -2439,45 +2468,73 @@ index 110c688240..ace12c7e62 100644
      assert!(!root.join("game/sessions").exists());
      let accounts = std::fs::read_to_string(root.join("launcher/accounts.json")).unwrap();
      assert!(accounts.contains("Builder_1"), "{accounts}");
-@@ -60,7 +61,10 @@ fn the_cli_refuses_to_play_without_an_owner() {
- 
- #[test]
- fn prepare_download_explains_the_sign_in_requirement() {
--    let root = home("prepare-download");
-+    let root = home(
-+        "prepare-download",
-+        r#"{"accounts":[],"selected":null}"#,
-+    );
-     std::fs::copy(
-         Path::new(env!("CARGO_MANIFEST_DIR")).join("../research-lock.json"),
-         root.join("launcher/versions/v2026.10.27.01/research-lock.json"),
-@@ -88,8 +92,23 @@ fn prepare_download_explains_the_sign_in_requirement() {
+@@ -59,13 +60,22 @@ fn the_cli_refuses_to_play_without_an_owner() {
  }
  
  #[test]
--fn the_mcp_server_refuses_to_play_without_an_owner() {
--    let root = home("mcp");
+-fn prepare_download_explains_the_sign_in_requirement() {
+-    let root = home("prepare-download");
++fn prepare_download_downloads_for_an_offline_name() {
++    let root = home("prepare-download", r#"{"accounts":[],"selected":null}"#);
+     std::fs::copy(
+         Path::new(env!("CARGO_MANIFEST_DIR")).join("../research-lock.json"),
+         root.join("launcher/versions/v2026.10.27.01/research-lock.json"),
+     )
+     .unwrap();
++    // The version's own preparer, as a release package ships it. Its work is not this
++    // test's subject: only that Mojang's public files download for an offline name,
++    // with no account at all and no sign-in refusal anywhere.
++    std::fs::create_dir_all(root.join("launcher/versions/v2026.10.27.01/tools")).unwrap();
++    std::fs::write(
++        root.join("launcher/versions/v2026.10.27.01/tools/prepare_native_client.py"),
++        "# A stub: this test checks the account gate, not the preparation itself.\n",
++    )
++    .unwrap();
+     let out = launcher(
+         &root,
+         &["prepare", "--download", "--version", "v2026.10.27.01"],
+@@ -77,19 +87,32 @@ fn prepare_download_explains_the_sign_in_requirement() {
+     .env("HORIZON_LAUNCHER_DESKTOP", root.join("desktop"))
+     .output()
+     .unwrap();
+-    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+-    assert!(out.stdout.is_empty(), "{}", text(&out));
+-    assert_eq!(
+-        String::from_utf8_lossy(&out.stderr).trim(),
+-        "error: Sign in with a Microsoft account that owns Minecraft: Java Edition to download 26.3 from Mojang."
++    let said = text(&out);
++    assert!(out.status.success(), "{said}");
++    assert!(said.contains("Downloading 26.3 from Mojang"), "{said}");
++    assert!(said.contains("is prepared."), "{said}");
++    assert!(!said.contains("Sign in with a Microsoft account"), "{said}");
++    let _ = std::fs::remove_dir_all(&root);
++}
++
++#[test]
 +fn a_selected_microsoft_account_with_no_owner_still_meets_the_gate() {
 +    let root = home(
 +        "cli-gate",
 +        r#"{"accounts":[{"uuid":"abc123","name":"Notch"}],"selected":"abc123"}"#,
-+    );
+     );
+-    assert!(!root.join("launcher/minecraft").exists());
 +    let out = launcher(&root, &["play"]).output().unwrap();
 +    let said = text(&out);
 +    assert!(!out.status.success(), "{said}");
 +    assert!(said.contains(REFUSED), "{said}");
 +    assert!(said.contains("horizon-launcher account sign-in"), "{said}");
 +    assert!(!root.join("game/sessions").exists());
-+    let _ = std::fs::remove_dir_all(&root);
-+}
-+
-+#[test]
+     let _ = std::fs::remove_dir_all(&root);
+ }
+ 
+ #[test]
+-fn the_mcp_server_refuses_to_play_without_an_owner() {
+-    let root = home("mcp");
 +fn the_mcp_server_plays_an_offline_account_past_the_gate() {
 +    let root = home("mcp", r#"{"accounts":[],"selected":null}"#);
      let mut child = launcher(&root, &["mcp"])
          .stdin(Stdio::piped())
          .stdout(Stdio::piped())
-@@ -113,6 +132,7 @@ fn the_mcp_server_refuses_to_play_without_an_owner() {
+@@ -113,6 +136,7 @@ fn the_mcp_server_refuses_to_play_without_an_owner() {
          .expect("a reply to play");
      assert_eq!(reply["result"]["isError"], true, "{reply}");
      let said = reply["result"]["content"][0]["text"].as_str().unwrap();
@@ -2486,3 +2543,6 @@ index 110c688240..ace12c7e62 100644
 +    assert!(!said.contains(REFUSED), "{said}");
      let _ = std::fs::remove_dir_all(&root);
  }
+-- 
+2.47.3
+
