@@ -170,13 +170,15 @@ jobs:
             ! -name launcher-release.yml ! -name auto-offline-release.yml -delete
           git show origin/main:.github/workflows/launcher-release.yml > .github/workflows/launcher-release.yml
           git show origin/main:.github/workflows/auto-offline-release.yml > .github/workflows/auto-offline-release.yml
-          git checkout origin/main -- offline/patches
-          # Fork-only files (README, offline/, screenshots, extra workflows) come back from main.
+          # Fork-owned paths only. The old "restore every main-only file" loop
+          # resurrected files upstream deleted since the last built version:
+          # 0.2.81 removed its whole native-hook catalog layout, the mod API
+          # generator refuses those files on fresh builds, and the resulting
+          # chimera tree failed cargo build on all four platforms. Only the
+          # fork's own directories come back from main; everything else in the
+          # tree is exactly upstream@tag plus offline/patches.
+          git checkout origin/main -- offline/
           git checkout origin/main -- README.md || true
-          comm -23 \
-            <(git ls-tree -r --name-only origin/main | sort) \
-            <(git ls-tree -r --name-only HEAD | sort) \
-            | while IFS= read -r f; do git checkout origin/main -- "$f"; done
           pub=$(printf '%s' "$RELEASE_SIGNING_KEY" | base64 --decode \
             | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
           grep -qx "$pub" crates/horizon-release-sign/release-keys.txt || {
