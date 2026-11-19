@@ -60,14 +60,20 @@ fn an_offline_account_is_added_and_played_without_any_account() {
 }
 
 #[test]
-fn prepare_download_explains_the_sign_in_requirement() {
-    let root = home(
-        "prepare-download",
-        r#"{"accounts":[],"selected":null}"#,
-    );
+fn prepare_download_downloads_for_an_offline_name() {
+    let root = home("prepare-download", r#"{"accounts":[],"selected":null}"#);
     std::fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../research-lock.json"),
         root.join("launcher/versions/v2026.10.27.01/research-lock.json"),
+    )
+    .unwrap();
+    // The version's own preparer, as a release package ships it. Its work is not this
+    // test's subject: only that Mojang's public files download for an offline name,
+    // with no account at all and no sign-in refusal anywhere.
+    std::fs::create_dir_all(root.join("launcher/versions/v2026.10.27.01/tools")).unwrap();
+    std::fs::write(
+        root.join("launcher/versions/v2026.10.27.01/tools/prepare_native_client.py"),
+        "# A stub: this test checks the account gate, not the preparation itself.\n",
     )
     .unwrap();
     let out = launcher(
@@ -81,13 +87,11 @@ fn prepare_download_explains_the_sign_in_requirement() {
     .env("HORIZON_LAUNCHER_DESKTOP", root.join("desktop"))
     .output()
     .unwrap();
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-    assert!(out.stdout.is_empty(), "{}", text(&out));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr).trim(),
-        "error: Sign in with a Microsoft account that owns Minecraft: Java Edition to download 26.3 from Mojang."
-    );
-    assert!(!root.join("launcher/minecraft").exists());
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("Downloading 26.3 from Mojang"), "{said}");
+    assert!(said.contains("is prepared."), "{said}");
+    assert!(!said.contains("Sign in with a Microsoft account"), "{said}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
