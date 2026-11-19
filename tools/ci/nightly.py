@@ -386,7 +386,7 @@ def rotate() -> None:
     if not current:
         return
     m = TITLE_DATE.search(json.loads(current)["name"])
-    dated = f"nightly-{m.group(1)}" if m else f"nightly-{dt.date.today() - dt.timedelta(days=1)}"
+    dated = f"nightly-{m.group(1)}" if m else f"nightly-{dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)}"
     if gh("release", "view", dated, "--json", "tagName", check=False):
         gh("release", "delete", dated, "--cleanup-tag", "--yes")  # a second nightly the same day replaces the first
     gh("release", "edit", "nightly", "--tag", dated)
@@ -395,7 +395,13 @@ def rotate() -> None:
 
 
 def stale(tags: list[dict], today: dt.date, days: int) -> list[str]:
-    """The dated nightly pre-releases older than `days`: never a release, never `nightly` itself."""
+    """The dated nightly pre-releases older than `days`: never a release, never `nightly` itself.
+
+    `days` is a retention window and must be non-negative: a negative value would move the
+    cutoff past today and mark every dated nightly, including today's, for deletion.
+    """
+    if days < 0:
+        raise ValueError(f"--days must be non-negative, got {days}")
     cutoff = today - dt.timedelta(days=days)
     return [r["tagName"] for r in tags if r["isPrerelease"] and (m := DATED.match(r["tagName"]))
             and dt.date.fromisoformat(m.group(1)) < cutoff]

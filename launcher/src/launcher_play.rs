@@ -63,12 +63,35 @@ impl Launcher {
         self.install_started = Some(Instant::now());
         self.bar = (0., 0.);
         self.install_error = None;
+        let stable = self
+            .stable_install
+            .as_ref()
+            .is_some_and(|r| r.tag == release.tag);
         std::thread::spawn(move || {
-            let progress = |p| {
-                let _ = tx.send(Msg::Progress(tag.clone(), p));
+            let install = |r: &Release| {
+                backend::install(r, |p| {
+                    let _ = tx.send(Msg::Progress(r.tag.clone(), p));
+                })
             };
-            let result = backend::install(&release, progress);
-            let _ = tx.send(Msg::Installed(tag, result));
+            if !stable {
+                let result = install(&release);
+                let _ = tx.send(Msg::Installed(tag, result));
+                return;
+            }
+            // Home's Stable update: one press, even when `nightly` moved on since the offer.
+            let (done, result) = horizon_launcher::nightly::install_stable(
+                release,
+                backend::releases_from_network,
+                |list, next| {
+                    let _ = tx.send(Msg::ReleasesFromNetwork(list));
+                    if let Some(next) = next {
+                        let _ = tx.send(Msg::StableRetry(next.clone()));
+                    }
+                },
+                |tag| backend::installed().iter().any(|t| t == tag),
+                install,
+            );
+            let _ = tx.send(Msg::Installed(done.tag, result));
         });
     }
 
@@ -240,18 +263,49 @@ impl Launcher {
             Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2));
         self.starting_client = Some(instance.id.clone());
         self.starting_instance = Some(instance.id.clone());
+        let stop = self.pre_launch_stop_for(&instance.launch);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let log = |line: String| {
                 let _ = tx.send(Msg::Line(Job::Client, line));
             };
-            let cmd = backend::java_game(&instance, server.as_deref(), &log).map(|mut cmd| {
+            let cmd = backend::java_game(&instance, server.as_deref(), &log).and_then(|mut cmd| {
                 let vars = instance.vars(cmd.get_program());
                 cmd.envs(vars.iter().map(|(k, v)| (k, v)));
-                (horizon_launcher::launch::wrap(cmd, &instance.launch), vars)
+                let launch = &instance.launch;
+                Ok((
+                    horizon_launcher::launch::wrap_stoppable(cmd, launch, &stop)?,
+                    vars,
+                ))
             });
             let _ = tx.send(Msg::JavaGame(instance.id, instance.home, cmd));
         });
+    }
+
+    /// Whether the start under way can be stopped for its instance's pre-launch command, which
+    /// Windows runs to its end before the game.
+    pub(crate) fn pre_launch_stoppable(&self) -> bool {
+        self.pre_launch_stop.is_some()
+    }
+
+    /// Stops the start under way, its pre-launch command with what it started; once that
+    /// succeeded, the game still does not start.
+    pub(crate) fn stop_pre_launch(&self) {
+        if let Some(stop) = &self.pre_launch_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The Stop for a start with `launch`, handed to the start's thread; the window keeps it
+    /// ([`Self::pre_launch_stoppable`]) when Windows runs a pre-launch command.
+    pub(crate) fn pre_launch_stop_for(
+        &mut self,
+        launch: &horizon_launcher::launch::Launch,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let stop = std::sync::Arc::default();
+        self.pre_launch_stop = (cfg!(windows) && !launch.pre_launch.trim().is_empty())
+            .then(|| std::sync::Arc::clone(&stop));
+        stop
     }
 
     /// Whether `tag` can start now ([`starts_now`]): prepared, no preparation under way, no game
@@ -321,23 +375,37 @@ impl Launcher {
         let mods_tx = self.mods.tx.clone();
         let auto_enabled = self.settings.auto_updates_mods();
         std::thread::spawn(move || {
-            // One line per step: a terminal run shows where Play stops (#12179).
-            backend::play_step("checking the game's assets");
+            // One step at a time, on stderr and in the window.
+            let say = |stderr: &str, shown: &str| play_step::say(&tx, stderr, shown.into());
+            say(
+                "checking the game's assets",
+                tr("Checking the game's assets…"),
+            );
             backend::complete_assets(&tag);
             if let Some(auto) = auto {
-                backend::play_step("updating registry mods");
-                let lines = mods_page::auto_update(&[auto], auto_enabled);
+                say("updating registry mods", tr("Updating registry mods…"));
+                // The project downloading now, once per project.
+                let last = std::cell::RefCell::new(String::new());
+                let progress = |project: &str| {
+                    if *last.borrow() != project {
+                        project.clone_into(&mut last.borrow_mut());
+                        let shown =
+                            trf("Updating registry mods: {project}", &[("project", project)]);
+                        play_step::say(&tx, &format!("updating {project}"), shown);
+                    }
+                };
+                let lines = mods_page::auto_update(&[auto], auto_enabled, &progress);
                 if !lines.is_empty() {
                     let _ = mods_tx.send(mods_page::Event::AutoUpdated(lines));
                 }
             }
-            backend::play_step("reading the sign-in");
+            say("reading the sign-in", tr("Reading the sign-in…"));
             let session = if horizon_launcher::developer_offline::enabled(&tag) {
                 Ok(None)
             } else {
                 account::session_for_game(&backend::game_home()).map(Some)
             };
-            backend::play_step("starting the game");
+            say("starting the game", tr("Starting the game…"));
             let _ = tx.send(Msg::Session(session));
         });
     }

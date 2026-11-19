@@ -60,6 +60,38 @@ fn an_offline_account_is_added_and_played_without_any_account() {
 }
 
 #[test]
+fn prepare_download_explains_the_sign_in_requirement() {
+    let root = home(
+        "prepare-download",
+        r#"{"accounts":[],"selected":null}"#,
+    );
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../research-lock.json"),
+        root.join("launcher/versions/v2026.10.27.01/research-lock.json"),
+    )
+    .unwrap();
+    let out = launcher(
+        &root,
+        &["prepare", "--download", "--version", "v2026.10.27.01"],
+    )
+    .current_dir(&root)
+    .env("HOME", &root)
+    .env("HORIZON_LAUNCHER_TRASH", root.join("trash"))
+    .env("HORIZON_LAUNCHER_CLIPBOARD", root.join("clipboard"))
+    .env("HORIZON_LAUNCHER_DESKTOP", root.join("desktop"))
+    .output()
+    .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(out.stdout.is_empty(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        "error: Sign in with a Microsoft account that owns Minecraft: Java Edition to download 26.3 from Mojang."
+    );
+    assert!(!root.join("launcher/minecraft").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_selected_microsoft_account_with_no_owner_still_meets_the_gate() {
     let root = home(
         "cli-gate",

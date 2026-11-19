@@ -152,14 +152,18 @@ mod tests {
     }
 
     #[test]
-    fn account_gate_is_preserved_without_opt_in_and_for_signed_lineage() {
+    fn developer_gate_is_preserved_without_opt_in_and_for_signed_lineage() {
         if let Ok(tag) = std::env::var("OFFLINE_GATE_TEST_TAG") {
             assert!(!enabled(&tag));
-            let error = crate::backend::client_as(&tag, None).unwrap_err();
-            assert!(
-                error.contains(crate::i18n::tr(crate::backend::SIGN_IN_HINT)),
-                "{error}"
-            );
+            // This build plays with no Microsoft account: the account gate is gone, so
+            // Play without the developer opt-in follows the normal (offline) flow instead
+            // of refusing to sign in. Whatever refusal is left is never the sign-in's.
+            if let Err(error) = crate::backend::client_as(&tag, None) {
+                assert!(
+                    !error.contains(crate::i18n::tr(crate::backend::SIGN_IN_HINT)),
+                    "{error}"
+                );
+            }
             return;
         }
         for (tag, opt_in) in [
@@ -178,7 +182,7 @@ mod tests {
             )
             .unwrap();
             let mut child = Command::new(std::env::current_exe().unwrap());
-            child.args(["--exact", "developer_offline::tests::account_gate_is_preserved_without_opt_in_and_for_signed_lineage", "--nocapture"])
+            child.args(["--exact", "developer_offline::tests::developer_gate_is_preserved_without_opt_in_and_for_signed_lineage", "--nocapture"])
                 .env("OFFLINE_GATE_TEST_TAG", tag)
                 .env("HORIZON_LAUNCHER_HOME", root.path())
                 .env("HORIZON_HOME", root.path().join("game"))
@@ -260,7 +264,7 @@ mod tests {
                 env: [(key.to_string(), "reintroduced".to_string())].into(),
                 ..Default::default()
             };
-            let wrapped = crate::launch::wrap(command, &launch);
+            let wrapped = crate::launch::wrap(command, &launch).unwrap();
             assert!(validate(&wrapped).is_err(), "{key}");
         }
     }

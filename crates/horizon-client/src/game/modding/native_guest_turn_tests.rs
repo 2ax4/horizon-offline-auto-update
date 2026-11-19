@@ -80,7 +80,7 @@ pub(in crate::game) fn with_guests_at(
 #[ignore = "daily"]
 fn player_dimensions_validate_identity_on_both_server_roles() {
     use super::execution_role::ExecutionRole;
-    let previous_extra = super::EXTRA_DIMS.read().unwrap().clone();
+    let previous_extra = super::Dim::snapshot_extras();
     with_guests(|game| {
         super::Dim::add_extra("test:pocket");
         for role in [
@@ -164,7 +164,7 @@ fn player_dimensions_validate_identity_on_both_server_roles() {
             );
         }
     });
-    *super::EXTRA_DIMS.write().unwrap() = previous_extra;
+    super::Dim::restore_extras(previous_extra);
 }
 
 #[test]
@@ -392,6 +392,44 @@ fn another_guests_menu_and_push_work_during_a_turn() {
                 .velocity,
             Vec3::new(0.25, 0.5, -0.25)
         );
+    });
+}
+
+/// `player_set_velocity` replaces a guest's velocity (where `entity_push`
+/// adds), for the acting guest and another one, and refuses what it can't set.
+#[test]
+#[ignore = "daily"]
+fn player_set_velocity_replaces_a_guests_motion() {
+    with_guests(|game| {
+        for conn in [12, 13] {
+            game.as_guest(conn, |game| {
+                game.player.as_mut().unwrap().velocity = Vec3::ZERO;
+            })
+            .unwrap();
+        }
+        let a = game.player(12).unwrap();
+        let b = game.player(13).unwrap();
+        let velocity =|game: &super::Game<'_>, conn| {
+            let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+            guest.motion.as_ref().unwrap().velocity
+        };
+        assert!(game.entity_push(b.entity(), [1.0, 1.0, 1.0]));
+        assert!(game.player_set_velocity(b, [0.5, 0.25, -1.5]));
+        assert_eq!(velocity(game, 13), Vec3::new(0.5, 0.25, -1.5));
+        assert!(!game.player_set_velocity(b, [f64::NAN, 0.0, 0.0]));
+        assert!(!game.player_set_velocity(b, [0.0, f64::INFINITY, 0.0]));
+        assert_eq!(velocity(game, 13), Vec3::new(0.5, 0.25, -1.5));
+        game.as_guest(12, |game| {
+            assert!(game.player_set_velocity(a, [0.0, 0.42, 2.0]));
+            assert_eq!(
+                game.player.as_ref().unwrap().velocity,
+                Vec3::new(0.0, 0.42, 2.0)
+            );
+            assert!(game.player_set_velocity(b, [-1.0, 0.0, 0.0]));
+        })
+        .unwrap();
+        assert_eq!(velocity(game, 12), Vec3::new(0.0, 0.42, 2.0));
+        assert_eq!(velocity(game, 13), Vec3::new(-1.0, 0.0, 0.0));
     });
 }
 

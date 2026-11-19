@@ -138,6 +138,7 @@ impl Game<'_> {
         if let Some(source) = source {
             let lod = horizon_client::lod::Lod::new(source, self.worker_context());
             lod.set_looks(self.streaming.looks, self.streaming.nether_shading);
+            lod.set_shader_pack(self.streaming.shader_pack);
             self.lod = Some(lod);
             self.lod_observe.extend(self.world.chunks.keys().copied());
         }
@@ -289,9 +290,8 @@ impl Game<'_> {
             let _span = horizon_client::spans::guard("unload_block_entities");
             let gone: horizon_client::fast_hash::FxHashSet<(i32, i32)> =
                 unloaded.iter().map(|c| (c.x, c.z)).collect();
-            self.world
-                .block_entities
-                .unload(|p| gone.contains(&(p.0 >> 4, p.2 >> 4)));
+            let gone_chunks: Vec<(i32, i32)> = gone.iter().copied().collect();
+            self.world.block_entities.unload_chunks(&gone_chunks);
             self.world
                 .block_names
                 .retain(|p, _| !gone.contains(&(p.0 >> 4, p.2 >> 4)));

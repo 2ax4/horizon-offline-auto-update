@@ -22,7 +22,9 @@ Pushes to main run `verify` only; the nightly audit covers main's harnesses.
 *skipped* required check as passed, and labels used to start runs whose `verify` was skipped, which let
 auto-merge merge before the real `verify` finished. A pull request that changes no Rust (docs, tools) runs only its
 quick steps and finishes in about a minute. A pull request's public-tree check reads only
-its own commits (`--range base..head`); main's pushes read every ref's history.
+its own commits (`--range base..head`); a push to main that the merge queue didn't verify reads the whole history
+reachable from `HEAD` (`--history`), on a full clone, since reading old blobs through a partial clone takes over 30
+minutes.
 
 ### The parity job
 
@@ -333,7 +335,10 @@ keep a working build until they update themselves. `.github/release-line.txt` st
   release, on a Nightly or on nothing moves to it at the next check; a version picked by hand or pinned by an
   instance stays. Worlds are in the game's folder, never in a version's, so nothing touches them. The "Nightly
   builds" setting is gone. The last week's Nightlies (`nightly-<date>`) and the old releases stay on the Versions
-  page.
+  page. An instance on Stable set to Latest is offered the newest Nightly of each week and plays an installed
+  Nightly, never one of the old releases (up to `v0.2.97`) unless no Nightly is installed yet: they stay full
+  releases for `releases/latest`, but Stable skips them. A newer game release, not a pre-release, with a build for the player's platform replaces
+  that weekly Nightly.
 - **Servers** (#3331): `horizon-server update`, `install.sh` and `install.ps1` follow the Nightly the same way.
 - **Kira** posts each Nightly in #releases; the bug template asks for the version the game shows.
 - **Everyone gets the reviewers' picks.** A Nightly is main plus the pull requests the trusted reviewers picked

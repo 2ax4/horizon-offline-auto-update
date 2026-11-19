@@ -41,6 +41,20 @@ impl Launcher {
                     self.releases = r.map_or_else(Load::Failed, Load::Ready);
                     self.notes.clear();
                 }
+                Msg::ReleasesFromNetwork(list) => {
+                    horizon_launcher::nightly::note_published(&list);
+                    self.stable_failed = None;
+                    self.releases = Load::Ready(list);
+                    self.notes.clear();
+                }
+                Msg::StableRetry(next) => {
+                    // The same download under its new build: it stays the instance's, and keeps
+                    // the version picked on Versions.
+                    if self.stable_install.take().is_some() {
+                        self.instance_install = Some(next.tag.clone());
+                        self.stable_install = Some(next);
+                    }
+                }
                 Msg::Links(links) => {
                     // The official server may have moved: its list entry and its count follow.
                     self.multiplayer.stale();
@@ -98,6 +112,8 @@ impl Launcher {
                 Msg::JavaGame(id, home, cmd) => {
                     self.starting_client = None;
                     self.starting_instance = None;
+                    let stop = self.pre_launch_stop.take();
+                    let cmd = horizon_launcher::launch::unless_stopped(cmd, stop.as_deref());
                     let spawned = cmd.and_then(|(cmd, vars)| {
                         self.client_vars = vars;
                         backend::spawn(Job::Client, cmd, self.tx.clone())
@@ -122,11 +138,21 @@ impl Launcher {
                     }
                 }
                 Msg::Session(session) => self.handle_game_session(session),
+                Msg::PlayStep(step) => {
+                    if let Some(line) = self.play_step.said(self.starting_client.is_some(), step) {
+                        console_page::keep_line(
+                            &mut self.prepare_log,
+                            &mut self.log_revision,
+                            line,
+                        );
+                    }
+                }
                 Msg::JarConsent { jars, reply } => jar_launch::consent(window, jars, reply, cx),
                 Msg::JarClient { run, prepared } => {
                     self.starting_client = None;
                     self.starting_instance = None;
-                    match *prepared {
+                    let stop = self.pre_launch_stop.take();
+                    match horizon_launcher::launch::unless_stopped(*prepared, stop.as_deref()) {
                         Ok(cmd) => {
                             self.client_home = cmd.get_current_dir().map(|d| d.to_path_buf());
                             match backend::spawn(Job::Client, cmd, self.tx.clone()) {
@@ -158,6 +184,7 @@ impl Launcher {
                     self.installed = backend::installed();
                     let as_update = self.update_install.take().filter(|t| *t == tag);
                     let for_instance = self.instance_install.take_if(|t| *t == tag).is_some();
+                    let stable = self.stable_install.take_if(|r| r.tag == tag);
                     if let (Ok(()), Some(started)) = (&result, self.install_started.take()) {
                         let name = if as_update.is_some() {
                             "launcher.update_ms"
@@ -205,7 +232,13 @@ impl Launcher {
                                 });
                             }
                         }
-                        Err(e) => self.install_error = Some((tag, e)),
+                        Err(e) => {
+                            // Home's Stable update already read the list again and retried
+                            // once: this build isn't offered again until the list is read
+                            // from the network, not from a kept copy.
+                            self.stable_failed = stable.or(self.stable_failed.take());
+                            self.install_error = Some((tag, e));
+                        }
                     }
                     if let Some(next) = self.install_next.take() {
                         self.install_for_instance(next);
@@ -451,6 +484,8 @@ impl Launcher {
                 }
             }
         }
+        // A start that ended (the game started, or it failed) is on no step.
+        self.play_step.settle(self.starting_client.is_some());
         changed |= self.servers_tick();
         changed |= self.mods_tick();
         changed |= self.github_tick();

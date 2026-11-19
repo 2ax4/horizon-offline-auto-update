@@ -295,6 +295,9 @@ pub struct PlayerSender {
     /// The `horizon:menu_extra` payload layout the client reads: its revision answer,
     /// 0 for one that did not answer (the legacy layout, a menu of a block only).
     pub menu_extra_rev: u8,
+    /// The host and port the client typed in its handshake ([`typed_address`]), None for a
+    /// connection that sent none.
+    pub connect: Option<(Arc<str>, u16)>,
 }
 #[derive(Clone)]
 enum To {
@@ -367,6 +370,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            connect: None,
         }
     }
     #[cfg(test)]
@@ -405,6 +409,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            connect: None,
         };
         (sender, move || inspect.queued_contents())
     }
@@ -422,6 +427,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            connect: None,
         }
     }
     /// The bytes received from and sent to the client on the wire so far.
@@ -453,6 +459,19 @@ impl PlayerSender {
                 n.checked_add(cost).filter(|n| *n <= io_pool::MAX_PENDING)
             })
             .is_ok()
+    }
+    /// [`Self::reserve`] for a body to send, which a failed reservation closes the connection
+    /// for. A memory connection (the integrated server's own player, a splitscreen player) is not
+    /// bounded, as its outbox isn't (`Outbox::new`'s `capped`): it reads what it is sent as it
+    /// comes, and its first view arrives in one burst that can pass MAX_PENDING (a reopened
+    /// world's chunks all load from disk at once). Bounding it closed the connection with no
+    /// reason, "End of stream": #12849, then again #18313. Keep this exemption.
+    fn reserve_body(&self, cost: usize) -> bool {
+        if matches!(self.framing, horizon_protocol::connection::Framing::Memory) {
+            self.pending.fetch_add(cost, Ordering::AcqRel);
+            return true;
+        }
+        self.reserve(cost)
     }
     /// Prepare a whole encoded packet without publishing it. The channel is diagnostic only;
     /// its wire identifier must already be included in `body`.
@@ -504,7 +523,7 @@ impl PlayerSender {
         if matches!(self.to, To::Disabled) {
             return;
         }
-        if !self.reserve(io_pool::charge(body.retained())) {
+        if !self.reserve_body(io_pool::charge(body.retained())) {
             self.close();
             return;
         }
@@ -548,7 +567,7 @@ impl PlayerSender {
         let mut held = self.held();
         for body in bodies {
             let body = body.into();
-            if !self.reserve(io_pool::charge(body.retained())) {
+            if !self.reserve_body(io_pool::charge(body.retained())) {
                 self.close();
                 return;
             }
@@ -577,7 +596,7 @@ impl PlayerSender {
             To::Pool(outbox, _) => {
                 let body = play::Clientbound::Disconnect(cfg::Disconnect { reason }).encode();
                 let body = Body::from(body);
-                if !self.reserve(io_pool::charge(body.retained())) {
+                if !self.reserve_body(io_pool::charge(body.retained())) {
                     self.close();
                     return;
                 }
@@ -809,10 +828,19 @@ fn serve_connection(
                 );
                 return Ok(());
             }
-            serve_login(c, address, &shared, counted)
+            let typed = typed_address(&intention, c.is_memory());
+            serve_login(c, address, typed, &shared, counted)
         }
         other => Err(format!("unknown intent {other}")),
     }
+}
+
+/// The host and port a client typed (`ClientIntentionPacket`), the host cut at its first NUL,
+/// where a proxy appends its own data (Floodgate's, Forge's marker). None for a memory
+/// connection, whose client typed nothing, and for an empty host.
+fn typed_address(intention: &handshake::Intention, memory: bool) -> Option<(Arc<str>, u16)> {
+    let host = intention.host.split('\0').next().unwrap_or_default();
+    (!memory && !host.is_empty()).then(|| (host.into(), intention.port))
 }
 
 /// The older release a client's handshake states, when this server lets it join
@@ -1029,6 +1057,7 @@ fn authenticate(
 fn serve_login(
     mut c: Connection,
     address: std::net::SocketAddr,
+    typed: Option<(Arc<str>, u16)>,
     shared: &Arc<Shared>,
     counted: Option<super::Counted>,
 ) -> Result<(), String> {
@@ -1173,7 +1202,15 @@ fn serve_login(
     let result = login_and_configure(&mut c, shared, uuid, &name, &user, properties);
     match result {
         Ok(Some(parts)) => {
-            play(c, shared, parts, address, counted, expected.is_some());
+            play(
+                c,
+                shared,
+                parts,
+                address,
+                typed,
+                counted,
+                expected.is_some(),
+            );
             Ok(())
         }
         Ok(None) => {
@@ -1993,6 +2030,7 @@ fn play(
     shared: &Arc<Shared>,
     parts: Parts,
     address: std::net::SocketAddr,
+    typed: Option<(Arc<str>, u16)>,
     counted: Option<super::Counted>,
     expected: bool,
 ) {
@@ -2028,6 +2066,7 @@ fn play(
         announced: parts.channels.announced.clone().unwrap_or_default(),
         viewed_levels: parts.channels.viewed_levels.answer(),
         menu_extra_rev: parts.channels.menu_extra_rev.revision(),
+        connect: typed,
     };
     let required_pack = shared
         .config
@@ -2425,6 +2464,13 @@ impl SharedFrames {
 /// The compressed frames shared by every connection: how many and their bytes.
 pub fn shared_frame_census() -> (usize, usize) {
     SharedFrames::get().census()
+}
+
+/// Drop the compressed frames kept for other connections, with their table's
+/// memory: nobody is on to send them to. A frame being made is still handed to
+/// whoever waits for it.
+pub fn forget_shared_frames() {
+    *SharedFrames::get().cache() = FrameCache::default();
 }
 
 /// Frame one packet body into `out`: a large one compressed through
@@ -3799,6 +3845,33 @@ mod tests {
 }
 
 #[cfg(test)]
+mod typed_address_tests {
+    use super::*;
+    fn typed(host: &str, port: u16, memory: bool) -> Option<(String, u16)> {
+        let intention = handshake::Intention {
+            protocol: 0,
+            host: host.into(),
+            port,
+            intent: handshake::LOGIN,
+        };
+        typed_address(&intention, memory).map(|(host, port)| (host.to_string(), port))
+    }
+    /// The host and port as typed, the host cut where a proxy puts its own data.
+    #[test]
+    fn the_host_is_the_text_before_a_nul() {
+        let play = Some(("play.example.com".to_owned(), 25570));
+        assert_eq!(typed("play.example.com", 25570, false), play);
+        assert_eq!(
+            typed("play.example.com\x00198.51.100.7\x00uuid", 25570, false),
+            play
+        );
+        assert_eq!(typed("", 25565, false), None);
+        assert_eq!(typed("\0data", 25565, false), None);
+        assert_eq!(typed("localhost", 25565, true), None);
+    }
+}
+
+#[cfg(test)]
 mod outgoing_budget_tests {
     use super::*;
     use horizon_protocol::connection::Framing;
@@ -3825,6 +3898,7 @@ mod outgoing_budget_tests {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            connect: None,
         }
     }
     #[test]
@@ -3908,6 +3982,58 @@ mod outgoing_budget_tests {
         }
         assert!(s.pending.load(Ordering::Relaxed) <= io_pool::MAX_PENDING);
         assert!(s.held().len() < io_pool::MAX_PENDING / std::mem::size_of::<Vec<u8>>());
+    }
+    fn outbox(s: &PlayerSender) -> &Arc<io_pool::Outbox> {
+        let To::Pool(outbox, _) = &s.to else {
+            unreachable!()
+        };
+        outbox
+    }
+    // The integrated server's own player: a reopened world sends its whole first view at once,
+    // more than the network budget, and the player must stay (#12849, #18313).
+    #[test]
+    fn a_memory_connection_stays_open_past_the_budget_on_send() {
+        let s = sender(Framing::Memory);
+        s.send(Vec::with_capacity(io_pool::MAX_PENDING));
+        s.send(vec![1, 2, 3]);
+        assert!(outbox(&s).alive(), "send closed the connection");
+        assert_eq!(outbox(&s).queued(), 2);
+    }
+    #[test]
+    fn a_memory_connection_stays_open_past_the_budget_on_send_many() {
+        let s = sender(Framing::Memory);
+        let half = io_pool::MAX_PENDING / 2;
+        s.send_many([Vec::with_capacity(half), Vec::with_capacity(half)]);
+        assert!(outbox(&s).alive(), "send_many closed the connection");
+        {
+            let _hold = Holding::start();
+            s.send_many([Vec::with_capacity(half), vec![1, 2, 3]]);
+        }
+        s.flush();
+        assert!(outbox(&s).alive(), "a held send_many closed the connection");
+        assert_eq!(outbox(&s).queued(), 4);
+    }
+    #[test]
+    fn a_memory_connection_past_the_budget_still_gets_its_disconnect() {
+        let s = sender(Framing::Memory);
+        // A first view's burst already queued.
+        s.pending.store(io_pool::MAX_PENDING, Ordering::Relaxed);
+        let reason = translatable("disconnect.closed", &[]);
+        s.disconnect(reason.clone());
+        let expected = play::Clientbound::Disconnect(cfg::Disconnect { reason }).encode();
+        assert_eq!(
+            outbox(&s).queued_contents().last(),
+            Some(&expected),
+            "the disconnect was dropped"
+        );
+    }
+    /// A network client that reads slowly keeps the budget: past it, it is closed.
+    #[test]
+    fn a_network_connection_still_closes_past_the_budget() {
+        let s = sender(Framing::Network(None));
+        s.send(Vec::with_capacity(io_pool::MAX_PENDING));
+        assert!(!outbox(&s).alive());
+        assert_eq!(outbox(&s).queued(), 0);
     }
 }
 

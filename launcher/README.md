@@ -143,7 +143,11 @@ The opening, then Play ([clip](docs/opening.webm)):
   (`nice -n 5`), and environment variables (`NAME=value OTHER="two words"`), kept in
   `instances.json` (`horizon_launcher::launch`). The game stays one process the launcher follows:
   on Unix `/bin/sh` runs the command and then `exec`s the wrapper and the game, whose words pass
-  through `"$@"` untouched; on Windows `cmd /C` runs `<command> && <game>`. Both the window's Play
+  through `"$@"` untouched; on Windows `cmd /C` runs the command to its end, then the wrapper and
+  the game start with their words as they are, never through cmd. While that command runs, Play's
+  Stop (Cancel in the classic layout) ends it with what it started, and so does closing the
+  launcher. On Windows a wrapper that is a shell (`cmd` or PowerShell) can't join
+  a server or open a world: it would read their names as commands. Both the window's Play
   and `play` use them. `horizon-launcher instance launch <instance> [--pre-launch …]
   [--wrapper …] [--env …]` (an MCP agent needs `confirm: true`: it sets commands Play runs).
   On Linux the panel also has switches for what the computer has: **GameMode** (`gamemoderun`
@@ -290,6 +294,9 @@ When the top bar's page tabs overflow, an arrow on a fading edge shows each side
 (`src/nav_strip.rs`); the arrows go at the ends and when all tabs fit. They fade in and out over
 150 ms, and a click scrolls three quarters of the strip over 240 ms; another click goes on from where
 that one is headed, and the wheel stops it. Performance mode and reduced motion make both instant.
+
+A mouse wheel's notch glides over 240 ms instead of jumping (`src/glide.rs`); trackpads scroll as
+they are. Performance mode and reduced motion (`HORIZON_LAUNCHER_MOTION=off`) turn the glide off.
 
 Pages and Home's landscape fill the window as it resizes. The title bar is transparent over the
 launcher on every platform: Windows keeps native dragging, resizing, Snap, minimize,

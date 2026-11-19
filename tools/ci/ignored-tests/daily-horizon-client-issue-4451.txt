@@ -1284,6 +1284,7 @@ horizon-client game::native_entity_renderers_tests::an_unregistered_thrown_type_
 horizon-client game::native_entity_riding::tests::a_nested_tree_lists_passengers_depth_first_and_shares_its_root lib daily resources
 horizon-client game::native_entity_riding::tests::a_player_boards_ahead_of_a_mob_and_behind_a_player_as_add_passenger_says lib daily resources
 horizon-client game::native_entity_riding::tests::a_player_gets_off_along_their_own_yaw_on_their_turn_or_not lib daily resources
+horizon-client game::native_entity_riding::tests::a_rider_boards_another_cart_or_boat_straight_from_its_vehicle lib daily resources
 horizon-client game::native_entity_riding::tests::boat_and_cart_interactions_use_shared_mount_path lib daily resources
 horizon-client game::native_entity_riding::tests::camel_admits_multiple_mob_passengers_but_not_a_fourth lib daily resources
 horizon-client game::native_entity_riding::tests::canceled_dismount_keeps_old_mount_and_mount_hook_fires_once lib daily resources
@@ -2167,8 +2168,8 @@ horizon-client game::player_destroy_tests::a_pots_harvest_listener_runs_once_and
 horizon-client game::player_destroy_tests::denied_ice_does_not_melt_above_solid_ground lib daily resources
 horizon-client game::player_destroy_tests::the_mods_harvest_answer_is_read_once_after_the_removal lib daily resources
 horizon-client game::player_destroy_tests::the_parts_answer_decides_the_tool_wear_and_the_statistics lib daily resources
+horizon-client game::player_equipment_change_tests::a_mod_hearing_the_change_needs_no_listened_opt_in lib daily resources
 horizon-client game::player_equipment_change_tests::a_players_hotbar_selection_pickup_and_helmet_are_each_one_change lib daily resources
-horizon-client game::player_equipment_change_tests::players_are_not_told_without_the_listened_opt_in lib daily resources
 horizon-client game::player_residency_tests::actual_dragon_admits_exactly_eight_checked_parts_with_independent_uuids lib daily resources
 horizon-client game::player_residency_tests::actual_guest_membership_and_lifetime_survive_nested_body_loans_and_reset lib daily resources
 horizon-client game::player_residency_tests::dragon_part_registrations_retire_on_replacement_command_and_chunk_unload lib daily resources

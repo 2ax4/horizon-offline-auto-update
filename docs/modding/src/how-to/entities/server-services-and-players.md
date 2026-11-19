@@ -37,6 +37,12 @@ Read identity through `player.uuid()`, `player.name(host)`,
 connection IP without a port, including the forwarded address behind a Velocity
 proxy. An acting player without a known connection has an empty address.
 
+`player.connect_address(host)` gives the host and port the client typed to connect (`play.example.com`, 25570): the
+name a server with several was reached by, which is not the IP in `address`. It is the handshake's own, cut at its first
+NUL (where a proxy appends its data), and a transfer's is the one the transferring server gave. It is `None` for a
+fake player, the single-player owner and a client that typed nothing. A mod can announce a resource pack URL under it
+that this client can reach.
+
 The online list includes connected players during nested player turns. Name,
 permission and address reads work for connected players whose bodies are displaced
 by another player's turn; stale handles are refused. Entity and living handles
@@ -69,6 +75,21 @@ UUID: you can use a retained handle after disconnection until its world epoch
 closes. You cannot target arbitrary offline UUIDs. Retain the handle value, not a
 borrowed service.
 
+To change only the name in the Tab list, use `player.set_list_name(host, Some(text))`.
+Everyone sees the new name at once, colours included; `None` shows the nickname or real
+name again. The name is kept by UUID until a mod sets it again or the server stops, also
+across a leave and rejoin. The `player_tab_list_name_format` hook still has the last word,
+and chat, name tags and commands keep the real name. The call returns `false` for a stale
+handle, an unavailable server list or a player who is not online.
+
+The reads `player.latency(host)`, `player.hidden(host)` and `player.nickname(host)`
+return what the calls above set. Latency is the Tab list ping in milliseconds
+(`Option<i32>`, `0` until the first keep-alive answer). `hidden` is the level
+`hide` set, `None` when shown (`Option<Option<u8>>`). `nickname` is the nickname
+in place of the player's name, `None` when there is none (`Option<Option<String>>`).
+An outer `None` means a stale or unavailable player for all three, a client or an
+unjoinable world for `hidden`, and no server list for `nickname`.
+
 ## Chat lines and respawn
 
 Keeping a public chat line from some players (an ignore list, a chat channel, a party chat): the `chat_recipient`
@@ -87,6 +108,12 @@ hook (from `server_tick`, say). It returns `Result<(), RespawnRefusal>`, and eac
 this order: `Client`, `InPlayerHook` (a player's state is swapped in), `Stale` (no player on this server behind the
 handle), `NoConnection` (a fake player, or the world's own player in a single-player world, which respawns through its
 own screen) and `Alive` (health above 0 and the game not won: the case the button ignores; a player who has won the game and is watching the End poem is respawned even alive, on the next server tick, as the button does).
+
+`player.set_velocity(host, [x, y, z])` sets a server player's velocity in blocks a tick and sends it to their client, as
+Paper's `Player.setVelocity` does (`player_set_velocity`, `WorldOnly` access). The value replaces the player's velocity,
+where `entity_push` adds to it, and the client moves by it from its next tick. It returns `false`, with the velocity
+unchanged, for a stale or unavailable player, a displaced outer player or a component that is not finite.
+`entity_set_velocity` refuses players.
 
 ## Player rules and sleep
 

@@ -280,7 +280,7 @@ fn routing_actor() {
         game.args(["--exact", "run_leases::tests::routing_actor"])
             .env("ROUTING_MODE", "game")
             .current_dir(root.join("instances/player"));
-        let mut game = crate::launch::wrap(game, &crate::launch::Launch::default());
+        let mut game = crate::launch::wrap(game, &crate::launch::Launch::default()).unwrap();
         // A wrapper may consume engine arguments before starting libtest's receiver.
         // Preserve the declared engine command, whose cwd differs from this launcher.
         let words: Vec<std::ffi::OsString> = [
@@ -385,7 +385,7 @@ fn a_java_editions_command_is_not_read_as_horizons() {
     ])
     .current_dir(root.path())
     .env("HORIZON_HOME", root.path().join("logs"));
-    let java = crate::launch::wrap(java, &crate::launch::Launch::default());
+    let java = crate::launch::wrap(java, &crate::launch::Launch::default()).unwrap();
     shared(&java)
         .map_err(crate::native_mods::cache_error)
         .unwrap();
@@ -394,7 +394,7 @@ fn a_java_editions_command_is_not_read_as_horizons() {
     let mut game = Command::new(root.path().join("horizon-client"));
     game.current_dir(root.path());
     mark(&mut game, root.path());
-    let game = crate::launch::wrap(game, &crate::launch::Launch::default());
+    let game = crate::launch::wrap(game, &crate::launch::Launch::default()).unwrap();
     assert!(override_value(&game, GAME).is_some());
 }
 
@@ -405,7 +405,7 @@ fn java_edition(java: &Path, home: &Path, logs: &Path) -> Command {
         .args(["-cp", "client.jar", "net.minecraft.client.main.Main"])
         .current_dir(home)
         .env("HORIZON_HOME", logs);
-    crate::launch::wrap(command, &crate::launch::Launch::default())
+    crate::launch::wrap(command, &crate::launch::Launch::default()).unwrap()
 }
 
 #[test]
@@ -457,4 +457,109 @@ fn a_java_edition_launch_starts_when_its_folders_cannot_be_marked() {
         panic!("Horizon's game started with its folder unmarked");
     };
     assert!(error.contains(&shown), "{error}");
+}
+
+/// Horizon's game command as the launcher builds it: `--resources` and the session file last.
+fn horizon_game(root: &Path) -> Command {
+    let mut game = Command::new(root.join("game"));
+    game.arg("--resources")
+        .arg(root.join("resources"))
+        .arg("--session-file")
+        .arg(root.join("sessions/session-1.json"))
+        .current_dir(root);
+    mark(&mut game, &root.join("versions/native-fixture"));
+    game
+}
+
+/// `game` run through `wrapper`'s words, as [`crate::launch::wrap`] builds a direct plan.
+fn wrapped(mut game: Command, wrapper: &[&str]) -> Command {
+    snapshot(&mut game);
+    let mut out = Command::new(wrapper[0]);
+    out.args(&wrapper[1..])
+        .arg(game.get_program())
+        .args(game.get_args())
+        .current_dir(game.get_current_dir().unwrap());
+    for (key, value) in game.get_envs() {
+        out.env(key, value.unwrap());
+    }
+    out
+}
+
+#[test]
+fn wrapped_game_holds_its_resources_with_any_number_of_wrapper_words() {
+    let root = tempfile::tempdir().unwrap();
+    for wrapper in [&["gamemoderun"][..], &["env", "A=1"], &["nice", "-n", "5"]] {
+        let paths = argument_paths(&wrapped(horizon_game(root.path()), wrapper))
+            .unwrap_or_else(|error| panic!("{wrapper:?}: {error}"));
+        assert!(
+            paths.contains(&root.path().join("resources")),
+            "{wrapper:?}"
+        );
+    }
+}
+
+#[test]
+fn unwrapped_game_holds_its_resources() {
+    let root = tempfile::tempdir().unwrap();
+    let mut game = horizon_game(root.path());
+    snapshot(&mut game);
+    let paths = argument_paths(&game).unwrap();
+    assert!(paths.contains(&root.path().join("resources")));
+    assert!(paths.contains(&std::path::absolute(root.path()).unwrap()));
+}
+
+#[test]
+fn command_without_snapshot_reads_resources_from_its_own_words() {
+    let root = tempfile::tempdir().unwrap();
+    let mut native = Command::new(root.path().join("client"));
+    native
+        .arg("--resources")
+        .arg(root.path().join("resources"))
+        .current_dir(root.path());
+    assert_eq!(
+        argument_paths(&native).unwrap(),
+        [root.path().join("resources")]
+    );
+    let mut tool = Command::new(root.path().join("tool"));
+    tool.args(["--odd"]).current_dir(root.path());
+    assert!(argument_paths(&tool).unwrap().is_empty());
+}
+
+#[test]
+fn wrapped_game_starts_and_holds_the_wrappers_resources() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("instance");
+    let source = root.path().join("versions/a");
+    let wrapper_data = root.path().join("versions/b/resources");
+    for folder in [
+        &home,
+        &source,
+        &root.path().join("resources"),
+        &wrapper_data,
+    ] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let game = || {
+        let mut game = horizon_game(root.path());
+        game.current_dir(&home)
+            .env("HORIZON_HOME", root.path().join("logs"));
+        mark(&mut game, &source);
+        game
+    };
+    // One wrapper word leaves the session file without a value when the whole command is read
+    // as the game's; the second wrapper names version B's data by a path relative to the instance.
+    let odd = wrapped(game(), &["gamemoderun"]);
+    drop(shared(&odd).unwrap());
+    let relative = Path::new("..").join("versions/b/resources");
+    let own = wrapped(
+        game(),
+        &["wrapper", "--resources", relative.to_str().unwrap(), "--"],
+    );
+    let claims = shared(&own).unwrap();
+    let registry = Registry::open().unwrap();
+    assert!(matches!(
+        registry.lock(&directory(&wrapper_data), LockMode::Exclusive),
+        Err(Error::Busy)
+    ));
+    drop(claims);
 }

@@ -237,6 +237,10 @@ pub struct Installed {
     pub origin: Option<crate::github_mods::Origin>,
     /// The validated package icon, or the package error (the file remains removable).
     pub icon: Result<Option<Arc<horizon_platform::mod_package::icon::Icon>>, String>,
+    /// Whether its row may switch `mod.<id>`. Not when the manifest can't be read (the id is
+    /// only the file name), nor for a `horizon-mods/` copy whose id another mod has: either
+    /// would switch that other mod. The file stays removable.
+    pub switch: bool,
 }
 
 impl Installed {
@@ -252,21 +256,49 @@ impl Installed {
             crate::i18n::tr("Old format (.hnmod): ask its author to republish it as .hmod")
         })
     }
+
+    /// Whether the file is in `horizon-native-mods/`; one in `horizon-mods/` is a wasm or
+    /// content mod, which needs no build and no native permission.
+    pub fn native(&self) -> bool {
+        self.file
+            .strip_prefix(native_mods::INSTALLED)
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
 }
 
 /// Whether `files` hold a native mod the build card is for; a retired file is not one.
 pub fn asks_for_build<'a>(files: impl IntoIterator<Item = &'a Installed>) -> bool {
-    files.into_iter().any(|file| !file.retired())
+    files
+        .into_iter()
+        .any(|file| file.native() && !file.retired())
 }
 
 /// Discover the actual files, not just GitHub sidecars. Registry files already have a row.
+/// Besides native files, an `.hmod` copied by hand into `horizon-mods/` is listed too (#18301).
 pub fn untracked(home: &Path) -> Vec<Installed> {
     let tracked = crate::browser::installed::Installed::load(home);
-    listed(home)
+    let native = listed(home)
         .into_iter()
-        .filter_map(|path| {
-            let file = format!("{}/{}", native_mods::INSTALLED, path.file_name()?.to_str()?);
-            if !path.is_file() || tracked.entries.iter().any(|e| e.file == file) {
+        .map(|path| (native_mods::INSTALLED, path));
+    let wasm = wasm_hmods(home)
+        .into_iter()
+        .map(|path| (horizon_platform::mod_package::mod_list::DIR, path));
+    // A tracked `ruby.hmod` renamed `Ruby.hmod` on a folder that ignores case is still that file:
+    // both names resolve to the same entry. On a case-sensitive one they stay two files.
+    let tracked_paths: Vec<_> = tracked
+        .entries
+        .iter()
+        .map(|e| (e.file.as_str(), fs::canonicalize(home.join(&e.file)).ok()))
+        .collect();
+    let mut rows: Vec<Installed> = native
+        .chain(wasm)
+        .filter_map(|(folder, path)| {
+            let file = format!("{folder}/{}", path.file_name()?.to_str()?);
+            let canonical = fs::canonicalize(&path).ok();
+            let is_tracked = tracked_paths
+                .iter()
+                .any(|(f, c)| *f == file || (c.is_some() && *c == canonical));
+            if !path.is_file() || is_tracked {
                 return None;
             }
             let package = horizon_platform::mod_package::manifest::Package::read(&path);
@@ -275,8 +307,10 @@ pub fn untracked(home: &Path) -> Vec<Installed> {
                 .map(|p| (p.manifest.id.clone(), p.manifest.version.clone()))
                 .unwrap_or_else(|_| (stem(&path), String::new()));
             // A GitHub install's Remove deletes `<id>.hmod`: an old `.hnmod` is removed as a file.
+            // GitHub installs only go into the native folder.
             let hmod = path.extension().is_some_and(|e| e == "hmod");
-            let origin = (hmod && path.file_stem()?.to_str()? == id)
+            let github = folder == native_mods::INSTALLED;
+            let origin = (github && hmod && path.file_stem()?.to_str()? == id)
                 .then(|| crate::github_mods::origin(home, &id))
                 .flatten();
             let internals = package
@@ -289,10 +323,33 @@ pub fn untracked(home: &Path) -> Vec<Installed> {
                 version,
                 internals,
                 origin,
+                // A retired `.hnmod` never switches the live mod, even when the archive reads.
+                switch: hmod && package.is_ok(),
                 icon: package.map(|p| p.icon.map(Arc::new)),
             })
         })
-        .collect()
+        .collect();
+    let tracked_ids: Vec<&str> = tracked
+        .entries
+        .iter()
+        .filter_map(crate::browser::horizon::mod_id)
+        .collect();
+    // Only ids read from a manifest: an unreadable file's name says nothing about its id.
+    let ids: Vec<Option<String>> = rows
+        .iter()
+        .map(|r| r.switch.then(|| r.id.clone()))
+        .collect();
+    for (i, row) in rows.iter_mut().enumerate() {
+        let shared = tracked_ids.contains(&row.id.as_str())
+            || ids
+                .iter()
+                .enumerate()
+                .any(|(j, id)| j != i && id.as_ref() == Some(&row.id));
+        if !row.native() && shared {
+            row.switch = false;
+        }
+    }
+    rows
 }
 
 /// The mods installed version `version` was built with, or None when it isn't a native build
@@ -679,6 +736,53 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_copy_has_no_switch_and_a_renamed_tracked_file_no_second_row() {
+        use crate::browser::installed;
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let folder = home
+            .path()
+            .join(horizon_platform::mod_package::mod_list::DIR);
+        fs::create_dir_all(&folder).unwrap();
+        // Its id would be only its file name, which could be another mod's.
+        fs::write(folder.join("ruby.hmod"), b"corrupt").unwrap();
+        fs::write(folder.join("Gem.hmod"), b"corrupt").unwrap();
+        // A valid copy whose id is the corrupt file's name keeps its switch.
+        let mut zip = zip::ZipWriter::new(fs::File::create(folder.join("my-build.hmod")).unwrap());
+        zip.start_file("horizon-mod.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            b"id = 'ruby'
+name = 'Ruby'
+version = '1'
+api = '0.2'
+capabilities = ['registries']
+",
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        let entry: installed::Entry = serde_json::from_value(serde_json::json!({"source":"horizon","project":"gem","slug":"gem","title":"Gem","kind":"mod","version":"1","number":"1","file":"horizon-mods/gem.hmod","checksum":"","page":""})).unwrap();
+        installed::Installed {
+            entries: vec![entry],
+        }
+        .save(home.path())
+        .unwrap();
+        let files = untracked(home.path());
+        let seen: Vec<_> = files.iter().map(|f| (f.file.as_str(), f.switch)).collect();
+        // A folder that ignores case: `Gem.hmod` is the tracked `gem.hmod` renamed, not a second
+        // mod. A case-sensitive one holds two files.
+        let renamed = folder.join("gem.hmod").exists();
+        let mut expected = vec![
+            ("horizon-mods/my-build.hmod", true),
+            ("horizon-mods/ruby.hmod", false),
+        ];
+        if !renamed {
+            expected.insert(0, ("horizon-mods/Gem.hmod", false));
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
     fn a_retired_hnmod_is_listed_to_remove_but_never_built() {
         use std::io::Write;
         let home = tempfile::tempdir().unwrap();
@@ -804,6 +908,20 @@ mod tests {
             ]
         );
         assert!(asks_for_build(&files));
+
+        // A readable backup of the live mod saved as `.hnmod` still never switches `zoom`.
+        fs::copy(folder.join("zoom.hmod"), folder.join("zoom.hnmod")).unwrap();
+        let switches: Vec<_> = untracked(home.path())
+            .iter()
+            .map(|f| (f.file.clone(), f.switch))
+            .collect();
+        assert_eq!(
+            switches,
+            [
+                ("horizon-native-mods/zoom.hmod".to_owned(), true),
+                ("horizon-native-mods/zoom.hnmod".to_owned(), false)
+            ]
+        );
     }
 
     #[test]

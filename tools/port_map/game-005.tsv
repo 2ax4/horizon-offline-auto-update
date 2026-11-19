@@ -4,7 +4,7 @@ Entity.getMovementEmission	port	crates/horizon-client/src/mobs/ai.rs::movement_s
 Entity.isColliding	port	crates/horizon-client/src/game/network/remote/mod.rs::Game::block_meets_player	the state's collision shape at the player's pose against the player's box; `end_predictions` asks it for a restored block and snaps the player to the position the prediction remembered (`snap_target`, guarded by `onTeleport`)
 Entity.canInteractWithLevel	inline	crates/horizon-client/src/mobs/leash.rs::tick	the leashed mob's life, and its player holder's life and spectator state, are checked: a dead or spectating holder drops the lead
 Entity.unRide	inline	crates/horizon-client/src/game/items/consume.rs::Game::stop_riding	gap: minor: the player's half (boat, minecart or mob mount); riders of a vehicle are let go by sync_riders and eject_boat_mobs
-Entity.addTag	port	crates/horizon-client/src/game/administration/commands/data.rs::Game::cmd_tag	the tag.add branch, with the 1024 tag limit
+Entity.addTag	port	crates/horizon-gameplay/src/commands/tag.rs::tag	the tag.add branch, with the 1024 tag limit
 Entity.equals	skip:java		entities are compared by id
 Entity.setRot	skip:other		plain setter; yaw and pitch are struct fields and the callers clamp pitch
 Entity.reapplyPosition	skip:other		bounding boxes are built from the position on demand (Mob::bounds_at), so there is no cached box to refresh
@@ -65,7 +65,7 @@ Entity.teleportSameDimension	inline	crates/horizon-client/src/game/administratio
 Entity.teleportSpectators	inline	crates/horizon-client/src/game/administration/commands/extra.rs::Game::tick_camera	a spectator's camera follows its target every tick, so no teleport is needed; it drops when the target is gone
 Entity.calculatePassengerTransition	inline	crates/horizon-client/src/game/entities/passengers.rs::Game::position_riders	riders are seated on the vehicle each tick instead of getting an offset transition
 Entity.sendTeleportTransitionToPlayers	inline	crates/horizon-client/src/lan/entity.rs::ServerEntity::send_changes	a LAN guest sees a teleport as an EntityPositionSync when the jump is too big for a relative move; no ClientboundTeleportEntity is sent
-Entity.forceSetRotation	inline	crates/horizon-client/src/game/administration/commands/world_cmds.rs::Game::cmd_rotate	/rotate goes through teleport_to_in_level with the new rotation; the pitch of non-players is not clamped separately
+Entity.forceSetRotation	inline	crates/horizon-gameplay/src/commands/rotate.rs::rotate	/rotate goes through teleport_to_in_level with the new rotation; the pitch of non-players is not clamped separately
 Entity.placePortalTicket	port	crates/horizon-client/src/game/blocks/nether_portal.rs::Game::place_portal_ticket	a TicketType.PORTAL ticket of radius 3 on the chunk, 300 ticks, on the server only (a client has no levels of its own); the nether and end travel paths call it on arrival
 Entity.canTeleport	inline	crates/horizon-client/src/game/world/end.rs::Game::tick_end	leaving the End before the credits have been seen shows the credits instead of teleporting the player
 Entity.fillCrashReportCategory	skip:debug		crash report detail
