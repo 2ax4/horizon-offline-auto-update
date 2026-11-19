@@ -25,7 +25,6 @@ use horizon_protocol::{
 use horizon_world::registry::BlockStateId;
 use std::{collections::HashMap, time::Instant};
 
-mod cache;
 mod client;
 mod server;
 pub use client::{Inbox, RemoteSource};
@@ -180,18 +179,12 @@ impl Request {
     }
 }
 
-/// A tile's columns as the server sends them: the request's id, then the
-/// tile ([`encode_tile`]). A tile the client would refuse (past
-/// [`MAX_SPANS`] or [`MAX_REPLY`]) is refused.
+/// A tile's columns as the server sends them: the request's id, then 0 and
+/// the columns' biome names and columns, or 1 for a refusal. A tile the
+/// client would refuse (past [`MAX_SPANS`] or [`MAX_REPLY`]) is refused.
 pub fn encode_reply(id: u32, columns: Option<&[Column]>, biome_names: &[String]) -> Vec<u8> {
-    reply(id, &encode_tile(columns, biome_names))
-}
-
-/// A tile as [`encode_reply`] writes it after the request's id: 0 and the
-/// columns' biome names and columns, or 1 for a refusal. It is the same for
-/// every request, so a tile sampled once answers any ([`reply`]).
-pub fn encode_tile(columns: Option<&[Column]>, biome_names: &[String]) -> Vec<u8> {
     let mut w = Writer::new();
+    w.varint(id as i32);
     let spans: usize = columns.map_or(0, |c| c.iter().map(|c| c.spans.len()).sum());
     let Some(columns) = columns.filter(|_| spans <= MAX_SPANS) else {
         w.u8(1);
@@ -236,7 +229,7 @@ pub fn encode_tile(columns: Option<&[Column]>, biome_names: &[String]) -> Vec<u8
         }
     }
     if palette.len() > MAX_BIOMES {
-        return vec![1];
+        return refusal(id);
     }
     w.varint(palette.len() as i32);
     for biome in palette {
@@ -248,28 +241,15 @@ pub fn encode_tile(columns: Option<&[Column]>, biome_names: &[String]) -> Vec<u8
         );
     }
     w.bytes(&body.data);
-    // Past the limit under the shortest id: refused for every request.
-    if w.data.len() >= MAX_REPLY {
-        return vec![1];
-    }
-    w.data
-}
-
-/// `tile` ([`encode_tile`]) as the answer to request `id`: refused where the
-/// id takes it past [`MAX_REPLY`].
-pub fn reply(id: u32, tile: &[u8]) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.varint(id as i32);
-    if w.data.len() + tile.len() > MAX_REPLY {
+    if w.data.len() > MAX_REPLY {
         return refusal(id);
     }
-    w.data.extend_from_slice(tile);
     w.data
 }
 
 /// A refusal's payload: the tile isn't served.
 pub fn refusal(id: u32) -> Vec<u8> {
-    reply(id, &[1])
+    encode_reply(id, None, &[])
 }
 
 /// The id a reply answers.

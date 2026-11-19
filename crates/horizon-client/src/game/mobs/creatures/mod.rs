@@ -630,7 +630,7 @@ impl Game<'_> {
             SpawnSite::Finalizing(reason) => match self.finalize_with(&mut mob, reason, None) {
                 Finalized::Cancelled => return self.discard_unjoined_mob(mob.id),
                 Finalized::Skipped => return Some(mob),
-                Finalized::Done => horizon_client::mobs::shulker::finalize_spawn(&mut mob),
+                Finalized::Done => {}
             },
             // A plain spawn finalizes as a summoned one (vanilla's /summon
             // and egg path): its few reason-gated arms behave the same.
@@ -642,7 +642,6 @@ impl Game<'_> {
                     &difficulty,
                     horizon_client::mobs::spawn_rules::Reason::MobSummoned,
                 );
-                horizon_client::mobs::shulker::finalize_spawn(&mut mob);
             }
         }
         Some(mob)

@@ -209,11 +209,7 @@ impl Game<'_> {
 
     /// `ShelfRenderer`: three items face out, aligned to the bottom or centre.
     pub(super) fn shelf_geometry(&self, camera: glam::DVec3, out: &mut Vec<Vertex>) {
-        for (key, entity) in self
-            .world
-            .block_entities
-            .listed(horizon_client::block_entities::Listed::Shelf)
-        {
+        for (key, entity) in &self.world.block_entities {
             let BlockEntity::Shelf(shelf) = entity else {
                 continue;
             };

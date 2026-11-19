@@ -216,8 +216,8 @@ impl Game<'_> {
         let keys: Vec<_> = self
             .world
             .block_entities
-            .listed(horizon_client::block_entities::Listed::Beacon)
-            .map(|(k, _)| *k)
+            .iter()
+            .filter_map(|(k, e)| matches!(e, BlockEntity::Beacon(_)).then_some(*k))
             .collect();
         for key in keys {
             let Some((lease, BlockEntity::Beacon(mut b))) = self.world.block_entities.take(&key)
@@ -712,24 +712,12 @@ impl Game<'_> {
         }
         let test_beams: Vec<_> = world
             .block_entities
-            .boxes()
+            .iter()
             .filter_map(|(k, e)| Some((*k, self.test_instance_beam(e)?)))
             .collect();
-        for (k, e) in world
-            .block_entities
-            .listed(horizon_client::block_entities::Listed::Beacon)
-        {
+        for (k, e) in &world.block_entities {
             if let Some(sections) = beam(e) {
-                match self.far_beacons.get_mut(k) {
-                    Some(kept) if kept.as_slice() == sections => {}
-                    Some(kept) => {
-                        kept.clear();
-                        kept.extend_from_slice(sections);
-                    }
-                    None => {
-                        self.far_beacons.insert(*k, sections.to_vec());
-                    }
-                }
+                self.far_beacons.insert(*k, sections.to_vec());
             }
         }
         for (k, sections) in test_beams {

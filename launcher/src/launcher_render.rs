@@ -35,8 +35,6 @@ impl Render for Launcher {
             performance || (self.theme.dark && !self.theme.scene),
             self.theme.edge,
         );
-        // A frame per wheel notch's step is what Performance mode saves: notches jump there.
-        glide::set_on(!performance);
         // Reduced motion (the player's or the system's) holds GPUI's own animations too.
         sky::set_preference(self.settings.reduce_motion);
         cx.set_reduce_motion(motion::still());
@@ -272,8 +270,6 @@ impl Render for Launcher {
             .font_family(theme::FONT)
             .text_color(t.ink)
             .overflow_hidden()
-            // First, so it takes a wheel notch before any scroll area does.
-            .child(glide::wheel())
             .child(if t.glass {
                 div()
                     .relative()

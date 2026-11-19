@@ -58,15 +58,11 @@ fn module(reply: &Writer, depth: i32) -> horizon_mod_wasm::WasmMod {
         (func $recurse (param i32) (result i32)
             local.get 0 i32.eqz if (result i32) i32.const 0 else
             local.get 0 i32.const 1 i32.sub call $recurse i32.const 1 i32.add end)
-        (func (export "horizon_hook") (param i32) (result i64) {hook}))"#,
+        (func (export "horizon_hook") (param i32) (result i64)
+            i32.const {depth} call $recurse i32.const 60000 i32.ne if unreachable end
+            {stores} i64.const {}))"#,
         *mod_api::wire::LAYOUT,
-        hook = horizon_mod_wasm::fixture::answering::<&str>(
-            &[],
-            &format!(
-                "i32.const {depth} call $recurse i32.const 60000 i32.ne if unreachable end {stores} i64.const {}",
-                (2048u64 << 32) | reply.bytes().len() as u64
-            )
-        )
+        (2048u64 << 32) | reply.bytes().len() as u64
     ))
     .unwrap();
     horizon_mod_wasm::fixture::module(&bytes).unwrap()

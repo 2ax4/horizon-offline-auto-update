@@ -12,30 +12,6 @@ use std::sync::atomic::AtomicUsize;
 mod prepared;
 pub use prepared::PreparedSlots;
 
-/// Calls the game's method through its own import, `name` (`owner::method#signature`), so the
-/// game links it by name and refuses a mod whose call it changed or removed. A native build of
-/// the guest has no imports: its test transport takes the game's `id` instead.
-macro_rules! host_import {
-    ($name:literal, $id:expr, $args:expr) => {{
-        #[cfg(target_arch = "wasm32")]
-        let reply = {
-            #[link(wasm_import_module = "horizon")]
-            unsafe extern "C" {
-                #[link_name = $name]
-                fn import(input: *const u8, len: u32, out: *mut u8, cap: u32) -> u32;
-            }
-            // SAFETY: the game reads `len` bytes at `input` and writes at most `cap` at `out`.
-            $crate::wire::guest::host_via(
-                |input, len, out, cap| unsafe { import(input, len, out, cap) },
-                $args,
-            )
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        let reply = $crate::wire::guest::host($id, $args);
-        reply
-    }};
-}
-
 mod generated {
     #![allow(clippy::all, unused, dead_code, non_snake_case)]
     use crate::__private::game::{BackendMutRefOf, BackendRefOf, ClientBackendMutRefOf};
@@ -209,20 +185,20 @@ thread_local! {
 /// Words in the group's shared state: the std member exports this array as `horizon_group_state`,
 /// zeroed, for every mod of the group to read (one memory, one std, one state). A new word is taken
 /// from the end of this list; the array's length is part of the ABI.
-const GROUP_WORDS: usize = crate::wire::GROUP_WORDS;
+const GROUP_WORDS: usize = 32;
 #[cfg(any(target_arch = "wasm32", test))]
-const WORD_HANDLERS: usize = crate::wire::GROUP_WORD_HANDLERS;
-const WORD_BUDGET: usize = crate::wire::GROUP_WORD_BUDGET;
+const WORD_HANDLERS: usize = 0;
+const WORD_BUDGET: usize = 1;
 /// Non-zero while the group's eviction callbacks run, so an allocation that fails inside one fails.
-const WORD_EVICTING: usize = crate::wire::GROUP_WORD_EVICTING;
+const WORD_EVICTING: usize = 2;
 /// The first of the group's eviction slots: each holds a function-table index (the table is the
 /// group's, so an index a member registered is callable by any member), or zero when free.
-const WORD_EVICT: usize = crate::wire::GROUP_WORD_EVICT;
+const WORD_EVICT: usize = 3;
 /// How many eviction callbacks a group can register.
 pub const EVICTORS: usize = GROUP_WORDS - WORD_EVICT;
 
 /// What the mods of one group may hold at once in caches the host asked them to keep, in bytes.
-pub const GROUP_BUDGET_BYTES: usize = crate::wire::GROUP_BUDGET_BYTES;
+pub const GROUP_BUDGET_BYTES: usize = 256 << 20;
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "C" {
@@ -397,12 +373,7 @@ fn with_handlers<R>(f: impl FnOnce(&Handlers) -> R) -> R {
 
 /// One exact static reply ID decoded by this instance, or the reserved no-ID marker.
 pub fn static_ack() -> u32 {
-    RUNTIME.with(|rt| {
-        rt.borrow()
-            .strings
-            .last
-            .unwrap_or(crate::wire::NO_STATIC_ID)
-    })
+    RUNTIME.with(|rt| rt.borrow().strings.last.unwrap_or(u32::MAX))
 }
 
 /// Model a fresh wasm instance in a native transport fixture.
@@ -441,11 +412,9 @@ impl Reply {
         let tag: u8 = reader.take()?;
         let id: u32 = reader.take()?;
         let value = match tag {
-            crate::wire::STATIC_KNOWN => Value::Known(id),
-            crate::wire::STATIC_DEFINITION => Value::Definition(id, text(&mut reader)?),
-            crate::wire::STATIC_UNCACHED if id == crate::wire::NO_STATIC_ID => {
-                Value::Uncached(text(&mut reader)?)
-            }
+            0 => Value::Known(id),
+            1 => Value::Definition(id, text(&mut reader)?),
+            2 if id == u32::MAX => Value::Uncached(text(&mut reader)?),
             tag => return Err(WireError::Tag(u32::from(tag))),
         };
         let tail = reader.take()?;
@@ -482,27 +451,14 @@ impl Drop for Reply {
     }
 }
 
-/// Calls the game's import `id` with `args` and returns its answer: on wasm only the reserved
-/// ids (`HOST_RELEASE`, `HOST_LOG`); every API call has its own import (`host_via`).
+/// Calls the game's import `id` with `args` and returns its answer.
 pub fn host(id: u32, args: Writer) -> Reply {
-    exchange(args, |input, out| transport::call(id, input, out))
-}
-
-/// Calls the game through `import`, one method's own import, with `args`, and returns its answer.
-#[cfg(target_arch = "wasm32")]
-#[inline(always)]
-pub fn host_via(import: impl FnOnce(*const u8, u32, *mut u8, u32) -> u32, args: Writer) -> Reply {
-    exchange(args, |input, out| transport::call_via(import, input, out))
-}
-
-#[inline(always)]
-fn exchange(args: Writer, call: impl FnOnce(&[u8], &mut Vec<u8>)) -> Reply {
     let mut out = RUNTIME
         .with(|rt| rt.borrow_mut().spare.pop())
         .unwrap_or_default();
     out.clear();
     out.reserve(256);
-    call(args.bytes(), &mut out);
+    transport::call(id, args.bytes(), &mut out);
     RUNTIME.with(|rt| rt.borrow_mut().recycle(args.into_bytes()));
     Reply(out)
 }
@@ -524,24 +480,12 @@ mod transport {
         try_call(crate::wire::HOST_LOG, input, &mut Vec::new())
     }
     pub(super) fn call(id: u32, input: &[u8], out: &mut Vec<u8>) {
-        // SAFETY: `host` reads the input and writes at most `cap` bytes at `out`.
-        call_via(
-            |input, len, out, cap| unsafe { host(id, input, len, out, cap) },
-            input,
-            out,
-        )
-    }
-    #[inline(always)]
-    pub(super) fn call_via(
-        import: impl FnOnce(*const u8, u32, *mut u8, u32) -> u32,
-        input: &[u8],
-        out: &mut Vec<u8>,
-    ) {
         let cap = out.capacity();
         // SAFETY: the game writes at most `cap` bytes at `out`'s spare capacity, which it owns;
         // a longer answer is kept by the game and copied by `host_reply` into the grown buffer.
         unsafe {
-            let len = import(
+            let len = host(
+                id,
                 input.as_ptr(),
                 input.len() as u32,
                 out.as_mut_ptr(),
@@ -733,7 +677,7 @@ pub fn resource_scope() -> crate::wire::ResourceScope {
 }
 
 /// Runs export `id` on the input the game wrote and returns where its reply is: the pointer in
-/// the high half, the length in the low. A refused call answers `REFUSED` as the length and
+/// the high half, the length in the low. A refused call answers `u32::MAX` as the length and
 /// its reason, as a string, at the pointer.
 pub fn run(id: u32) -> (*const u8, u32) {
     static HOOK: std::sync::Once = std::sync::Once::new();
@@ -752,10 +696,7 @@ pub fn run(id: u32) -> (*const u8, u32) {
         }));
     });
     let _resources = resource_scope();
-    // The game asks for the calls before anything else: the mod's own hooks are not made yet.
-    if id != crate::wire::CALLS {
-        let _ = hooks();
-    }
+    let _ = hooks();
     let (input, depth, mut reply) = RUNTIME.with(|rt| {
         let mut rt = rt.borrow_mut();
         let depth = rt.keeps.len();
@@ -772,17 +713,9 @@ pub fn run(id: u32) -> (*const u8, u32) {
     let mut reader = Reader::new(&input);
     let result = match id {
         crate::wire::INIT => reader
-            .take::<crate::wire::InitInput>()
+            .take::<Vec<crate::PackageInfo>>()
             .map(crate::install_guest_packages),
-        crate::wire::RELEASE => reader.take::<crate::wire::ReleaseInput>().map(release),
-        crate::wire::CALLS => {
-            let calls: crate::wire::CallsAnswer = crate::call_layouts()
-                .into_iter()
-                .map(|(name, layout, export)| (name.to_owned(), layout, export))
-                .collect();
-            reply.put(&calls);
-            Ok(())
-        }
+        crate::wire::RELEASE => reader.take::<Vec<Id>>().map(release),
         id => dispatch(id, &mut reader, &mut reply),
     };
     let result = result.and_then(|()| reply.error().map_or(Ok(()), Err));
@@ -795,7 +728,7 @@ pub fn run(id: u32) -> (*const u8, u32) {
         Err(error) => {
             reply.clear();
             reply.put_str(&error.to_string());
-            crate::wire::REFUSED
+            u32::MAX
         }
     };
     let pointer = reply.bytes().as_ptr();

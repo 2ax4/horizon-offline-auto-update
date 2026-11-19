@@ -712,9 +712,7 @@ pub fn entity_position(s: Species, at: [f64; 3]) -> [f64; 3] {
     }
 }
 
-/// `Vec3.CODEC`: a list of three doubles. A spawner's saved `Pos` is a spawn
-/// spot, not a loaded entity: vanilla snaps the spawn to it verbatim
-/// (`BaseSpawner.spawn`), so it stays raw here.
+/// `Vec3.CODEC`: a list of three doubles.
 pub(crate) fn read_pos(tag: Option<&Tag>) -> Option<[f64; 3]> {
     let Tag::List(v) = tag? else {
         return None;

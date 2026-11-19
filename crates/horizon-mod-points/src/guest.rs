@@ -18,32 +18,20 @@ pub fn register(listener: &SlotListener) -> Result<(), crate::RegisterError> {
                 function,
             ))
         });
-        mod_api::wire::guest::extend(
-            mod_api::wire::POINTS,
-            mod_api::wire::POINTS_END,
-            crate::guest_dispatch,
-        );
+        mod_api::wire::guest::extend(0x8000_0000, 0xC000_0000, crate::guest_dispatch);
         Ok(())
     } else {
         Err(crate::RegisterError::Unsupported)
     }
 }
 
-/// The places this guest listens at, in registration order: each with its own place id, the
-/// place's name and identity (`point_identity`), which the game checks by name, and the
-/// listener's inject id.
-pub fn subscriptions() -> crate::Subscriptions {
+/// The places this guest listens at, in registration order.
+pub fn subscriptions() -> Vec<(u32, String)> {
     LISTENERS.with(|slots| {
         slots
             .borrow()
             .iter()
-            .map(|(place, injection, _)| {
-                let (name, identity) = crate::API_PLACES
-                    .iter()
-                    .find(|(point, ..)| *point as usize == *place)
-                    .map_or(("", 0), |(point, ..)| crate::point_identity(*point));
-                (*place as u32, name.to_owned(), identity, injection.clone())
-            })
+            .map(|(place, injection, _)| (*place as u32, injection.clone()))
             .collect()
     })
 }
@@ -69,5 +57,5 @@ pub(crate) fn fire(
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn horizon_layout_ext() -> u64 {
-    crate::points_layout()
+    crate::POINT_LAYOUT
 }

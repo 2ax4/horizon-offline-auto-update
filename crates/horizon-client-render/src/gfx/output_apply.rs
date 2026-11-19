@@ -160,7 +160,6 @@ fn graced(
             luminance: applied.reported,
             primaries: applied.primaries,
             hdr: Some(true),
-            ..raw
         },
         None => raw,
     }
@@ -308,7 +307,7 @@ impl Renderer {
         [hdr.paper_white, hdr.peak, hdr.black] = output.nits;
         hdr.reference_80 = self.hdr_reference_80();
         hdr.ui = output.ui_brightness;
-        hdr.gamut = output.boost();
+        hdr.gamut = output.gamut;
         Ok(hdr)
     }
 
@@ -367,7 +366,7 @@ impl Renderer {
         }
         if let Some(hdr) = &mut self.hdr {
             hdr.ui = next.ui_brightness;
-            hdr.gamut = next.boost();
+            hdr.gamut = next.gamut;
             if (hdr.paper_white, hdr.peak, hdr.black) != (paper_white, peak, black) {
                 (hdr.paper_white, hdr.peak, hdr.black) = (paper_white, peak, black);
                 self.send_hdr_metadata();
@@ -625,32 +624,6 @@ mod tests {
         assert!(swapchain.asked.is_empty());
     }
 
-    /// On Wayland, Color Boost follows the encoding presented: kept on PQ when the move to
-    /// scRGB fails, left to the compositor once scRGB presents.
-    #[test]
-    fn color_boost_follows_the_encoding_presented_on_wayland() {
-        let settings = Graphics {
-            hdr_color_boost: 50,
-            ..on()
-        };
-        let (mut caps, mut reading) = window(Some(Pq), Some(true));
-        reading.compositor = true;
-        let pq = snapshot(&settings, NO_PACK, caps, reading);
-        assert!(pq.boost().is_some());
-        caps.hdr = Some(ScRgb);
-        let next = candidate(&settings, caps, reading, &pq);
-        let mut failing = Swapchain {
-            fails: vec![Some(ScRgb)],
-            ..Default::default()
-        };
-        let kept = commit(&mut failing, &pq, next, caps, &mut None);
-        assert_eq!(kept.encoding, Some(Pq));
-        assert!(kept.boost().is_some() && !kept.compositor_stretches());
-        let scrgb = commit(&mut Swapchain::default(), &pq, next, caps, &mut None);
-        assert_eq!(scrgb.encoding, Some(ScRgb));
-        assert!(scrgb.boost().is_none() && scrgb.compositor_stretches());
-    }
-
     /// An encoding that fails is never the snapshot's: the output applied stays where it
     /// presents again, else SDR. It is not tried again each frame, nor for new nits, only
     /// once the request or the capabilities change.
@@ -828,7 +801,6 @@ mod tests {
                 }),
                 primaries: None,
                 hdr,
-                compositor: false,
             };
             self.caps.hdr = offer;
         }

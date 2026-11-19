@@ -5,8 +5,6 @@
 
 #[path = "mixed-output-fixture/src/lib.rs"]
 mod guest;
-#[path = "support/no_hooks.rs"]
-mod no_hooks;
 use mod_api::{
     Flow, Hooks, ItemStack, MixedOutputFixtureEvent, ModEntry, ServerHost, StackWriteError,
 };

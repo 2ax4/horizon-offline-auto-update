@@ -46,7 +46,6 @@ mod glass_storage;
 mod glass_toast;
 mod glass_ui;
 mod glass_versions;
-mod glide;
 mod home;
 mod home_tabs;
 mod import_page;

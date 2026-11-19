@@ -243,8 +243,7 @@ impl Game<'_> {
             let uuid = self.uuid_for(self.next_entity);
             self.falling.push(FallingBlock {
                 attachment_lifetime: Default::default(),
-                // Entity.load: the saved Rotation, as the save writes it back.
-                rotation: entity_nbt::loaded_rotation(&tag),
+                rotation: [0.0, 0.0],
                 join: Default::default(),
                 id: self.next_entity,
                 state,
@@ -561,8 +560,6 @@ impl Game<'_> {
                 &difficulty,
                 horizon_client::mobs::spawn_rules::Reason::Structure,
             );
-            // `Shulker.finalizeSpawn` ends in yaw 0 here as on the other spawn paths.
-            horizon_client::mobs::shulker::finalize_spawn(&mut m);
         }
         horizon_client::mobs::armor::prepare(&m, &self.motion.attributes);
         let id = m.id;
