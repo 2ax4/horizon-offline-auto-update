@@ -1,5 +1,5 @@
 //! Disposable launcher storage. Player-owned files are never accepted as cleanup targets.
-use crate::cache_cleanup::{Access, Links, Plan};
+use crate::cache_cleanup::{Access, Plan};
 pub use crate::native_cache::Error;
 use crate::native_cache::{checked, linked, Cache};
 use cap_fs_ext::DirExt;
@@ -250,18 +250,15 @@ impl Storage {
 }
 
 pub fn allocated_bytes(path: &Path) -> Result<u64, Error> {
-    walk(path, &mut HashSet::new(), Links::Refused)
+    walk(path, &mut HashSet::new())
 }
 
-fn walk(path: &Path, seen: &mut HashSet<(u64, u64)>, links: Links) -> Result<u64, Error> {
+fn walk(path: &Path, seen: &mut HashSet<(u64, u64)>) -> Result<u64, Error> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error.into()),
     };
-    if linked(&meta) && links == Links::GameMade {
-        return Ok(0);
-    }
     if linked(&meta) || (!meta.is_file() && !meta.is_dir()) {
         return Err(Error::Unsafe(path.to_owned()));
     }
@@ -272,7 +269,7 @@ fn walk(path: &Path, seen: &mut HashSet<(u64, u64)>, links: Links) -> Result<u64
     let mut total = bytes;
     if meta.is_dir() {
         for entry in fs::read_dir(path)? {
-            total = total.saturating_add(walk(&entry?.path(), seen, links)?);
+            total = total.saturating_add(walk(&entry?.path(), seen)?);
         }
     }
     Ok(total)

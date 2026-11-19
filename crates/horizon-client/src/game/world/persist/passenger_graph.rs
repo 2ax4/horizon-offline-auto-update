@@ -246,27 +246,18 @@ impl Game<'_> {
             .collect();
         riders.sort_unstable();
         riders.dedup();
-        let mut depths = std::collections::HashMap::new();
-        riders.retain(|id| {
+        riders.sort_by_key(|id| {
             let mut path = vec![*id];
             let mut next = self.passenger_vehicle(*id);
             while let Some(parent) = next {
                 if path.contains(&parent) {
                     break;
                 }
-                // ServerLevel.tickPassenger: only a ticked vehicle's riders
-                // ride-tick, and a retained off-level root never ticks, so
-                // nothing below it is seated again.
-                if self.persist.off_level.contains_key(&parent) {
-                    return false;
-                }
                 path.push(parent);
                 next = self.passenger_vehicle(parent);
             }
-            depths.insert(*id, path.len());
-            true
+            path.len()
         });
-        riders.sort_by_key(|id| depths[id]);
         let index: std::collections::HashMap<u32, usize> = self
             .mobs
             .iter()

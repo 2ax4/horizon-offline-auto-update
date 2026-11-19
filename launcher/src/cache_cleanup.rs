@@ -12,18 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const LOCKS: [&str; 3] = [".cargo-lock", ".package-cache", ".package-cache-mutate"];
 
-/// What a link inside a tree means to the cleanup that measures or removes the tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Links {
-    /// The launcher's own caches hold none: a tree with one is refused.
-    Refused,
-    /// The game makes them in its caches: a resource pack's mirror links the folders the pack
-    /// leaves untouched into the installed version (#17911). One is never followed. It takes none
-    /// of the cache's space and holds none of its locks, and removing the tree removes the link,
-    /// not what it names.
-    GameMade,
-}
-
 /// Classification belongs to the fixed-path inventory, never a process snapshot.
 pub(crate) enum Access {
     BuildTools,
@@ -358,21 +346,8 @@ pub(crate) fn delete_game_unit(path: &Path) -> Result<(), Error> {
     delete_game_unit_observed(path, || {})
 }
 
-/// [`delete_game_unit`] for a unit whose links are `links`.
-pub(crate) fn delete_game_unit_with(path: &Path, links: Links) -> Result<(), Error> {
-    delete_unit(path, links, || {})
-}
-
 pub(crate) fn delete_game_unit_observed(
     path: &Path,
-    after_classification: impl FnOnce(),
-) -> Result<(), Error> {
-    delete_unit(path, Links::Refused, after_classification)
-}
-
-fn delete_unit(
-    path: &Path,
-    links: Links,
     after_classification: impl FnOnce(),
 ) -> Result<(), Error> {
     use horizon_platform::mod_package::{locks::Release, runtime_leases::Registry};
@@ -391,14 +366,14 @@ fn delete_unit(
     registry.remove_unit(path, |directory, is_directory| {
         Access::for_unit(path)?.check()?;
         after_classification();
-        if is_directory && contains_operational_locks(directory, links)? {
+        if is_directory && contains_operational_locks(directory)? {
             return Err(Error::IncompleteUnit);
         }
         Ok(())
     })
 }
 
-fn contains_operational_locks(directory: &Dir, links: Links) -> Result<bool, Error> {
+fn contains_operational_locks(directory: &Dir) -> Result<bool, Error> {
     for entry in directory.entries()? {
         let name = PathBuf::from(entry?.file_name());
         if reserved(&name) {
@@ -406,14 +381,9 @@ fn contains_operational_locks(directory: &Dir, links: Links) -> Result<bool, Err
         }
         let meta = directory.symlink_metadata(&name)?;
         if meta.file_type().is_symlink() {
-            match links {
-                Links::Refused => return Err(Error::Unsafe(name)),
-                // Not followed: what it names is no part of this unit.
-                Links::GameMade => continue,
-            }
+            return Err(Error::Unsafe(name));
         }
-        if meta.is_dir() && contains_operational_locks(&directory.open_dir_nofollow(&name)?, links)?
-        {
+        if meta.is_dir() && contains_operational_locks(&directory.open_dir_nofollow(&name)?)? {
             return Ok(true);
         }
     }
