@@ -1,4 +1,4 @@
-From bbb8455d55aded757eda7c862211feaf4809856a Mon Sep 17 00:00:00 2001
+From 218734ccb4e823268868dc0f6db2d99020e3f7f9 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
 Subject: [PATCH] Offline accounts: add and play with no Microsoft account
@@ -27,8 +27,8 @@ Subject: [PATCH] Offline accounts: add and play with no Microsoft account
  launcher/src/skins.rs                  | 183 +++++++++++++++++
  launcher/src/skins/tests.rs            | 124 +++++++++++
  launcher/src/switch_page.rs            | 219 ++++++++++++++++++--
- launcher/tests/owner_gate.rs           |  76 ++++---
- 24 files changed, 1553 insertions(+), 261 deletions(-)
+ launcher/tests/owner_gate.rs           |  78 ++++---
+ 24 files changed, 1555 insertions(+), 261 deletions(-)
  create mode 100644 launcher/src/skin_page.rs
  create mode 100644 launcher/src/skins.rs
  create mode 100644 launcher/src/skins/tests.rs
@@ -2408,7 +2408,7 @@ index 4062a2e719..c8258dc1a8 100644
 +    }
  }
 diff --git a/launcher/tests/owner_gate.rs b/launcher/tests/owner_gate.rs
-index 110c688240..7dd7091d13 100644
+index 110c688240..a705639311 100644
 --- a/launcher/tests/owner_gate.rs
 +++ b/launcher/tests/owner_gate.rs
 @@ -1,25 +1,18 @@
@@ -2468,7 +2468,7 @@ index 110c688240..7dd7091d13 100644
      assert!(!root.join("game/sessions").exists());
      let accounts = std::fs::read_to_string(root.join("launcher/accounts.json")).unwrap();
      assert!(accounts.contains("Builder_1"), "{accounts}");
-@@ -59,13 +60,22 @@ fn the_cli_refuses_to_play_without_an_owner() {
+@@ -59,13 +60,24 @@ fn the_cli_refuses_to_play_without_an_owner() {
  }
  
  #[test]
@@ -2483,17 +2483,19 @@ index 110c688240..7dd7091d13 100644
      .unwrap();
 +    // The version's own preparer, as a release package ships it. Its work is not this
 +    // test's subject: only that Mojang's public files download for an offline name,
-+    // with no account at all and no sign-in refusal anywhere.
++    // with no account at all and no sign-in refusal anywhere. A real preparer also
++    // leaves the resources manifest the launcher checks before it calls the version
++    // ready (0.2.84's check_prepared), so the stub writes just that one file.
 +    std::fs::create_dir_all(root.join("launcher/versions/v2026.10.27.01/tools")).unwrap();
 +    std::fs::write(
 +        root.join("launcher/versions/v2026.10.27.01/tools/prepare_native_client.py"),
-+        "# A stub: this test checks the account gate, not the preparation itself.\n",
++        "# A stub: this test checks the account gate, not the preparation itself.\nimport json, pathlib\n\nroot = pathlib.Path.cwd()\nversion = json.loads((root / 'research-lock.json').read_text())['minecraft']['version']\nresources = root / '.local' / 'horizon-client' / version\nresources.mkdir(parents=True, exist_ok=True)\n(resources / 'horizon-resources.json').write_text('{}\\n')\n",
 +    )
 +    .unwrap();
      let out = launcher(
          &root,
          &["prepare", "--download", "--version", "v2026.10.27.01"],
-@@ -77,19 +87,32 @@ fn prepare_download_explains_the_sign_in_requirement() {
+@@ -77,19 +89,32 @@ fn prepare_download_explains_the_sign_in_requirement() {
      .env("HORIZON_LAUNCHER_DESKTOP", root.join("desktop"))
      .output()
      .unwrap();
@@ -2534,7 +2536,7 @@ index 110c688240..7dd7091d13 100644
      let mut child = launcher(&root, &["mcp"])
          .stdin(Stdio::piped())
          .stdout(Stdio::piped())
-@@ -113,6 +136,7 @@ fn the_mcp_server_refuses_to_play_without_an_owner() {
+@@ -113,6 +138,7 @@ fn the_mcp_server_refuses_to_play_without_an_owner() {
          .expect("a reply to play");
      assert_eq!(reply["result"]["isError"], true, "{reply}");
      let said = reply["result"]["content"][0]["text"].as_str().unwrap();
