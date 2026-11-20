@@ -286,7 +286,10 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   computer never goes through it.
 - **Links**: the Discord invite, the Sponsors page and the website come from `launcher/links.json` on main
   (`{"discord": "...", "sponsor": "...", "website": "..."}`), so they change without a launcher release. Offline,
-  the launcher uses the same values built in; an empty address hides its button.
+  the launcher uses the same values built in; an empty address hides its button. An optional `"min_launcher":
+  "0.2.80"` names the oldest launcher that may stay in use, for a release known to be broken: an older one that
+  updates itself installs the update it downloads and restarts at once, or when its window closes while a game
+  it started runs. A failed update says why and the launcher goes on. Unset, nothing changes.
 
 Long pages, dialogs, the server console and data previews have a visible scrollbar when
 their content overflows. Drag the thumb or click the track to navigate without a mouse wheel.
@@ -323,9 +326,11 @@ every 0.2 tag counts as newer than all of those (docs/versioning.md). It downloa
 against the release's signed `SHA256SUMS`, and says "A new version is available" in the sidebar with
 **Update**: the window closes, the launcher's own file runs again as the installer (`apply-update`,
 `src/update_handoff.rs`), which waits for the window's process to exit, puts the new launcher in place (the
-binary, the `.app` bundle or the AppImage) and starts it. Nothing goes in without **Update**: closing the window
-drops a downloaded update, and the next start checks again. When the installer can't put it in place, the old
-launcher starts again and says why. Each process stages in its own folder, and the installer checks the signed
+binary, the `.app` bundle or the AppImage) and starts it. Until then the sidebar says it installs when the
+launcher closes: closing the window installs it the same way without the restart, so the next start is the new
+launcher, and a game started from the window keeps running. Quitting for a data move drops it, and the next start
+checks again. When the installer can't put it in place, the old launcher stays (after **Update** it starts again)
+and says why at its next start. Each process stages in its own folder, and the installer checks the signed
 SHA-256 again before anything goes in; when the launcher in place is already that version or newer, it changes
 nothing. Servers keep running through **Update**. A copy that can't replace itself says so at once and offers
 **Download again** (the website's install page): one in a read-only folder (the disk image, or the read-only copy
