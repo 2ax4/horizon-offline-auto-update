@@ -179,6 +179,8 @@ jobs:
           # tree is exactly upstream@tag plus offline/patches.
           git checkout origin/main -- offline/
           git checkout origin/main -- README.md || true
+          git checkout origin/main -- docs/media/offline-home.png || true
+          git checkout origin/main -- docs/media/offline-settings.png || true
           pub=$(printf '%s' "$RELEASE_SIGNING_KEY" | base64 --decode \
             | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
           grep -qx "$pub" crates/horizon-release-sign/release-keys.txt || {
