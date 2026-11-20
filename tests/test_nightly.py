@@ -1,3 +1,4 @@
+import copy
 import datetime as dt
 import json
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from tools.ci import nightly
 from tools.ci import nightly_set as ns
+from tests.test_ci_concurrency import yaml
 
 NOW = "2026-10-28T12:00:00+00:00"
 PATTERNS = ns.guarded_patterns((Path(__file__).resolve().parents[1] / ".github/CODEOWNERS").read_text())
@@ -194,6 +196,22 @@ class FirstNightlyTests(unittest.TestCase):
                 self.assertEqual("+refs/tags/nightly:refs/tags/nightly" in fetched, existing)
 
 
+def polytone_gate_bypasses(game, nightly_build):
+    """Where the Polytone tests could fail without holding the Nightly (game-build.yml's `polytone-windows`, called
+    through nightly-build.yml's `build`)."""
+    problems = []
+    job = game["jobs"]["polytone-windows"]
+    for where, part in [("job", job), *((f"step {i}", step) for i, step in enumerate(job["steps"]))]:
+        problems += [f"polytone-windows {where}: {key}" for key in ("if", "continue-on-error") if key in part]
+    for name in ("sign", "publish", "sdk-publish"):
+        gate = nightly_build["jobs"][name]
+        if "build" not in gate["needs"]:
+            problems.append(f"{name} doesn't need build")
+        condition = "".join(str(gate.get("if", "")).split())
+        problems += [f"{name} runs on {status}" for status in ("always()", "cancelled()", "failure()") if status in condition]
+    return problems
+
+
 class UntrustedBuildTests(unittest.TestCase):
     """A nightly can hold pull requests nobody reviewed: nothing its build leaves may reach a release (game-build.yml)."""
 
@@ -217,16 +235,41 @@ class UntrustedBuildTests(unittest.TestCase):
 
     def test_an_untrusted_build_never_runs_on_the_release_runner(self):
         runs_on = [line for line in self.game.splitlines() if "runs-on:" in line]
-        self.assertEqual(len(runs_on), 3)
-        # The host-independent wasm member is built on a credential-free hosted Linux runner.
-        hosted = [line for line in runs_on if line.strip() == "runs-on: ubuntu-22.04"]
-        self.assertEqual(len(hosted), 1)
+        self.assertEqual(len(runs_on), 4)
+        # The host-independent wasm member and the Polytone tests run on credential-free hosted runners.
+        hosted = [line for line in runs_on if line.strip() in ("runs-on: ubuntu-22.04", "runs-on: windows-latest")]
+        self.assertEqual(len(hosted), 2)
         # The nightly's own runner: never the release runner, and never behind pull requests' parity queue.
         nightly_runner = "fromJSON('[\"self-hosted\", \"macOS\", \"horizon-nightly\"]')"
         for line in runs_on:
             if line in hosted:
                 continue
             self.assertIn(f"inputs.trusted && vars.MAC_RUNNER || {nightly_runner}", line)
+
+    def test_the_polytone_tests_hold_the_nightly_as_the_windows_build_does(self):
+        # Their own job beside the Windows build: whatever it was given, a failure must still fail the called
+        # workflow, which sign, publish and sdk-publish need.
+        game = yaml.safe_load(self.game)
+        nightly_build = yaml.safe_load((WORKFLOWS / "nightly-build.yml").read_text())
+        job = game["jobs"]["polytone-windows"]
+        self.assertEqual(job["runs-on"], "windows-latest")
+        self.assertEqual(job["env"]["RUSTFLAGS"], "-C target-feature=+crt-static")
+        self.assertEqual(job["steps"][-1]["run"].strip(),
+                         "cargo test --release --locked -p horizon-client-render --lib particles::polytone::tests::")
+        self.assertEqual(polytone_gate_bypasses(game, nightly_build), [])
+        # Each way around the gate is caught: a step or job allowed to fail, a skipped test, a publishing job that
+        # runs after a failed build.
+        for bypass in ({"step": {"continue-on-error": True}}, {"step": {"if": "github.event_name == 'schedule'"}},
+                       {"job": {"continue-on-error": True}}, {"job": {"if": "${{ inputs.trusted }}"}},
+                       {"sign": {"if": "${{ !cancelled() }}"}}, {"publish": {"if": "always() && true"}},
+                       {"sdk-publish": {"if": "failure() || needs.sdk.outputs.needed == 'true'"}},
+                       {"sign": {"needs": ["pick", "sdk-index"]}}):
+            with self.subTest(bypass=bypass):
+                mutated_game, mutated_build = copy.deepcopy(game), copy.deepcopy(nightly_build)
+                [(where, change)] = bypass.items()
+                polytone = mutated_game["jobs"]["polytone-windows"]
+                {"step": polytone["steps"][-1], "job": polytone}.get(where, mutated_build["jobs"].get(where)).update(change)
+                self.assertNotEqual(polytone_gate_bypasses(mutated_game, mutated_build), [])
 
     def test_a_trusted_build_never_reads_the_shared_sccache(self):
         calls = self.game.count("bash tools/ci/runner-env.sh")
@@ -279,6 +322,53 @@ class PruneBuildsTests(unittest.TestCase):
         self.assertIn("if: github.event_name == 'schedule'", step)
         self.assertIn("prune-builds --days 7", step)
         self.assertIn("GITHUB_STEP_SUMMARY", step)
+
+
+class ConcurrencyTests(unittest.TestCase):
+    """A dry run never waits for, holds up or replaces a real cut or another dry run (#18779)."""
+
+    def setUp(self):
+        self.build = (WORKFLOWS / "nightly-build.yml").read_text()
+        # The rule `pick` publishes by: a dry run is the `dry_run` input or any dispatch off main.
+        mode = self.build.split("\n  pick:", 1)[1].split("- id: mode", 1)[1].split("- id: pick", 1)[0]
+        self.dry = mode.split('run: echo "dry_run=${{ ', 1)[1].split(" }}", 1)[0]
+
+    def test_real_runs_keep_the_shared_group_and_dry_runs_get_one_each(self):
+        concurrency = self.build.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        settings = [line.strip() for line in concurrency.splitlines() if not line.strip().startswith("#")]
+        # Not a dry run: the suffix is '', so the group is `nightly-build` as before, never cancelling.
+        self.assertEqual(settings, [
+            f"group: nightly-build${{{{ ({self.dry}) && format('-dry-{{0}}', github.run_id) || '' }}}}",
+            "cancel-in-progress: false",
+        ])
+        # Written out, so a rule changed in all three places at once still fails here.
+        self.assertEqual(self.dry, "github.event_name == 'workflow_dispatch' && "
+                                   "(inputs.dry_run || github.ref != 'refs/heads/main')")
+
+    def test_the_run_name_says_dry_run_or_real_and_keeps_the_request(self):
+        run_name = self.build.split("\nrun-name: ", 1)[1].split("\n", 1)[0]
+        # nightly_set.dispatch finds the run it started by the request id right after the mode, before the free-form
+        # base (nightly_set.title_request).
+        self.assertEqual(run_name, "nightly build"
+                         f"${{{{ ({self.dry}) && ' (dry run)' || ' (real)' }}}}"
+                         "${{ inputs.request && format(' (request {0})', inputs.request) || '' }}"
+                         "${{ inputs.base && format(' on {0}', inputs.base) || '' }}")
+
+    def test_dispatch_finds_its_own_run_not_one_whose_base_names_its_request(self):
+        runs = [
+            {"displayTitle": "nightly build (real) on 2640-1795140000 (request 2640-1795140000)", "url": "u/base"},
+            {"displayTitle": "nightly build (dry run) on 2640-1795140000", "url": "u/no-request"},
+            {"displayTitle": "nightly build (real) (request 2640-17951400001)", "url": "u/longer-id"},
+            {"displayTitle": "nightly build (dry run) (request 2640-1795140000) on abc", "url": "u/ours"},
+        ]
+
+        def gh(*args, check=True):
+            return json.dumps(runs) if args[:2] == ("run", "list") else ""
+
+        with mock.patch.object(ns, "gh", side_effect=gh), mock.patch.object(ns.time, "sleep"):
+            self.assertEqual(ns.dispatch("o/r", "2640", "2640-1795140000", []), "u/ours")
+        self.assertEqual(ns.title_request("nightly build (real) (request 7-1) on 2640-1795140000"), "7-1")
+        self.assertEqual(ns.title_request("nightly build (real) on (request 7-1)"), "")
 
 
 

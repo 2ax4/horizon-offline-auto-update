@@ -42,6 +42,21 @@ pub trait PlayersServerHost {
     /// taken: it lets nobody else on.
     #[access(WorldOnly)]
     fn server_set_max_players(&mut self, max_players: u32) -> Result<(), PlayerLimitRefusal>;
+    /// Side: server.
+    /// The profile of the player with this UUID, as the server knows it,
+    /// never asked of Mojang: an online player's whole profile (the properties
+    /// the player list gives, so with those `player_set_profile_property` set),
+    /// else the user cache's name (`usercache.json`, a dedicated server's),
+    /// without properties. None when neither knows them.
+    #[access(WorldOnly)]
+    fn profile_by_uuid(&self, uuid: u128) -> Option<GameProfile>;
+    /// Side: server.
+    /// The profile of the player with this name, any case, as
+    /// `profile_by_uuid` knows it: an online player's, else an unexpired
+    /// user cache entry. Never asked of Mojang, and an unknown name is not
+    /// made an offline player.
+    #[access(WorldOnly)]
+    fn profile_by_name(&self, name: &str) -> Option<GameProfile>;
 }
 /// The client host's methods of the `players` area, implemented by the game and reached through [`crate::ClientHost`].
 #[horizon_mod_api_macros::host_area]
@@ -177,7 +192,10 @@ pub trait PlayersBackend {
     /// Side: server.
     /// `ServerPlayer.getGameProfile`: the UUID, name and login properties (skin
     /// `textures` included) of a connected or acting player. An offline-mode
-    /// player has no properties. None for a stale or unavailable player.
+    /// player has no properties, and `player_set_profile_property` does not
+    /// change them: what a mod sets is published to other players and read by
+    /// `profile_by_uuid` and `profile_by_name`. None for a stale or unavailable
+    /// player.
     #[access(WorldOnly)]
     fn player_profile(&self, player: PlayerRef) -> Option<GameProfile>;
     /// Side: both.
@@ -474,6 +492,14 @@ pub trait PlayersBackend {
     #[access(WorldOnly)]
     fn player_sees(&self, viewer: PlayerRef, target: PlayerRef)
     -> Result<bool, PlayerWorldRefusal>;
+    /// Side: server.
+    /// All of the player's statistics as `ServerStatsCounter.toJson` writes their
+    /// `stats/<uuid>.json`: `{"stats":{"minecraft:mined":{"minecraft:stone":3},...},
+    /// "DataVersion":n}`, types and keys namespaced, empty types left out. None for a stale
+    /// or unavailable player and on a client.
+    #[access(WorldOnly)]
+    fn player_statistics(&self, player: PlayerRef) -> Option<String>;
+    /// Side: server.
     /// The player's latency in milliseconds, as the Tab list shows it
     /// (`ServerCommonPacketListenerImpl.latency`): keep-alive round trips averaged as vanilla
     /// does (`(old * 3 + new) / 4`), 0 until the first answer. 0 for a fake player and an
@@ -1081,6 +1107,14 @@ pub trait PlayersBackendMut {
     #[access(WorldOnly)]
     fn player_respawn(&mut self, player: PlayerRef) -> Result<(), RespawnRefusal>;
     /// Side: server.
+    /// The play packets the player's connection sent and received since the last call while
+    /// packets were counted (`count_packets`), by direction (sent first) then id; clears them.
+    /// Keep-alives and the disconnect are counted; packets of the login and configuration
+    /// phases are not. Empty while nothing was counted. None for a stale or unavailable
+    /// player, one with no connection (a fake player), and on a client.
+    #[access(WorldOnly)]
+    fn player_take_packet_counts(&mut self, player: PlayerRef) -> Option<Vec<PacketCount>>;
+    /// Side: server.
     /// Acknowledges the player's block actions up to `sequence`
     /// (`ServerGamePacketListenerImpl.ackBlockChangesUpTo`), for a mod that handled one itself,
     /// such as an editor's own message: the client's predicted blocks settle on the server's
@@ -1199,6 +1233,47 @@ pub trait PlayersBackendMut {
         player: PlayerRef,
         data: Compound,
     ) -> Result<(), PlayerDataRefusal>;
+    /// Side: server.
+    /// Sets property `name` of the player's game profile (`textures` for
+    /// a skin: Mojang's base64 value and its signature, which the client
+    /// checks on an online-mode server), replacing one of the same name.
+    /// Other players see it once the player is sent to them again
+    /// (`player_refresh`). False for a stale or unavailable player, a fake
+    /// player, an empty name, a name, value or signature longer than the
+    /// protocol allows (64, 32767 and 1024 UTF-16 code units, so a character past
+    /// the basic plane counts twice), and a name the profile does not have yet
+    /// when it already holds 16 properties (replacing one of its own names
+    /// still works). The integrated server's owner keeps the account's other
+    /// properties, of which a profile lists at most 16 in all (the mod's win).
+    /// The player's login properties (`player_profile`) stay as they are.
+    #[access(WorldOnly)]
+    fn player_set_profile_property(
+        &mut self,
+        player: PlayerRef,
+        name: &str,
+        value: &str,
+        signature: Option<&str>,
+    ) -> bool;
+    /// Side: server.
+    /// Sends the player to the other players again, as Paper's
+    /// `hidePlayer` then `showPlayer` does: over the next two ticks they
+    /// leave every other player's Tab list and world and come back with
+    /// their profile as it is now, so a new skin shows. The player's own
+    /// view keeps the skin their client has until they change level or join
+    /// again. A player a mod hid (`player_hide`) stays hidden from whom it
+    /// hid them. False for a stale or unavailable player and a fake player.
+    #[access(WorldOnly)]
+    fn player_refresh(&mut self, player: PlayerRef) -> bool;
+    /// Side: server.
+    /// Replaces all of the player's statistics with `json` (the text `player_statistics`
+    /// gives, or another server's `stats/<uuid>.json`), as `StatsCounter.setValue` for each
+    /// (Paper's `Player.setStatistic`): a statistic `json` lacks goes back to 0, scoreboard
+    /// objectives on a statistic's criterion follow, and the client gets the changed values
+    /// the next time it asks (its statistics screen). `player_stat_award` is not heard.
+    /// False, with nothing changed, for text that is not a JSON object, a stale, unavailable
+    /// or dead player and on a client.
+    #[access(WorldOnly)]
+    fn player_set_statistics(&mut self, player: PlayerRef, json: &str) -> bool;
     /// Side: server.
     /// Sets a server player's velocity in blocks a tick and tells their
     /// client (`Entity.setDeltaMovement` with `hurtMarked`, which sends

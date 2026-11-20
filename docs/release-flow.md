@@ -73,6 +73,13 @@ alone, with a warning. The check is still reported on the head.
 
 Failed harnesses' logs are uploaded as the `parity-logs` artifact.
 
+**Hosted parity.** A maintainer can also run harnesses on Blacksmith's runners, away from the Mac mini:
+`gh workflow run parity-hosted.yml --ref <branch> -f harnesses="..."`, or `-f base=<commit>` for what the branch's
+changes reach. The data comes encrypted from the maintainers' private `horizon-rust/vanilla-data`. The only thing
+that leaves the runner is the harness logs: the first-attempt and failure logs, holding compared values, log tails and
+names, as this job's public logs already do ([ci-runners.md](ci-runners.md#hosted-parity)). Its result is advisory;
+this job is still the check.
+
 **Platform-specific harnesses.** A harness listed under `linux_only` in `tools/parity_hosts.json` gives
 different results on macOS for a reason that is not a Horizon bug (the reason is printed). `parity.py` skips it on
 other platforms unless it is named on the command line. Today it holds only `save_roundtrip` (it needs `vscreen`):
@@ -219,6 +226,10 @@ The mod SDK of a Nightly is built inside `nightly build`, for the exact main com
    All four legs must pass: Linux client and server, Windows GNU client and macOS ARM64 client. Each builds two
    native starter mods against the SDK alone, starts their installed executable, and checks Windows export capacity.
    A live run can reuse an existing SDK only after its complete inventory and signed index are authenticated.
+   Each leg logs its runner's cores and memory. On a dry run only (`dry_run`, which sets `HORIZON_SDK_TIMINGS`), it
+   also uploads `sdk-timings-<leg>` (3 days), the `cargo rustc --timings` report of its SDK build, apart from the
+   SDK's own artifact: cargo fails a build that can't write the report, so a published SDK's build never makes one. The surface export reuses the `horizon-stage` that
+   staging built (`target/prebuilt/tools`).
 2. After the game build (including its smoke test), `sdk-publish.yml` gathers identical build data and surfaces,
    builds the generated API source, writes `sdk.json`, and checks every slice's commit, host, side, compiler,
    checksums and exact carried registry patches. Publication requires successful `checks` and `parity-main` push
@@ -235,7 +246,8 @@ The mod SDK of a Nightly is built inside `nightly build`, for the exact main com
 
 `prebuilt-game.yml` is the same SDK build/publication route by hand. It defaults to a full dry run; branch runs are
 always dry. Dry runs rebuild all four legs, use a throwaway signing key, and publish no SDK tag or release. Nightly
-dry runs consume that run's validated index without requiring a published SDK.
+dry runs consume that run's validated index without requiring a published SDK, and run beside a real Nightly in a
+concurrency group of their own ([When it releases](#when-it-releases)).
 
 ```sh
 gh workflow run prebuilt-game.yml --ref main                         # full dry run
@@ -293,7 +305,7 @@ There is no daily run: `daily.yml` and the workflows it called (`ignored-tests.y
 | `ci.yml` (`Windows ARM64 game and launcher`) | Manual dispatch with `-f arm64=true` only | The launcher's library tests and the `#[ignore]`d `rust_toolchain::tests::managed_arm64_toolchain_builds_the_game` |
 | `ci.yml` (`Windows x64 game and launcher tests`) | Manual dispatch with `-f windows=true` only, a [try run](ci-runners.md#try-runs) | On Windows x64: the launcher's tests; the game's release build, uploaded for 3 days |
 | `launcher.yml` (`build`) | See the workflow's `on:` (pushes to `main`, `launcher` and `launcher-*` within its path filter, a schedule, manual dispatch) and its `decide` job: it builds when a launcher release is due, and on every dry run (every run off main, and a dispatch with `dry_run`, the default), which publishes nothing | The launcher's tests on Linux, macOS (two builds, one for x86-64) and Windows (x64, ARM64) |
-| `game-build.yml`, from `nightly-build.yml` | Each Nightly build | On Windows x64: `horizon-client-render`'s `particles::polytone::tests::` |
+| `game-build.yml`, from `nightly-build.yml` | Each Nightly build | On Windows x64, in release, in its own job (`polytone windows`) beside the Windows build, which `sign` and `publish` wait for as for the builds: `horizon-client-render`'s `particles::polytone::tests::` |
 | `perf-wasm.yml` | Pull requests and pushes to main that change `crates/horizon-perf/`, `crates/horizon-perf-format/`, `crates/horizon-bench/`, `xtask/`, `Cargo.lock`, `Cargo.toml` or the workflow itself; manual dispatch | On Linux: `horizon-perf`'s `wasm` test |
 | `mod-registry.yml` | Pull requests and pushes to main that change `crates/horizon-mod-package/`, `crates/horizon-mod-registry/` or the workflow itself | On Linux: `horizon-mod-registry`'s tests |
 | `telemetry-server.yml` | Pull requests and pushes to main that change `crates/horizon-telemetry/`, `crates/horizon-telemetry-server/` or the workflow itself | On Linux: `horizon-telemetry-server`'s tests |
@@ -340,9 +352,13 @@ commits) since the commit the published Nightly was built on:
 - A pull request labelled `skip-release` (work players don't see) doesn't count and isn't listed in the notes.
 - An open issue labelled `release-blocker` holds every Nightly, forced ones too (`held by release-blocker #N`);
   `nightly build` checks again right before publishing.
-- One Nightly build at a time: while one runs or waits, the train starts none. At most 12 builds a UTC day (the
-  reviewers' `/nightly` builds count): past that the train waits for the next day, except for `release-now` and
-  `force=true`.
+- One Nightly build at a time: while one runs or waits, dry runs included, the train starts none. Real builds share
+  the concurrency group `nightly-build`, which never cancels a running build. A dry run (`dry_run`, or any dispatch
+  off main) gets a group of its own, `nightly-build-dry-<run id>`: it never holds up a real cut (the rerun of its
+  `sdk-publish` jobs queues in the shared group) nor replaces it or another dry run as the waiting run, so a dry run
+  can start while a cut waits. The run's name says `(dry run)` or `(real)` and the `base` it was given. At most 12
+  builds a UTC day (the reviewers' `/nightly` builds count): past that the train waits for the next day, except for
+  `release-now` and `force=true`.
 - A scheduled run takes main's newest commit where `checks` and `parity-main` passed (a later failed
   parity-main batch doesn't change it); after a run of either, the commit it passed on, once both passed there.
 
