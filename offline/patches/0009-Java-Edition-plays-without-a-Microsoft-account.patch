@@ -1,7 +1,7 @@
-From dad436ca0b663298a8b8229061f170acace96e0c Mon Sep 17 00:00:00 2001
+From 42127ef3be7643f9335a5b3e4a0bd363d0fd281a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
+Subject: [PATCH 3/9] Java Edition plays without a Microsoft account
 
 ---
  launcher/Cargo.lock               |   1 +
@@ -14,7 +14,7 @@ Subject: [PATCH 7/9] Java Edition plays without a Microsoft account
  7 files changed, 122 insertions(+), 112 deletions(-)
 
 diff --git a/launcher/Cargo.lock b/launcher/Cargo.lock
-index 508bf7d109..d85eef08a2 100644
+index 461b5a5..f09482f 100644
 --- a/launcher/Cargo.lock
 +++ b/launcher/Cargo.lock
 @@ -3127,6 +3127,7 @@ dependencies = [
@@ -26,7 +26,7 @@ index 508bf7d109..d85eef08a2 100644
   "horizon-server-launch",
   "horizon-shader-api",
 diff --git a/launcher/Cargo.toml b/launcher/Cargo.toml
-index f32760eb51..fe3c7efc8f 100644
+index f32760e..fe3c7ef 100644
 --- a/launcher/Cargo.toml
 +++ b/launcher/Cargo.toml
 @@ -62,6 +62,7 @@ horizon-mcp = { path = "../crates/horizon-mcp" }
@@ -38,7 +38,7 @@ index f32760eb51..fe3c7efc8f 100644
  horizon-shader-api = { path = "../crates/horizon-shader-api" }
  # Signed updates: archives are checked against the release's signed checksums (docs/security.md).
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index b1569ba486..91929232cc 100644
+index b1569ba..9192923 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -2382,7 +2382,10 @@ pub struct GameSession {
@@ -113,10 +113,10 @@ index b1569ba486..91929232cc 100644
  #[cfg(test)]
  mod tests;
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 8e7b1b6121..837ec5f764 100644
+index e65999d..bf03b02 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -2005,9 +2005,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
+@@ -2018,9 +2018,9 @@ fn preparer_binary(dir: &Path) -> Option<PathBuf> {
      binary.is_file().then_some(binary)
  }
  
@@ -129,7 +129,7 @@ index 8e7b1b6121..837ec5f764 100644
  fn download_for_owner(
      pins: &sources::Pins,
      dir: &Path,
-@@ -2015,7 +2015,6 @@ fn download_for_owner(
+@@ -2028,7 +2028,6 @@ fn download_for_owner(
      log: &dyn Fn(String),
  ) -> Result<(), String> {
      let mut accounts = account::Accounts::load();
@@ -137,7 +137,7 @@ index 8e7b1b6121..837ec5f764 100644
      let pass = account::launch(
          &account::Endpoints::live(),
          account::client_id().as_deref(),
-@@ -2025,12 +2024,12 @@ fn download_for_owner(
+@@ -2038,12 +2037,12 @@ fn download_for_owner(
      if let Err(e) = accounts.save_renewed() {
          log(format!("Horizon: the accounts are not saved: {e}"));
      }
@@ -153,7 +153,7 @@ index 8e7b1b6121..837ec5f764 100644
  pub fn download_version_for_owner(
      id: &str,
      manifest_sha1: &str,
-@@ -2051,9 +2050,10 @@ pub fn download_version_for_owner(
+@@ -2057,9 +2056,10 @@ pub fn download_version_for_owner(
      Ok(dir)
  }
  
@@ -167,7 +167,7 @@ index 8e7b1b6121..837ec5f764 100644
  /// instance's folder. The caller wraps it (`launch::wrap`) and never logs it: it holds the token.
  /// A Java instance's game, ready to start; `server` (`host[:port]`) is joined once it has.
  pub fn java_game(
-@@ -2146,51 +2146,42 @@ pub fn java_game(
+@@ -2152,51 +2152,42 @@ pub fn java_game(
      )
  }
  
@@ -208,7 +208,7 @@ index 8e7b1b6121..837ec5f764 100644
 -                sources::Os::MacOs => "osx",
 -                sources::Os::Windows => "windows",
 -            };
--            mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
+-            mojang::download_http(pins, dir, os, mojang::JOBS, fetch, &mojang::CANCEL, log).map_err(|e| {
 -                format!("\n  • Horizon tried to download {v} from Mojang for {name}, but: {e}")
 -            })
          }
@@ -232,13 +232,13 @@ index 8e7b1b6121..837ec5f764 100644
 +        // offline. Only online play needs the account.
 +        _ => log(format!("Downloading {v} from Mojang")),
      }
-+    mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
++    mojang::download_http(pins, dir, os, mojang::JOBS, fetch, &mojang::CANCEL, log).map_err(|e| {
 +        format!("\n  • Horizon tried to download {v} from Mojang{for_who}, but: {e}")
 +    })
  }
  
  /// The folder of the Microsoft Store's Minecraft Launcher (the one Windows offers, and the Xbox
-@@ -3112,9 +3103,6 @@ pub fn play_step(step: &str) {
+@@ -3104,9 +3095,6 @@ pub fn play_step(step: &str) {
      eprintln!("Horizon: Play: {step}…");
  }
  
@@ -248,7 +248,7 @@ index 8e7b1b6121..837ec5f764 100644
  pub fn client(tag: &str) -> Result<Command, String> {
      client_as(tag, None)
  }
-@@ -4627,11 +4615,11 @@ mod tests {
+@@ -4779,11 +4767,11 @@ mod tests {
          }
      }
  
@@ -264,7 +264,7 @@ index 8e7b1b6121..837ec5f764 100644
          let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
          let _ = fs::remove_dir_all(&dir);
          let pins = sources::Pins::read(&serde_json::json!({ "minecraft": {
-@@ -4646,38 +4634,16 @@ mod tests {
+@@ -4798,38 +4786,16 @@ mod tests {
              Err("no network in tests".into())
          };
          let log = |_: String| {};
@@ -311,7 +311,7 @@ index 8e7b1b6121..837ec5f764 100644
          let owner = account::Account {
              uuid: "069a79f444e94726a5befca90e38aaf5".into(),
              name: "Notch".into(),
-@@ -4692,22 +4658,9 @@ mod tests {
+@@ -4844,22 +4810,9 @@ mod tests {
              owner: Some((owner, secrets)),
              ..Default::default()
          });
@@ -336,9 +336,9 @@ index 8e7b1b6121..837ec5f764 100644
          let _ = fs::remove_dir_all(&dir);
  
          // In the sources: one call downloads the game, in `download_for`, and the only caller
-@@ -4744,7 +4697,10 @@ mod tests {
+@@ -4896,7 +4849,10 @@ mod tests {
          };
-         assert!(body("download_for").contains("mojang::download("));
+         assert!(body("download_for").contains("mojang::download_http("));
          assert!(body("download_for_owner").contains("account::launch("));
 -        assert!(!body("download_for_owner").contains("launch_for_game("));
 +        assert!(
@@ -349,7 +349,7 @@ index 8e7b1b6121..837ec5f764 100644
          assert_eq!(backend.matches("download_for(").count(), 2);
          assert!(body("download_for_owner").contains("download_for("));
 diff --git a/launcher/src/blocks_play.rs b/launcher/src/blocks_play.rs
-index be30796035..144e7f7485 100644
+index be30796..144e7f7 100644
 --- a/launcher/src/blocks_play.rs
 +++ b/launcher/src/blocks_play.rs
 @@ -116,8 +116,6 @@ impl Launcher {
@@ -403,7 +403,7 @@ index be30796035..144e7f7485 100644
          };
          let owner = self.owner == Some(true);
 diff --git a/launcher/src/developer_offline.rs b/launcher/src/developer_offline.rs
-index 2a93c358d4..2f164343af 100644
+index 2a93c35..2f16434 100644
 --- a/launcher/src/developer_offline.rs
 +++ b/launcher/src/developer_offline.rs
 @@ -152,14 +152,18 @@ mod tests {
@@ -441,7 +441,7 @@ index 2a93c358d4..2f164343af 100644
                  .env("HORIZON_LAUNCHER_HOME", root.path())
                  .env("HORIZON_HOME", root.path().join("game"))
 diff --git a/launcher/src/widgets.rs b/launcher/src/widgets.rs
-index 8a0acc2fdb..34eb3a836d 100644
+index 8a0acc2..34eb3a8 100644
 --- a/launcher/src/widgets.rs
 +++ b/launcher/src/widgets.rs
 @@ -476,10 +476,7 @@ pub(crate) fn segments<T: Copy + PartialEq + 'static>(
@@ -455,3 +455,6 @@ index 8a0acc2fdb..34eb3a836d 100644
      Nothing,
  }
  
+-- 
+2.47.3
+
