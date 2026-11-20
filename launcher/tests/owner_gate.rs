@@ -69,11 +69,13 @@ fn prepare_download_downloads_for_an_offline_name() {
     .unwrap();
     // The version's own preparer, as a release package ships it. Its work is not this
     // test's subject: only that Mojang's public files download for an offline name,
-    // with no account at all and no sign-in refusal anywhere.
+    // with no account at all and no sign-in refusal anywhere. A real preparer also
+    // leaves the resources manifest the launcher checks before it calls the version
+    // ready (0.2.84's check_prepared), so the stub writes just that one file.
     std::fs::create_dir_all(root.join("launcher/versions/v2026.10.27.01/tools")).unwrap();
     std::fs::write(
         root.join("launcher/versions/v2026.10.27.01/tools/prepare_native_client.py"),
-        "# A stub: this test checks the account gate, not the preparation itself.\n",
+        "# A stub: this test checks the account gate, not the preparation itself.\nimport json, pathlib\n\nroot = pathlib.Path.cwd()\nversion = json.loads((root / 'research-lock.json').read_text())['minecraft']['version']\nresources = root / '.local' / 'horizon-client' / version\nresources.mkdir(parents=True, exist_ok=True)\n(resources / 'horizon-resources.json').write_text('{}\\n')\n",
     )
     .unwrap();
     let out = launcher(
