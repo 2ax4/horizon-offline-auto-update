@@ -1,0 +1,27 @@
+From bacca7817aae51fcfb37ca026cdeb771e67cc1ba Mon Sep 17 00:00:00 2001
+From: 2ax4 <2ax4@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 01:14:39 +0300
+Subject: [PATCH] Offline: pass the repo to parse_releases in 0.2.92's
+ nightly-list test
+
+0.2.92 added a test that still calls parse_releases with the pre-offline three-argument signature; the offline signature carries the repo first.
+---
+ launcher/src/backend.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
+index 3b53f0614..c71e1dc32 100644
+--- a/launcher/src/backend.rs
++++ b/launcher/src/backend.rs
+@@ -7128,7 +7128,7 @@ pub fn {f}("
+             "prerelease": true,
+             "assets": [],
+         }]);
+-        let r = &parse_releases(&list, None, |_| true)[0];
++        let r = &parse_releases(REPO, &list, None, |_| true)[0];
+         assert_eq!((r.date.as_str(), r.time.as_str()), ("2026-11-20", "02:32"));
+         let nightly = Release {
+             nightly: Some(r.tag.clone()),
+-- 
+2.56.1
+
