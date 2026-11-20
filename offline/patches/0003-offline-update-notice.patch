@@ -1,7 +1,7 @@
-From cd284ffb53852b14f324347b31eedeccd2a46d79 Mon Sep 17 00:00:00 2001
+From 65e0f67178f4aabc2cbf5e48f9072a2eb96d3867 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 2/9] Offline updates follow the fork's releases
+Subject: [PATCH] Offline updates follow the fork's releases
 
 ---
  crates/horizon-release-sign/release-keys.txt  |   1 +
@@ -21,10 +21,10 @@ index c39be4435e..c510154235 100644
  MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
 +DfcWSiaD14ScBMxU0btrJMPDSspw+flKz43XoXHSsh4=
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 9c75935f2f..b82865348c 100644
+index 1cde630cff..057e7589fe 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -669,6 +669,7 @@ pub fn releases_from_network() -> Result<Vec<Release>, String> {
+@@ -684,6 +684,7 @@ pub fn releases_from_network() -> Result<Vec<Release>, String> {
  
  /// The releases in `list` whose tag passes `keep`, newest first, with the asset named `asset`.
  pub(crate) fn parse_releases(
@@ -32,7 +32,7 @@ index 9c75935f2f..b82865348c 100644
      list: &serde_json::Value,
      asset: Option<&str>,
      keep: fn(&str) -> bool,
-@@ -682,7 +683,7 @@ pub(crate) fn parse_releases(
+@@ -697,7 +698,7 @@ pub(crate) fn parse_releases(
          let found = r["assets"].as_array().into_iter().flatten().find_map(|a| {
              let name = a["name"].as_str()?;
              (Some(name) == asset)
@@ -41,7 +41,7 @@ index 9c75935f2f..b82865348c 100644
          });
          out.push(Release {
              tag: tag.into(),
-@@ -743,10 +744,10 @@ fn game_releases_with(
+@@ -758,10 +759,10 @@ fn game_releases_with(
      fallback: Option<&str>,
  ) -> Vec<Release> {
      let keep = |tag: &str| is_game_tag(tag) || horizon_release_sign::is_nightly(tag);
@@ -54,7 +54,7 @@ index 9c75935f2f..b82865348c 100644
              if r.asset.is_none() && r.tag == other.tag {
                  r.asset = other.asset;
              }
-@@ -777,7 +778,7 @@ fn launcher_releases_in_with(
+@@ -792,7 +793,7 @@ fn launcher_releases_in_with(
      list: &serde_json::Value,
      json: impl Fn(String) -> Result<Option<serde_json::Value>, String>,
  ) -> Vec<Release> {
@@ -63,7 +63,7 @@ index 9c75935f2f..b82865348c 100644
      if found.iter().any(|r| r.asset.is_some()) {
          return found;
      }
-@@ -794,6 +795,7 @@ fn launcher_releases_in_with(
+@@ -809,6 +810,7 @@ fn launcher_releases_in_with(
      for tag in tags.into_iter().take(3) {
          if let Ok(Some(release)) = json(format!("{api}/releases/tags/{tag}")) {
              let one = parse_releases(
@@ -71,7 +71,7 @@ index 9c75935f2f..b82865348c 100644
                  &serde_json::json!([release]),
                  launcher_asset(),
                  is_launcher_tag,
-@@ -1065,7 +1067,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
+@@ -1097,7 +1099,16 @@ pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
  
  /// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
  fn signed_digest(tag: &str, asset: &str) -> Result<String, String> {
@@ -88,7 +88,7 @@ index 9c75935f2f..b82865348c 100644
          tag,
          asset,
          &horizon_release_sign::trusted_keys_for(REPO),
-@@ -1189,7 +1200,8 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String>
+@@ -1221,7 +1232,8 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String>
                          &[("title", &format!("{:?}", release.name))],
                      )
                  })?;
@@ -98,7 +98,7 @@ index 9c75935f2f..b82865348c 100644
                  github_tag,
                  &version,
                  asset,
-@@ -3258,13 +3270,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
+@@ -3282,13 +3294,25 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
  pub fn releases_and_updates(
      on_releases: impl FnOnce(Result<Vec<Release>, String>),
  ) -> Result<Updates, String> {
@@ -125,7 +125,7 @@ index 9c75935f2f..b82865348c 100644
      on_releases: impl FnOnce(Result<Vec<Release>, String>),
  ) -> Result<Updates, String> {
      let list = match load() {
-@@ -3278,10 +3302,11 @@ fn releases_and_updates_with(
+@@ -3302,10 +3326,11 @@ fn releases_and_updates_with(
      let installed_versions = installed();
      let horizon = horizon_update(&installable_updates(&releases), &installed_versions)
          .or_else(|| architecture_update(&releases, &installed_versions));
@@ -138,7 +138,7 @@ index 9c75935f2f..b82865348c 100644
      })
  }
  
-@@ -3840,7 +3865,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
+@@ -3915,7 +3940,7 @@ pub fn stage_update(release: &Release, progress: impl Fn(f32)) -> Result<Option<
      {
          return Ok(None);
      }
@@ -147,7 +147,7 @@ index 9c75935f2f..b82865348c 100644
      let work = update_work_dir();
      remove_abandoned_stages(&work, std::time::SystemTime::now(), process_alive);
      let stage = new_stage_folder(&work)?;
-@@ -5230,7 +5255,7 @@ pub fn {f}("
+@@ -5489,7 +5514,7 @@ pub fn {f}("
              {"tag_name": "launcher@0.30.0", "assets": [asset(x64)]},
              {"tag_name": "launcher@0.29.0", "assets": [asset(x64), asset(arm)]},
          ]);
@@ -156,7 +156,7 @@ index 9c75935f2f..b82865348c 100644
          assert!(launcher_update_from(&releases, "launcher@0.29.0").is_none());
          let update = launcher_update_from(&releases, "launcher@0.28.0").unwrap();
          assert_eq!(update.tag, "launcher@0.29.0");
-@@ -5404,12 +5429,12 @@ pub fn {f}("
+@@ -5663,12 +5688,12 @@ pub fn {f}("
              {"tag_name": "v2026.10.13", "assets": []},
              {"tag_name": "launcher-v0.0.1", "draft": true, "assets": []},
          ]);
@@ -171,7 +171,7 @@ index 9c75935f2f..b82865348c 100644
              .into_iter()
              .map(|r| r.tag)
              .collect();
-@@ -5426,7 +5451,7 @@ pub fn {f}("
+@@ -5685,7 +5710,7 @@ pub fn {f}("
              {"tag_name": "v2026.10.15", "assets": [{"name": asset, "browser_download_url": "good", "size": 1}]},
              {"tag_name": "v2026.10.14", "assets": [{"name": asset, "browser_download_url": "old", "size": 1}]},
          ]);
@@ -180,7 +180,7 @@ index 9c75935f2f..b82865348c 100644
          assert!(releases.iter().all(|r| r.tag != "v2026.10.15.1"));
          assert_eq!(
              latest(&releases).map(|r| r.tag.as_str()),
-@@ -5453,7 +5478,7 @@ pub fn {f}("
+@@ -5712,7 +5737,7 @@ pub fn {f}("
              {"tag_name": "v0.2.12", "prerelease": true, "assets": [{"name": asset, "browser_download_url": "a", "size": 1}]},
              {"tag_name": "v0.2.0", "assets": [{"name": asset, "browser_download_url": "s", "size": 1}]},
          ]);
@@ -189,7 +189,7 @@ index 9c75935f2f..b82865348c 100644
          assert_eq!(
              releases.iter().map(|r| r.prerelease).collect::<Vec<_>>(),
              [false, true, false]
-@@ -6020,7 +6045,7 @@ pub fn {f}("
+@@ -6279,7 +6304,7 @@ pub fn {f}("
              {"tag_name": "v2026.10.21", "prerelease": true, "assets": [{"name": asset, "browser_download_url": "d", "size": 1}]},
              {"tag_name": "v2026.10.19.15", "assets": [{"name": asset, "browser_download_url": "s", "size": 1}]},
          ]);
@@ -695,3 +695,6 @@ index 30ba8dd631..f9794582b6 100644
                  "{tag}"
              );
          }
+-- 
+2.47.3
+

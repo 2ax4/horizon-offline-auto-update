@@ -1,14 +1,14 @@
-From d6cea4a7dd0d8638e3a666d7b76ce0d257b3d26c Mon Sep 17 00:00:00 2001
+From cdebd68eed8b1fe753e6036ee04e04e779cff0da Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 4/9] Offline build: quiet sign-in notices and fork repo
+Subject: [PATCH] Offline build: quiet sign-in notices and fork repo
 
 ---
  launcher/src/backend.rs | 2 ++
  1 file changed, 2 insertions(+)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index ff56f8b554..8e7b1b6121 100644
+index 1422224b7c..84cf0f6254 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
 @@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
@@ -20,3 +20,6 @@ index ff56f8b554..8e7b1b6121 100644
  /// Where a crash is reported.
  pub fn issues_url() -> String {
      format!("https://github.com/{REPO}/issues")
+-- 
+2.47.3
+

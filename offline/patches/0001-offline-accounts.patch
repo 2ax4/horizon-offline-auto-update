@@ -1,7 +1,7 @@
-From a95ea689bd0ec4cdb25f295f837f4b6b40f7bfae Mon Sep 17 00:00:00 2001
+From bbb8455d55aded757eda7c862211feaf4809856a Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
+Subject: [PATCH] Offline accounts: add and play with no Microsoft account
 
 ---
  docs/launcher-commands.md              |  35 +++-
@@ -34,7 +34,7 @@ Subject: [PATCH 1/9] Offline accounts: add and play with no Microsoft account
  create mode 100644 launcher/src/skins/tests.rs
 
 diff --git a/docs/launcher-commands.md b/docs/launcher-commands.md
-index 116d641..1775f22 100644
+index 116d641b96..1775f220a3 100644
 --- a/docs/launcher-commands.md
 +++ b/docs/launcher-commands.md
 @@ -230,14 +230,45 @@ MCP: `account_sign_out`, needs `confirm: true`.
@@ -86,7 +86,7 @@ index 116d641..1775f22 100644
  
  Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), cache-limit-gib N (managed cache limit in GiB: 10, 25 (default), 50, 100; 0 disables automatic cleanup).
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index b4172bf..b1569ba 100644
+index b4172bf099..b1569ba486 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
 @@ -6,8 +6,6 @@
@@ -360,7 +360,7 @@ index b4172bf..b1569ba 100644
  }
  
 diff --git a/launcher/src/account/tests.rs b/launcher/src/account/tests.rs
-index 14b0d21..9c66eae 100644
+index 14b0d21e0a..9c66eae202 100644
 --- a/launcher/src/account/tests.rs
 +++ b/launcher/src/account/tests.rs
 @@ -686,80 +686,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
@@ -690,7 +690,7 @@ index 14b0d21..9c66eae 100644
      assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
      assert_eq!(accounts.selected.as_deref(), Some(UUID));
 diff --git a/launcher/src/backend/developer_play.rs b/launcher/src/backend/developer_play.rs
-index 49ab979..0ccd0e7 100644
+index 49ab9791fe..0ccd0e70f9 100644
 --- a/launcher/src/backend/developer_play.rs
 +++ b/launcher/src/backend/developer_play.rs
 @@ -2,7 +2,7 @@
@@ -703,7 +703,7 @@ index 49ab979..0ccd0e7 100644
          return Err(error);
      }
 diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
-index 59560ab..eee031d 100644
+index f95341a912..e404dc74cd 100644
 --- a/launcher/src/blocks_chrome.rs
 +++ b/launcher/src/blocks_chrome.rs
 @@ -26,9 +26,13 @@ impl Launcher {
@@ -723,10 +723,10 @@ index 59560ab..eee031d 100644
              Some(uuid) => (self.profile_heads)
                  .draw(Some(&uuid), 28., self.scale, &t)
 diff --git a/launcher/src/blocks_settings.rs b/launcher/src/blocks_settings.rs
-index e7e8785..d1b728b 100644
+index 04a5f9319b..5b6ab9df27 100644
 --- a/launcher/src/blocks_settings.rs
 +++ b/launcher/src/blocks_settings.rs
-@@ -188,6 +188,7 @@ impl Launcher {
+@@ -195,6 +195,7 @@ impl Launcher {
              );
          }
          let (accounts, n) = self.account_rows(cx);
@@ -734,7 +734,7 @@ index e7e8785..d1b728b 100644
          let group = |label: &'static str, icon: &'static str| {
              section_title(label, icon, &t).mt(px(20.)).mb(px(12.))
          };
-@@ -206,6 +207,7 @@ impl Launcher {
+@@ -213,6 +214,7 @@ impl Launcher {
                      .flex_col()
                      .child(group("Account", "user").mt_0())
                      .child(accounts)
@@ -742,7 +742,7 @@ index e7e8785..d1b728b 100644
                      .child(group("Updates", "reload"))
                      .child(index_row(n + 1, "Horizon", Some(plain(&horizon)), horizon_action, &t))
                      .child(index_row(
-@@ -627,7 +629,7 @@ impl Launcher {
+@@ -634,7 +636,7 @@ impl Launcher {
                  actions = actions.child(
                      button(format!("select-{i}"), "Play as", Kind::Secondary, &t).on_click(
                          cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -752,7 +752,7 @@ index e7e8785..d1b728b 100644
                          }),
                      ),
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index 54a98f5..d0e6ac8 100644
+index dc0afbaf37..3ac7c674d0 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
 @@ -140,8 +140,35 @@ enum AccountCmd {
@@ -793,7 +793,7 @@ index 54a98f5..d0e6ac8 100644
  }
  
  #[derive(Subcommand)]
-@@ -1535,23 +1562,26 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
+@@ -1542,23 +1569,26 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
                  after_exit(&instance, &vars);
                  return played;
              }
@@ -828,7 +828,7 @@ index 54a98f5..d0e6ac8 100644
              instances::apply(&mut cmd, &instance)?;
              if let Some(code) = join {
                  backend::join_friend(&mut cmd, &code)?;
-@@ -1569,6 +1599,10 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
+@@ -1576,6 +1606,10 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
              }
              cmd.args(arg);
              let started = std::time::Instant::now();
@@ -839,7 +839,7 @@ index 54a98f5..d0e6ac8 100644
              let vars = instance.vars(cmd.get_program());
              cmd.envs(vars.iter().map(|(k, v)| (k, v)));
              horizon_launcher::jars::prepare_launch(
-@@ -1968,13 +2002,18 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -1978,13 +2012,18 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                          "selected": accounts.selected.as_ref() == Some(&a.uuid),
                          "authentication": account::session::status(account::store(), &a.uuid),
                      })).collect::<Vec<_>>(),
@@ -861,7 +861,7 @@ index 54a98f5..d0e6ac8 100644
                  );
              } else {
                  for a in &accounts.accounts {
-@@ -1991,11 +2030,19 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -2001,11 +2040,19 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                      };
                      println!("{mark} {}  {}  {}{why}", a.name, a.uuid, status.label());
                  }
@@ -884,7 +884,7 @@ index 54a98f5..d0e6ac8 100644
                      );
                  }
              }
-@@ -2074,10 +2121,94 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
+@@ -2084,10 +2131,94 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
              println!("Signed out {}.", a.name);
          }
          AccountCmd::Select { who } => {
@@ -983,7 +983,7 @@ index 54a98f5..d0e6ac8 100644
      }
      Ok(())
 diff --git a/launcher/src/developer_play.rs b/launcher/src/developer_play.rs
-index f0f404f..2f971ed 100644
+index f0f404f87e..2f971eddd9 100644
 --- a/launcher/src/developer_play.rs
 +++ b/launcher/src/developer_play.rs
 @@ -26,7 +26,9 @@ impl Launcher {
@@ -1010,7 +1010,7 @@ index f0f404f..2f971ed 100644
              let pack = self.starting_pack.take();
              let instance = match &pack {
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index e356cf7..018aefd 100644
+index f9b2544b88..65dedb7f4f 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -6,6 +6,7 @@ use super::*;
@@ -1067,7 +1067,7 @@ index e356cf7..018aefd 100644
                          })),
                      id,
 diff --git a/launcher/src/home.rs b/launcher/src/home.rs
-index 0534232..fa1d433 100644
+index 0534232fcc..fa1d433f3a 100644
 --- a/launcher/src/home.rs
 +++ b/launcher/src/home.rs
 @@ -260,15 +260,7 @@ impl Launcher {
@@ -1088,10 +1088,10 @@ index 0534232..fa1d433 100644
              PlayPress::Play => {
                  play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
 diff --git a/launcher/src/instances.rs b/launcher/src/instances.rs
-index ceee3f8..f5aca59 100644
+index d024507d86..eb0e148f03 100644
 --- a/launcher/src/instances.rs
 +++ b/launcher/src/instances.rs
-@@ -763,6 +763,34 @@ fn follow_player(game_home: &Path, home: &Path) {
+@@ -768,6 +768,34 @@ fn follow_player(game_home: &Path, home: &Path) {
      }
  }
  
@@ -1127,10 +1127,10 @@ index ceee3f8..f5aca59 100644
  mod switch;
  pub use switch::{switch, unkept, Plays, Unkept};
 diff --git a/launcher/src/launcher_play.rs b/launcher/src/launcher_play.rs
-index 70e05ef..45f16ab 100644
+index bfbed46c13..03ba4caacc 100644
 --- a/launcher/src/launcher_play.rs
 +++ b/launcher/src/launcher_play.rs
-@@ -421,8 +421,15 @@ impl Launcher {
+@@ -424,8 +424,15 @@ impl Launcher {
  
      pub(crate) fn load_profile_heads(&mut self) {
          let resources = self.game_resources();
@@ -1148,10 +1148,10 @@ index 70e05ef..45f16ab 100644
  
      pub(crate) fn begin_auth_job(&mut self, uuid: &str) -> Option<u64> {
 diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
-index 6eddbec..8fd3c14 100644
+index 1b5a39e476..8682288c58 100644
 --- a/launcher/src/launcher_setup.rs
 +++ b/launcher/src/launcher_setup.rs
-@@ -160,6 +160,8 @@ impl Launcher {
+@@ -161,6 +161,8 @@ impl Launcher {
              notes: Default::default(),
              technical_open: Default::default(),
              picker: glass_home::PickerState::default(),
@@ -1160,7 +1160,7 @@ index 6eddbec..8fd3c14 100644
              accent_strip: false,
              look_sliders: Default::default(),
              hue_area: std::rc::Rc::new(std::cell::Cell::new(None)),
-@@ -417,8 +419,9 @@ impl Launcher {
+@@ -419,8 +421,9 @@ impl Launcher {
      }
  
      pub(crate) fn go(&mut self, page: Page) {
@@ -1173,10 +1173,10 @@ index 6eddbec..8fd3c14 100644
          // Each check reads the keychain (a prompt on macOS): page switches check every account
          // at most once a minute, and an account added meanwhile at once.
 diff --git a/launcher/src/lib.rs b/launcher/src/lib.rs
-index 1debd53..a391184 100644
+index b606b66912..fc834887db 100644
 --- a/launcher/src/lib.rs
 +++ b/launcher/src/lib.rs
-@@ -57,6 +57,7 @@ pub mod setup_args;
+@@ -58,6 +58,7 @@ pub mod setup_args;
  pub mod shop;
  pub mod shortcut;
  pub mod signed;
@@ -1185,7 +1185,7 @@ index 1debd53..a391184 100644
  pub mod tailscale;
  pub mod telemetry;
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 6e52c5f..c1d6ca6 100644
+index cccf9e96ea..8d90bf6b06 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -95,6 +95,7 @@ mod switch_page;
@@ -1196,7 +1196,7 @@ index 6e52c5f..c1d6ca6 100644
  mod wardrobe_page;
  mod welcome;
  mod while_playing;
-@@ -390,6 +391,9 @@ struct Launcher {
+@@ -393,6 +394,9 @@ struct Launcher {
      /// Where the mouse went down to close a menu by pressing outside it, so that the
      /// same press, ending on the menu's own button, doesn't open it again.
      menu_closed_at: Option<Point<Pixels>>,
@@ -1206,7 +1206,7 @@ index 6e52c5f..c1d6ca6 100644
      /// The Wardrobe page's account and outfit (`wardrobe_page.rs`).
      wardrobe: Option<wardrobe_page::Wardrobe>,
      /// Name tag styles' marks; they outlive the account's `wardrobe`.
-@@ -590,6 +594,9 @@ struct Launcher {
+@@ -595,6 +599,9 @@ struct Launcher {
      aside: while_playing::Aside,
      /// The selected instance's desktop shortcut (`shortcut_page.rs`).
      shortcuts: shortcut_page::Shortcuts,
@@ -1216,7 +1216,7 @@ index 6e52c5f..c1d6ca6 100644
      /// The player's servers, for the sidebar until the Servers page has read them.
      side_servers: Vec<horizon_launcher::servers::Entry>,
      /// The pixel art made for this window (`art.rs`), and pictures downloaded by URL.
-@@ -671,7 +678,21 @@ fn closed_by_press(closed_at: Option<Point<Pixels>>, event: &ClickEvent) -> bool
+@@ -676,7 +683,21 @@ fn closed_by_press(closed_at: Option<Point<Pixels>>, event: &ClickEvent) -> bool
      matches!(event, ClickEvent::Mouse(click) if closed_at == Some(click.down.position))
  }
  
@@ -1239,7 +1239,7 @@ index 6e52c5f..c1d6ca6 100644
  mod tests {
      #[test]
      fn an_unopenable_data_folder_starts_on_settings_instead_of_exiting() {
-@@ -907,6 +928,18 @@ mod tests {
+@@ -912,6 +933,18 @@ mod tests {
          ));
      }
  
@@ -1259,7 +1259,7 @@ index 6e52c5f..c1d6ca6 100644
      fn counts_get_thousands_separators() {
          let shown: Vec<String> = [0, 7, 999, 1000, 12_300, 1_234_500]
 diff --git a/launcher/src/mcp.rs b/launcher/src/mcp.rs
-index 92d7960..57cfb99 100644
+index 92d7960fc9..57cfb999a1 100644
 --- a/launcher/src/mcp.rs
 +++ b/launcher/src/mcp.rs
 @@ -230,7 +230,6 @@ impl Session {
@@ -1271,7 +1271,7 @@ index 92d7960..57cfb99 100644
                      "sign_in": sign_in,
                  }))
 diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
-index ce95223..aa659a7 100644
+index ce952235a1..aa659a7d20 100644
 --- a/launcher/src/owner_page.rs
 +++ b/launcher/src/owner_page.rs
 @@ -1,16 +1,11 @@
@@ -1377,7 +1377,7 @@ index ce95223..aa659a7 100644
          card = match state {
              Shown::Code(uri, user_code) => {
 diff --git a/launcher/src/profile_heads.rs b/launcher/src/profile_heads.rs
-index 8a83d15..c811942 100644
+index 8a83d1544a..c8119426ab 100644
 --- a/launcher/src/profile_heads.rs
 +++ b/launcher/src/profile_heads.rs
 @@ -23,11 +23,59 @@ struct Head {
@@ -1444,7 +1444,7 @@ index 8a83d15..c811942 100644
              let url = account.skin.as_ref().map(|s| s.0.clone());
              if self.0.get(&account.uuid).is_some_and(|h| {
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index 839fe1b..b05084a 100644
+index 839fe1b97a..b05084a1d3 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -74,6 +74,8 @@ pub(super) enum Field {
@@ -1542,7 +1542,7 @@ index 839fe1b..b05084a 100644
          }
 diff --git a/launcher/src/skin_page.rs b/launcher/src/skin_page.rs
 new file mode 100644
-index 0000000..d4bcb8a
+index 0000000000..d4bcb8a9e6
 --- /dev/null
 +++ b/launcher/src/skin_page.rs
 @@ -0,0 +1,264 @@
@@ -1812,7 +1812,7 @@ index 0000000..d4bcb8a
 +}
 diff --git a/launcher/src/skins.rs b/launcher/src/skins.rs
 new file mode 100644
-index 0000000..a70933a
+index 0000000000..a70933aa86
 --- /dev/null
 +++ b/launcher/src/skins.rs
 @@ -0,0 +1,183 @@
@@ -2001,7 +2001,7 @@ index 0000000..a70933a
 +mod tests;
 diff --git a/launcher/src/skins/tests.rs b/launcher/src/skins/tests.rs
 new file mode 100644
-index 0000000..69f957b
+index 0000000000..69f957b74f
 --- /dev/null
 +++ b/launcher/src/skins/tests.rs
 @@ -0,0 +1,124 @@
@@ -2130,7 +2130,7 @@ index 0000000..69f957b
 +    std::fs::remove_dir_all(&root).unwrap();
 +}
 diff --git a/launcher/src/switch_page.rs b/launcher/src/switch_page.rs
-index 4062a2e..c8258dc 100644
+index 4062a2e719..c8258dc1a8 100644
 --- a/launcher/src/switch_page.rs
 +++ b/launcher/src/switch_page.rs
 @@ -1,19 +1,30 @@
@@ -2408,7 +2408,7 @@ index 4062a2e..c8258dc 100644
 +    }
  }
 diff --git a/launcher/tests/owner_gate.rs b/launcher/tests/owner_gate.rs
-index 110c688..7dd7091 100644
+index 110c688240..7dd7091d13 100644
 --- a/launcher/tests/owner_gate.rs
 +++ b/launcher/tests/owner_gate.rs
 @@ -1,25 +1,18 @@

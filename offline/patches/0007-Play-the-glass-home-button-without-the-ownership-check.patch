@@ -1,7 +1,7 @@
-From a2da550e469df7437a1edc7940d9d4d6815dd0cc Mon Sep 17 00:00:00 2001
+From 933490f81b1d8d43e2fb37b0c168540b502c9869 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 5/9] Play the glass home button without the ownership check
+Subject: [PATCH] Play the glass home button without the ownership check
 
 ---
  launcher/src/glass_home.rs |  2 +-
@@ -10,7 +10,7 @@ Subject: [PATCH 5/9] Play the glass home button without the ownership check
  3 files changed, 15 insertions(+), 27 deletions(-)
 
 diff --git a/launcher/src/glass_home.rs b/launcher/src/glass_home.rs
-index 87a7cba19d..d6f37b1083 100644
+index 489cd23312..eeb9b695af 100644
 --- a/launcher/src/glass_home.rs
 +++ b/launcher/src/glass_home.rs
 @@ -642,7 +642,7 @@ impl Launcher {
@@ -23,10 +23,10 @@ index 87a7cba19d..d6f37b1083 100644
                      needs_build && update.is_none() && matches!(press, PlayPress::Play);
                  let (label, icon) = match &update {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index e0f8ca9aad..cf0bc10bf0 100644
+index d3fb558ade..7672b52e8f 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -817,33 +817,23 @@ mod tests {
+@@ -822,33 +822,23 @@ mod tests {
          );
      }
  
@@ -100,3 +100,6 @@ index f70f92121f..8a0acc2fdb 100644
  }
  
  /// Whether `tag` can start being deleted now: it is installed, no instance plays it (`used_by`),
+-- 
+2.47.3
+

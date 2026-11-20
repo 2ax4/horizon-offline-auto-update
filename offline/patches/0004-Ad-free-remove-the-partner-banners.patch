@@ -1,7 +1,7 @@
-From bdb90701b9e5cd12b69f23b1083754df6b8f4c59 Mon Sep 17 00:00:00 2001
+From 4f20ab0a3d615f71742807027223364a6bc94b86 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 11:44:12 +0000
-Subject: [PATCH 3/9] Ad-free: remove the partner banners
+Subject: [PATCH] Ad-free: remove the partner banners
 
 ---
  launcher/src/backend.rs        |  7 ------
@@ -14,10 +14,10 @@ Subject: [PATCH 3/9] Ad-free: remove the partner banners
  7 files changed, 4 insertions(+), 151 deletions(-)
 
 diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index b82865348c..ff56f8b554 100644
+index 057e7589fe..1422224b7c 100644
 --- a/launcher/src/backend.rs
 +++ b/launcher/src/backend.rs
-@@ -4287,13 +4287,6 @@ pub struct Settings {
+@@ -4380,13 +4380,6 @@ pub struct Settings {
      /// one now (the owner gate's screen).
      #[serde(default)]
      pub owner_notice_seen: bool,
@@ -32,7 +32,7 @@ index b82865348c..ff56f8b554 100644
      #[serde(default)]
      pub while_playing: WhilePlaying,
 diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
-index eee031d3fd..530901ff5d 100644
+index e404dc74cd..68a099f1c8 100644
 --- a/launcher/src/blocks_chrome.rs
 +++ b/launcher/src/blocks_chrome.rs
 @@ -310,34 +310,6 @@ impl Launcher {
@@ -71,7 +71,7 @@ index eee031d3fd..530901ff5d 100644
              foot = foot.child(link(
                  "sponsor",
 diff --git a/launcher/src/frame.rs b/launcher/src/frame.rs
-index 018aefd021..6324e0f291 100644
+index 65dedb7f4f..4136e9a3bc 100644
 --- a/launcher/src/frame.rs
 +++ b/launcher/src/frame.rs
 @@ -680,27 +680,6 @@ impl Launcher {
@@ -164,7 +164,7 @@ index fc72b28698..0b7d6d051a 100644
  
  /// The open server's port.
 diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
-index 8fd3c140c1..8c30471d9f 100644
+index 8682288c58..213f6501e4 100644
 --- a/launcher/src/launcher_setup.rs
 +++ b/launcher/src/launcher_setup.rs
 @@ -24,30 +24,6 @@ impl Launcher {
@@ -199,7 +199,7 @@ index 8fd3c140c1..8c30471d9f 100644
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index c1d6ca6af7..e0f8ca9aad 100644
+index 8d90bf6b06..d3fb558ade 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
 @@ -76,7 +76,6 @@ mod new_instance;
@@ -261,3 +261,6 @@ index b05084a1d3..85cd0b817b 100644
      }
  
      fn add_server_folder(&mut self, cx: &mut Context<Self>) {
+-- 
+2.47.3
+

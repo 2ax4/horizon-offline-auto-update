@@ -1,8 +1,8 @@
-From e9a8c8ae7d75416351d1c04522631d481ead2058 Mon Sep 17 00:00:00 2001
+From d5078a9d672b92736c4c98ebfafbbd6db95713d4 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 02:50:12 +0000
-Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
- prune orphaned translations
+Subject: [PATCH] Restore the 0.2.42 game-architecture CLI setting and prune
+ orphaned translations
 
 ---
  launcher/src/blocks_chrome.rs | 2 +-
@@ -10,7 +10,7 @@ Subject: [PATCH 8/9] Restore the 0.2.42 game-architecture CLI setting and
  2 files changed, 3 insertions(+), 3 deletions(-)
 
 diff --git a/launcher/src/blocks_chrome.rs b/launcher/src/blocks_chrome.rs
-index 530901ff5d..f5dc246c9f 100644
+index 68a099f1c8..0c7d2bc81f 100644
 --- a/launcher/src/blocks_chrome.rs
 +++ b/launcher/src/blocks_chrome.rs
 @@ -355,7 +355,7 @@ impl Launcher {
@@ -23,7 +23,7 @@ index 530901ff5d..f5dc246c9f 100644
          // Custom title bars carry the mark and name already.
          let brand = (!titlebar::draws_brand(window)).then(|| {
 diff --git a/launcher/src/cli.rs b/launcher/src/cli.rs
-index d0e6ac8ef0..da1b20bf64 100644
+index 3ac7c674d0..3971d0c5c9 100644
 --- a/launcher/src/cli.rs
 +++ b/launcher/src/cli.rs
 @@ -1395,7 +1395,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
@@ -44,3 +44,6 @@ index d0e6ac8ef0..da1b20bf64 100644
                  }
              };
              let explicit = folder.is_some() || profile.is_some();
+-- 
+2.47.3
+
