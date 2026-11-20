@@ -7,6 +7,16 @@ on:
         required: false
         type: string
         default: ''
+      only_arm64:
+        description: 'Build only the macOS arm64 leg; the other three legs are skipped (fill mode)'
+        required: false
+        type: boolean
+        default: false
+      upload_to:
+        description: 'Existing release tag to upload the assets into instead of creating a release'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -17,6 +27,10 @@ env:
 jobs:
   build:
     name: build ${{ matrix.name }}
+    # The macOS arm64 pool keeps refusing jobs outright ("This job was cancelled"
+    # before any step). It is a separate job below so its loss never blocks the
+    # release: sign and release only need these three artifacts.
+    if: ${{ !inputs.only_arm64 }}
     strategy:
       fail-fast: false
       matrix:
@@ -29,11 +43,6 @@ jobs:
           - name: linux
             os: ubuntu-22.04
             asset: horizon-launcher-linux-x86_64.tar.gz
-            binary: horizon-launcher
-          - name: macos
-            # macos-26 arm64: the macos-15 arm64 hosted pool is chronically congested
-            os: macos-26
-            asset: horizon-launcher-macos-arm64.zip
             binary: horizon-launcher
           - name: macos-x64
             # Build x64 natively on the Intel hosted runner: it queues far faster
@@ -291,13 +300,157 @@ jobs:
           path: launcher/out/*
           retention-days: 3
 
+  build-arm64:
+    name: build macos-arm64
+    # macos-26 arm64: the macos-15 arm64 hosted pool is chronically congested.
+    # Its artifact is optional for the release unless only_arm64 is set, in
+    # which case the sign job demands it.
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: launcher
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Embed the release version and tag into the build
+        run: |
+          raw="${{ inputs.ref }}"
+          [ -n "$raw" ] || raw="${GITHUB_REF_NAME}"
+          echo "RELEASE_TAG=$raw" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=$raw" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_VERSION=${raw#launcher@}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+          shared-key: launcher-macos-arm64
+
+      - name: Binary directory
+        run: echo "BIN_DIR=target/release" >> "$GITHUB_ENV"
+
+      - name: Metal shaders at run time without the Metal toolchain
+        run: |
+          if ! xcrun metal --version > /dev/null 2>&1; then
+            echo "LAUNCHER_FEATURES=gpui_platform/runtime_shaders" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build
+        run: |
+          set +e
+          cargo build --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"} 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "### cargo build failed (exit $status) on macos-arm64"
+              echo
+              echo '```'
+              grep -E '^error(\[E[0-9]+\])?: |^error: could not compile' -A 5 build.log | head -150
+              echo '```'
+              echo
+              echo "<details><summary>Last 100 lines of the build log</summary>"
+              echo
+              echo '```'
+              tail -100 build.log
+              echo '```'
+              echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+
+      - name: Upload the build log (failure diagnostics)
+        if: failure() && hashFiles('launcher/build.log') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-macos-arm64
+          path: launcher/build.log
+          retention-days: 14
+
+      - name: Version check
+        run: |
+          out=$("$BIN_DIR/horizon-launcher" --version)
+          echo "$out"
+          [[ "$out" == "horizon-launcher $HORIZON_LAUNCHER_VERSION" ]] || {
+            echo "::error::expected: horizon-launcher $HORIZON_LAUNCHER_VERSION"
+            exit 1
+          }
+
+      - name: Smoke the offline account flow (add, list, forget)
+        env:
+          # A data folder of the smoke's own: judged on a fresh directory, never on runner state
+          HORIZON_LAUNCHER_HOME: ${{ runner.temp }}/offline-smoke
+        run: |
+          set -e
+          bin="$BIN_DIR/horizon-launcher"
+          # Git Bash on Windows hands `${{ runner.temp }}` over with backslashes.
+          home="${HORIZON_LAUNCHER_HOME//\\//}"
+          rm -rf "$home"
+          mkdir -p "$home"
+          export HORIZON_LAUNCHER_HOME="$home"
+          run() {
+            if ! "$@"; then
+              echo "::error title=offline smoke (macos-arm64)::$* failed"
+              exit 1
+            fi
+          }
+          list() { "$bin" --json account list; }
+          expect() {
+            local pattern=$1 label=$2 out
+            if ! out=$(list); then
+              echo "::error title=offline smoke (macos-arm64)::account list failed"
+              exit 1
+            fi
+            printf '%s\n' "$out"
+            if ! printf '%s\n' "$out" | grep -qF -- "$pattern"; then
+              echo "::error title=offline smoke (macos-arm64)::$label"
+              exit 1
+            fi
+          }
+          run "$bin" account offline __SmokeTest__
+          expect '"name": "__SmokeTest__"' "offline account missing after add"
+          expect '"selected": true' "nothing plays after add"
+          run "$bin" account forget-offline __SmokeTest__
+          if ! out=$(list); then
+            echo "::error title=offline smoke (macos-arm64)::account list failed"
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -qF '"__SmokeTest__"'; then
+            echo "::error title=offline smoke (macos-arm64)::still listed after forget"
+            exit 1
+          fi
+          echo "offline account add + list + forget: OK"
+
+      - name: Package
+        run: |
+          rm -rf dist out && mkdir -p dist out
+          cp "$BIN_DIR/horizon-launcher" dist/
+          (cd dist && zip -q ../out/horizon-launcher-macos-arm64.zip horizon-launcher)
+          ls -l out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: horizon-launcher-macos-arm64.zip
+          path: launcher/out/*
+          retention-days: 3
+
   sign:
     name: sign
-    needs: build
+    # always(): the arm64 leg's failure or cancel must not stop the release.
+    # The required-artifacts check below is what actually gates it.
+    needs: [build, build-arm64]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       RELEASE_TAG: ${{ inputs.ref || github.ref_name }}
+      ONLY_ARM64: ${{ inputs.only_arm64 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -311,6 +464,30 @@ jobs:
           path: dist
           pattern: horizon-launcher-*
           merge-multiple: true
+
+      - name: The builds the release depends on came through
+        run: |
+          miss=""
+          if [ "$ONLY_ARM64" != "true" ]; then
+            for f in horizon-launcher-windows-x64.zip horizon-launcher-linux-x86_64.tar.gz horizon-launcher-macos-x64.zip; do
+              [ -f "dist/$f" ] || miss="$miss $f"
+            done
+          else
+            [ -f dist/horizon-launcher-macos-arm64.zip ] || miss="$miss horizon-launcher-macos-arm64.zip"
+          fi
+          if [ -n "$miss" ]; then
+            echo "dist contents:"
+            ls -la dist || true
+            echo "::error::required build artifacts are missing:${miss}; see the failing legs above"
+            exit 1
+          fi
+          echo "all required artifacts present"
+
+      - name: Pull the release's current assets (fill mode)
+        if: ${{ inputs.upload_to != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" -D dist --clobber --pattern 'horizon-launcher-*'
 
       - name: Signing key present
         env:
@@ -343,7 +520,8 @@ jobs:
           retention-days: 3
 
   release:
-    needs: [build, sign]
+    needs: [build, build-arm64, sign]
+    if: ${{ always() && needs.sign.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -359,6 +537,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Pull the release's current assets (fill mode)
+        if: ${{ inputs.upload_to != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" -D dist --clobber --pattern 'horizon-launcher-*'
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Verify the signature (the same way the launcher does)
@@ -371,7 +555,31 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          UPLOAD_TO: ${{ inputs.upload_to }}
+          ONLY_ARM64: ${{ inputs.only_arm64 }}
         run: |
+          if [ -n "$UPLOAD_TO" ]; then
+            # Fill mode: add (or refresh) the missing arm64 asset inside the
+            # existing release. SHA256SUMS was signed over the full asset set.
+            ok=false
+            for attempt in 1 2 3; do
+              if gh release upload "$RELEASE_TAG" dist/* --clobber; then
+                ok=true
+                break
+              fi
+              if [ "$attempt" != 3 ]; then
+                echo "::warning::gh release upload failed (attempt ${attempt}/3); retrying in 30s"
+                sleep 30
+              fi
+            done
+            if [ "$ok" != true ]; then
+              echo "::error::could not upload the assets after 3 attempts; the next scheduled run retries automatically"
+              exit 1
+            fi
+            echo "release ${RELEASE_TAG} assets after the fill:"
+            gh release view "$RELEASE_TAG" --json assets -q '.assets[].name'
+            exit 0
+          fi
           ver="${RELEASE_TAG#launcher@}"
           ver="${ver%-offline}"
           body_file="$(mktemp)"
@@ -383,6 +591,10 @@ jobs:
           {
             echo "Includes offline account support that does not need a Microsoft account. Based on ${ver}"
             echo "offline-phash:${phash}"
+            if [ "$ONLY_ARM64" != "true" ] && [ ! -f dist/horizon-launcher-macos-arm64.zip ]; then
+              echo ""
+              echo "- The macOS (Apple Silicon) build is missing from this release right now: GitHub's macOS arm64 runners keep refusing to start. It is built and added to this release automatically as soon as a runner frees up. The x64 build below runs on Apple Silicon under Rosetta."
+            fi
             echo
             printf '%s\n' "$up_body"
           } > "$body_file"

@@ -13,6 +13,10 @@ on:
         description: Internal infra-failure retry counter set by the workflow itself
         type: string
         default: '0'
+      fill_attempt:
+        description: Internal arm64 infra-retry counter set by the workflow itself
+        type: string
+        default: '0'
   push:
     branches: [main]
 
@@ -34,6 +38,8 @@ jobs:
       should_build: ${{ steps.pick.outputs.should_build }}
       tag: ${{ steps.pick.outputs.tag }}
       marker: ${{ steps.pick.outputs.marker }}
+      marker_fill: ${{ steps.pick.outputs.marker_fill }}
+      fill: ${{ steps.pick.outputs.fill }}
       sha: ${{ steps.pick.outputs.sha }}
       alert: ${{ steps.pick.outputs.alert }}
     steps:
@@ -62,7 +68,7 @@ jobs:
           echo "upstream launcher releases, newest first:"
           head -5 /tmp/versions.txt | sed 's/^/  /'
           head -10 /tmp/versions.txt > /tmp/candidates.txt
-          git remote add upstream https://github.com/horizon-rust/horizon.git
+          git remote add upstream https://github.com/horizon-rust/horizon.git 2>/dev/null || true
           mkdir -p /tmp/patches
           cp offline/patches/*.patch /tmp/patches/
           phash=$(cat /tmp/patches/*.patch offline/lang-sync.py offline/lang-overrides.json .github/workflows/launcher-release.yml | sha256sum | cut -c1-8)
@@ -70,11 +76,24 @@ jobs:
           newest=$(head -1 /tmp/candidates.txt)
           alert=""
           chosen=""
+          fill=""
+          marker_fill=""
           while IFS= read -r version; do
             [ -z "$version" ] && continue
             target="launcher@${version}-offline"
             marker="offline-failed/${version}-${phash}"
             if gh release view "$target" -R "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | grep -qF "offline-phash:${phash}"; then
+              if ! gh release view "$target" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qx 'horizon-launcher-macos-arm64.zip'; then
+                marker_fill="offline-failed-fill/${version}-${phash}"
+                if [ "${RETRY:-}" != true ] && git ls-remote --exit-code --tags origin "refs/tags/${marker_fill}" >/dev/null 2>&1; then
+                  echo "released, but the macOS arm64 asset is missing and the marker tag ${marker_fill} says the arm64 build failed for real; fix it, change the patches/workflows, or run this workflow with retry"
+                  break
+                fi
+                echo "released, but the macOS arm64 asset is missing: building only the arm64 leg and uploading it into ${target}"
+                chosen="$version"
+                fill="$target"
+                break
+              fi
               echo "already released: ${target} with this exact patch set (offline-phash:${phash}); every older upstream version is covered by it"
               break
             fi
@@ -163,6 +182,10 @@ jobs:
             break
           done < /tmp/candidates.txt
           echo "alert=${alert}" >> "$GITHUB_OUTPUT"
+          echo "fill=${fill}" >> "$GITHUB_OUTPUT"
+          if [ -n "$chosen" ]; then
+            echo "marker_fill=offline-failed-fill/${chosen}-${phash}" >> "$GITHUB_OUTPUT"
+          fi
           if [ -z "$chosen" ]; then
             echo "::notice::nothing to build: the newest upstream release is already published, or every pending one is recorded as failed. If a newer upstream release stays unbuilt, rebase offline/patches/ onto it."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
@@ -230,6 +253,8 @@ jobs:
     uses: ./.github/workflows/launcher-release.yml
     with:
       ref: ${{ needs.sync.outputs.tag }}
+      only_arm64: ${{ needs.sync.outputs.fill != '' }}
+      upload_to: ${{ needs.sync.outputs.fill }}
     secrets: inherit
 
   alert:
@@ -248,7 +273,8 @@ jobs:
   remember-failure:
     name: remember the failed build
     needs: [sync, build]
-    if: ${{ always() && needs.build.result == 'failure' }}
+    # Fill mode has its own bookkeeping (watch-arm64): no marker or issue spam here.
+    if: ${{ always() && needs.build.result == 'failure' && needs.sync.outputs.fill == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -322,6 +348,106 @@ jobs:
                 echo "Deleting $tag"
                 gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" || true
               done
+
+  watch-arm64:
+    name: watch the arm64 leg
+    # The release itself no longer waits for the arm64 leg, so this job is what
+    # reacts to it: infra cancels are re-dispatched, real failures are marked
+    # (offline-failed-fill/...) and reported so the fill does not churn forever.
+    needs: [sync, build]
+    if: ${{ always() && needs.sync.outputs.should_build == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Mark real arm64 failures, re-dispatch infra cancels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARKER: ${{ needs.sync.outputs.marker_fill }}
+          SHA: ${{ needs.sync.outputs.sha }}
+          TAG: ${{ needs.sync.outputs.tag }}
+          FILL: ${{ needs.sync.outputs.fill }}
+          ATTEMPT: ${{ inputs.fill_attempt || '0' }}
+        run: |
+          set -euo pipefail
+          row=""
+          for i in 1 2 3 4 5; do
+            row=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+              --jq '.jobs[] | select(.name | test("macos-arm64")) | [(.conclusion // .status), (.steps | length)] | @tsv' 2>/dev/null | tail -1 || true)
+            [ -n "$row" ] && break
+            if [ "$i" -lt 5 ]; then sleep 20; fi
+          done
+          if [ -z "$row" ]; then
+            echo "::notice::could not read the arm64 leg's job record; leaving it to the scheduled runs"
+            exit 0
+          fi
+          concl=${row%%$'\t'*}
+          steps=${row##*$'\t'}
+          steps=${steps:-0}
+          echo "arm64 leg: conclusion=${concl:-unknown} steps=${steps}"
+          redispatch() {
+            next=$((ATTEMPT + 1))
+            if [ "$next" -gt 4 ]; then
+              echo "::notice::arm64 infra retry limit reached after ${ATTEMPT} attempts; the scheduled runs keep trying"
+              return 0
+            fi
+            echo "::notice::the arm64 leg never ran a step: GitHub infra failure. Re-dispatching in 15 minutes (attempt ${next}/4)"
+            sleep 900
+            gh workflow run auto-offline-release -R "$GITHUB_REPOSITORY" --ref main \
+              -f retry=false -f infra_attempt="$ATTEMPT" -f fill_attempt="$next"
+          }
+          case "$concl" in
+            success)
+              if [ -n "$FILL" ]; then
+                echo "::notice::the missing arm64 asset was built and uploaded into ${TAG}: the release is complete"
+              else
+                echo "::notice::macOS arm64 built: the release assets are complete"
+              fi
+              ;;
+            failure)
+              if [ "$steps" -eq 0 ]; then
+                redispatch
+              else
+                echo "::error::the macOS arm64 leg failed after running ${steps} step(s)"
+                gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f "ref=refs/tags/${MARKER}" -f "sha=${SHA}" >/dev/null || true
+                failed_log=""
+                for attempt in 1 2 3 4; do
+                  failed_log="$(gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --log-failed 2>/dev/null | grep -i 'macos-arm64' | tail -120 || true)"
+                  [ -n "$failed_log" ] && break
+                  sleep 20
+                done
+                {
+                  echo "The macOS (arm64) leg of ${TAG} failed after running real steps."
+                  echo
+                  echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+                  echo
+                  if [ -n "$failed_log" ]; then
+                    echo "<details open><summary>The arm64 leg's failed log (last 120 matching lines)</summary>"
+                    echo
+                    echo '```'
+                    printf '%s\n' "$failed_log"
+                    echo '```'
+                    echo '</details>'
+                    echo
+                  fi
+                  echo "The arm64 asset will not be rebuilt until the patches or workflows change, or this workflow runs with retry."
+                } > /tmp/arm64-issue.md
+                gh issue create -R "$GITHUB_REPOSITORY" \
+                  --title "Offline macOS arm64 build failed: ${TAG}" \
+                  --body-file /tmp/arm64-issue.md \
+                  >/dev/null 2>&1 || true
+              fi
+              ;;
+            cancelled)
+              if [ "$steps" -eq 0 ]; then
+                redispatch
+              else
+                echo "::notice::the arm64 leg was cancelled after ${steps} step(s): probably a manual cancel; not retrying"
+              fi
+              ;;
+            *)
+              echo "::notice::arm64 leg state '${concl:-unknown}': nothing to do"
+              ;;
+          esac
 
   retry-infra:
     name: retry a build GitHub cancelled before it started
