@@ -1,4 +1,6 @@
 from pathlib import Path
+import hashlib
+import io
 import json
 import os
 import shutil
@@ -90,6 +92,130 @@ class ParityRunnerTests(unittest.TestCase):
             ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-world", "--example", "a", "--example", "b",
              "--example", "old"],
         ])
+
+    def test_a_prebuild_cargo_run_says_where_its_time_went(self):
+        command = ["cargo", "build", "--locked", "--profile", "release", "-p", "horizon-world", "--features", "f",
+                   "--example", "a", "--example", "b", "--bins"]
+        # As Cargo prints them with CARGO_TERM_COLOR=always: a bold, coloured status word, then a reset.
+        lines = [(10.0, "\x1b[1m\x1b[36m    Blocking\x1b[0m waiting for file lock on package cache\n"),
+                 (12.0, "\x1b[1m\x1b[36m    Blocking\x1b[0m waiting for file lock on build directory\n"),
+                 (700.0, "\x1b[1m\x1b[92m   Compiling\x1b[0m serde v1.0.0\n"),
+                 (900.0, "\x1b[1m\x1b[32m   Compiling\x1b[0m horizon-world v0.1.0 (/w)\n"),
+                 (1000.0, "\x1b[1m\x1b[92m    Finished\x1b[0m `release` profile [optimized] target(s) in 16m 40s\n")]
+        expected = ("release -p horizon-world --features f --bins 2 targets: 1001s, 2 crates compiled, "
+                    "about 2s waiting for the package cache lock (to cargo's next line), "
+                    "about 688s waiting for the build directory lock (to cargo's next line)")
+        self.assertEqual(parity.describe_cargo_build(command, lines, 0.0, 1001.0), expected)
+        plain = [(at, parity.ANSI_ESCAPE.sub("", line)) for at, line in lines]
+        self.assertEqual(plain[2][1], "   Compiling serde v1.0.0\n")
+        self.assertEqual(parity.describe_cargo_build(command, plain, 0.0, 1001.0), expected)
+        # Still waiting when the run ended (it failed or was stopped).
+        self.assertEqual(parity.describe_cargo_build(["cargo", "build", "--locked", "--example", "a"],
+                                                     [(5.0, "Blocking waiting for file lock on build directory\n")],
+                                                     0.0, 65.0),
+                         "dev 1 target: 65s, 0 crates compiled, "
+                         "about 60s waiting for the build directory lock (to cargo's next line)")
+
+    def test_the_prebuild_still_returns_a_failed_runs_errors(self):
+        # Bytes UTF-8 can't decode must not stop the line reader (and with it the build).
+        script = ("import sys; print('Blocking waiting for file lock on build directory', file=sys.stderr, flush=True); "
+                  "sys.stderr.buffer.write(b'\\x1b[1m\\x1b[32m   Compiling\\x1b[0m x v1 \\x81\\xff\\x81\\n'); "
+                  "sys.stderr.flush(); sys.exit(1)")
+        with mock.patch.object(parity, "target_packages", return_value={}), \
+                mock.patch.object(parity, "prebuild_commands", return_value=[[sys.executable, "-c", script]]), \
+                mock.patch.object(parity, "sccache_stats", return_value=None), \
+                mock.patch.object(parity.locale, "getpreferredencoding", return_value="utf-8"), \
+                mock.patch("builtins.print") as printed:
+            built, errors = parity.prebuild([], 2)
+        self.assertFalse(built)
+        self.assertEqual(errors, "Blocking waiting for file lock on build directory\n"
+                                 "\x1b[1m\x1b[32m   Compiling\x1b[0m x v1 ���\n")  # colours kept here
+        self.assertIn("1 crate compiled", printed.call_args_list[0].args[0])
+        # The failure path prints them where the console can't encode U+FFFD (cp1252 on Windows).
+        with self.assertRaises(UnicodeEncodeError):
+            print(errors, file=io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+        console = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="\n")
+        with mock.patch.object(parity.sys, "stdout", console):
+            print(parity.printable(errors))
+        console.flush()
+        self.assertTrue(console.buffer.getvalue().endswith(b" x v1 ???\n\n"), console.buffer.getvalue())
+
+    def test_the_prebuild_machine_and_cache_lines(self):
+        self.assertEqual(parity.describe_machine(12, (3.14, 2.0, 1.0), (9.0, 6.5, 2.25)),
+                         "machine: 12 CPUs, load (1/5/15 min) at start 3.1 2.0 1.0, end 9.0 6.5 2.2")
+        self.assertEqual(parity.describe_machine(8, None, None), "machine: 8 CPUs")
+        self.assertEqual(parity.describe_sccache({"hits": 10, "misses": 5}, {"hits": 410, "misses": 7}),
+                         "compiler cache (whole sccache server): 400 hits, 2 misses")
+        for before in (None, {"hits": 500, "misses": 5}):  # none, or a server restarted meanwhile
+            self.assertEqual(parity.describe_sccache(before, {"hits": 410, "misses": 7}),
+                             "compiler cache: not in use, or its counts could not be read")
+
+    def test_sccache_counts_come_from_a_file_within_a_time_limit(self):
+        stats = (b"Compile requests                   500\nCache hits                         410\n"
+                 b"Cache hits (Rust)                  410\nCache misses                         7\n"
+                 b"Cache hits rate                  98.33 %\nCache location     /Users/\xff\n")
+
+        class FakeSccache:
+            """Popen as subprocess.run drives it; `stall` is what communicate raises before a kill."""
+            started, stall = [], None
+            stdin = stdout = stderr = None
+
+            def __init__(self, command, **options):
+                FakeSccache.started.append(self)
+                self.args = self.command = command
+                self.options, self.events = options, []
+                self.returncode, self.killed = None, False
+                options["stdout"].write(stats)  # a real file, not a pipe
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exception):
+                self.wait()
+
+            def communicate(self, input=None, timeout=None):
+                self.events.append(("communicate", timeout))
+                if FakeSccache.stall and not self.killed:
+                    raise FakeSccache.stall
+                self.returncode = -9 if self.killed else 0
+                return None, None
+
+            def kill(self):
+                self.events.append("kill")
+                self.killed = True
+
+            def wait(self, timeout=None):
+                self.events.append("wait")
+                self.returncode = -9 if self.killed else 0
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        with mock.patch.object(parity.subprocess, "Popen", FakeSccache):
+            self.assertEqual(parity.sccache_stats({"RUSTC_WRAPPER": "/opt/homebrew/bin/sccache"}),
+                             {"hits": 410, "misses": 7})
+            probe, = FakeSccache.started
+            self.assertEqual(probe.command, ["/opt/homebrew/bin/sccache", "--show-stats"])
+            self.assertNotEqual(probe.options["stdout"], subprocess.PIPE)
+            self.assertEqual(probe.events[0], ("communicate", 10))
+            self.assertIsNone(parity.sccache_stats({}))  # no wrapper: not asked
+            self.assertEqual(len(FakeSccache.started), 1)
+            # Past its 10 s: killed, then reaped (waited for) before giving up.
+            FakeSccache.stall = subprocess.TimeoutExpired("sccache", 10)
+            self.assertIsNone(parity.sccache_stats({"RUSTC_WRAPPER": "sccache"}))
+            probe = FakeSccache.started[-1]
+            self.assertEqual(probe.events[:2], [("communicate", 10), "kill"])
+            self.assertTrue(set(probe.events[2:]) & {"wait", ("communicate", None)}, probe.events)
+            self.assertEqual(probe.returncode, -9)
+            # An interrupt still ends the run, with the probe killed.
+            FakeSccache.stall = KeyboardInterrupt()
+            with self.assertRaises(KeyboardInterrupt):
+                parity.sccache_stats({"RUSTC_WRAPPER": "sccache"})
+            self.assertIn("kill", FakeSccache.started[-1].events)
+        for failure in (OSError, ValueError):
+            with mock.patch.object(parity.subprocess, "Popen", side_effect=failure):
+                self.assertIsNone(parity.sccache_stats({"RUSTC_WRAPPER": "sccache"}))
 
     def test_a_probe_binary_depends_only_on_the_probes_it_ran(self):
         commands = [["/t/release/examples/world_probe", "a_fixture", "/dir"],
@@ -663,6 +789,89 @@ class OracleReuseTests(unittest.TestCase):
         self.oracle(PARITY_SHIM_RUN="two")
         self.assertNotEqual(self.last()["call"], first)
 
+    def folder_oracle(self):
+        """A fake oracle given one folder (tools/test_food_parity.py's shape): it writes server.txt from inputs.txt, plus
+        "+tags" when a tags.json is beside it, and writes nothing (exiting 0) when the input is "skip"."""
+        fake = self.bin / "java"
+        fake.write_text(f"#!{sys.executable}\nimport sys, pathlib\n"
+                        "if sys.argv[1:] == ['-version']: sys.exit(print('fake java 1', file=sys.stderr))\n"
+                        "folder = pathlib.Path(sys.argv[1])\n"
+                        "text = (folder / 'inputs.txt').read_text()\n"
+                        "if text != 'skip':\n"
+                        "    (folder / 'server.txt').write_text(text + ('+tags' if (folder / 'tags.json').exists() else ''))\n"
+                        "print('done')\n")
+        fake.chmod(0o755)
+
+    def folder_harness(self, build, folder_for, text="cases", tags=False):
+        """One run of a harness around the fake folder oracle: its inputs written, the call's log truncated before the
+        call, then the Rust side's output and the report beside them. The call's folder and its decisions."""
+        build.mkdir(exist_ok=True)
+        inputs = [build / "inputs.txt"]
+        inputs[0].write_text(text)
+        if tags:
+            inputs.append(build / "tags.json")
+            inputs[1].write_text("{}")
+        folder = folder_for(build, inputs)
+        with (build / "server-server.log").open("w") as log:
+            self.subprocess.run(["java", str(folder)], env=self.env, stdout=log, stdin=self.subprocess.DEVNULL, check=True)
+        (build / "rust.txt").write_text("rust")
+        (build / "report.json").write_text("{}")
+        return folder, self.reasons()
+
+    @staticmethod
+    def own_folder(build, inputs):
+        from tools import oracle_folders
+        return oracle_folders.folder(build / "oracle-server", *inputs, call=("server",))
+
+    def test_a_call_in_an_oracle_folder_replays_while_the_harness_writes_around_it(self):
+        """Handed the work folder itself, the call never replays; handed a folder of its own (tools/oracle_folders.py),
+        it does from the second run, while the same inputs give the same folder."""
+        self.folder_oracle()
+        root = Path(self.temp.name)
+        shared = [self.folder_harness(root / "shared", lambda build, inputs: build) for _ in range(3)]
+        self.assertEqual([reasons for _, reasons in shared], [["no-record"], ["input-set"], ["output-stamp"]])
+        own = [self.folder_harness(root / "own", self.own_folder) for _ in range(3)]
+        self.assertEqual([reasons for _, reasons in own], [["no-record"], ["hit"], ["hit"]])
+        self.assertEqual(len({folder for folder, _ in own}), 1)
+        self.assertEqual((own[-1][0] / "server.txt").read_text(), "cases")
+
+    def test_a_call_with_other_inputs_runs_in_an_empty_folder(self):
+        # Its first call's output stays behind nowhere: a second call that writes none finds none.
+        self.folder_oracle()
+        build = Path(self.temp.name) / "build"
+        first, reasons = self.folder_harness(build, self.own_folder)
+        self.assertEqual(((first / "server.txt").read_text(), reasons), ("cases", ["no-record"]))
+        second, reasons = self.folder_harness(build, self.own_folder, text="skip")
+        self.assertEqual(reasons, ["no-record"])
+        self.assertNotEqual(second, first)
+        self.assertFalse(first.exists())
+        self.assertEqual(sorted(path.name for path in second.iterdir()), ["inputs.txt"])
+
+    def test_an_input_no_longer_given_is_not_in_the_folder(self):
+        self.folder_oracle()
+        build = Path(self.temp.name) / "build"
+        first, _ = self.folder_harness(build, self.own_folder, tags=True)
+        self.assertEqual((first / "server.txt").read_text(), "cases+tags")
+        second, reasons = self.folder_harness(build, self.own_folder)
+        self.assertEqual(reasons, ["no-record"])
+        self.assertFalse((second / "tags.json").exists())
+        self.assertEqual((second / "server.txt").read_text(), "cases")
+
+    def test_jvm_options_from_the_environment_give_another_folder(self):
+        # They can change what an oracle writes (VanillaCollisionOracle's horizon.prepare.reuse), and the shim runs such
+        # a call each time: it must not find the outputs of a call without them.
+        from tools import oracle_folders
+        self.assertEqual(oracle_folders.UNKEYED, UNKEYED_VARIABLES)
+        build = Path(self.temp.name) / "build"
+        build.mkdir()
+        (build / "inputs.txt").write_text("cases")
+        plain = self.own_folder(build, [build / "inputs.txt"])
+        (plain / "server.txt").write_text("cases")
+        with mock.patch.dict(os.environ, {"JAVA_TOOL_OPTIONS": "-Dhorizon.prepare.reuse=true"}):
+            reusing = self.own_folder(build, [build / "inputs.txt"])
+        self.assertNotEqual(reusing, plain)
+        self.assertEqual(sorted(path.name for path in reusing.iterdir()), ["inputs.txt"])
+
     def test_a_java_killed_by_a_signal_gives_the_same_status_keyed_or_not(self):
         # 256 - 9, as the shim's run of a recorded call has always given; the new passthroughs keep it.
         self.input.write_text("kill")
@@ -889,6 +1098,237 @@ class OracleReuseTests(unittest.TestCase):
         self.assertEqual(self.oracle(HORIZON_PHASE="terrain", HORIZON_ORDER=str(order), SOMETHING_NEW="1"), 4)
         self.assertEqual(self.oracle(HORIZON_PHASE="terrain", HORIZON_ORDER=str(order), SOMETHING_NEW="1"), 4)
         self.assertEqual(self.reasons(), ["environment", "environment", "environment", "hit"])
+
+    def test_a_call_on_another_hosted_runner_replays(self):
+        # A Blacksmith runner sets these per VM (its name and id, its Turborepo cache's address and token, and two
+        # undocumented ones): two runners' calls that differ only in them are the same call.
+        first = dict(PETNAME="calm-otter", VM_ID="vm-1", TURBO_API="http://10.0.0.1:1", TURBO_TOKEN="a",
+                     GIT_MIRROR_PROXY_URL="http://10.0.0.1:3", METADATA_PORT="1")
+        second = dict(PETNAME="brisk-heron", VM_ID="vm-2", TURBO_API="http://10.0.0.2:2", TURBO_TOKEN="b",
+                      GIT_MIRROR_PROXY_URL="http://10.0.0.2:4", METADATA_PORT="2")
+        self.assertEqual(self.oracle(**first), 1)
+        self.assertEqual(self.oracle(**second), 1)
+        # Only those names: a variable that merely starts like one is still in the key.
+        self.assertEqual(self.oracle(**second, TURBO_TEAM="x"), 2)
+        self.assertEqual(self.last()["variables"], ["TURBO_TEAM"])
+        self.assertEqual(self.reasons(), ["no-record", "hit", "environment"])
+
+    def test_a_record_cut_short_is_a_miss_and_not_a_failure(self):
+        # As a cache entry restored in part leaves it: the call runs again, records anew, then replays.
+        cache = Path(self.env["PARITY_SHIM_CACHE"])
+        self.assertEqual(self.oracle(), 1)
+        record = next(cache.glob("*.json"))
+        damages = [lambda: record.with_suffix(".stdout").unlink(), lambda: record.with_suffix(".stderr").unlink(),
+                   lambda: record.write_text(record.read_text()[:20]), lambda: record.write_text('{"inputs": []}')]
+        for runs, damage in enumerate(damages, 2):
+            damage()
+            self.assertEqual(self.oracle(), runs)
+        self.assertEqual(self.oracle(), 5)
+        self.assertEqual(self.reasons(), ["no-record", *["incomplete-record"] * 4, "hit"])
+
+    def test_a_stream_that_is_not_the_records_is_a_miss(self):
+        # The record stamps each stream's length and SHA-256: one cut short, swapped, or of another write of the same
+        # call is a miss (and is recorded anew), never replayed. A record from before the stamps is a miss too.
+        cache = Path(self.env["PARITY_SHIM_CACHE"])
+        self.assertEqual(self.oracle(), 1)
+        record = next(cache.glob("*.json"))
+        stdout, stderr = record.with_suffix(".stdout"), record.with_suffix(".stderr")
+        self.assertEqual(json.loads(record.read_text())["streams"]["stdout"],
+                         [5, hashlib.sha256(b"done\n").hexdigest()])
+
+        def swap():
+            first, second = stdout.read_bytes(), stderr.read_bytes()
+            stdout.write_bytes(second)
+            stderr.write_bytes(first)
+
+        def unstamped():
+            saved = json.loads(record.read_text())
+            del saved["streams"]
+            record.write_text(json.dumps(saved))
+
+        damages = [lambda: stdout.write_bytes(b"do"), swap, lambda: stdout.write_bytes(b"dXne\n"),
+                   lambda: stderr.write_bytes(b"x"), unstamped]
+        for runs, damage in enumerate(damages, 2):
+            damage()
+            self.assertEqual(self.oracle(), runs)
+        self.assertEqual(self.oracle(), 6)
+        self.assertEqual(self.reasons(), ["no-record", *["incomplete-record"] * 5, "hit"])
+
+    def test_a_record_is_written_after_its_streams_and_a_crash_between_never_replays_wrong_output(self):
+        from tools import parity_shim
+
+        class Crash(Exception):
+            pass
+
+        def state(key, record):
+            saved = parity_shim.recorded(record)
+            return None if saved is None else parity_shim.replayable(key, saved)
+
+        def document(streams):
+            return {"inputs": {}, "outputs": {}, "streams": {name: parity_shim.stream_stamp(data)
+                                                             for name, data in zip(parity_shim.STREAMS, streams)}}
+
+        old, new = [b"old out\n", b"old err\n"], [b"new out\n", b"new err\n"]
+        # After how many renames the write stops: 0 (none), 1 (stdout), 2 (both streams), 3 (all, no crash).
+        for old_streams, renames, expected in [(old, 0, old), (old, 1, None), (old, 2, None), (old, 3, new),
+                                               (None, 0, None), (None, 1, None), (None, 2, None), (None, 3, new)]:
+            with self.subTest(old=bool(old_streams), renames=renames), tempfile.TemporaryDirectory() as temp, \
+                    mock.patch.object(parity_shim, "CACHE", Path(temp)):
+                key, record = "k", Path(temp) / "k.json"
+                if old_streams:
+                    parity_shim.publish(key, record, old_streams, document(old_streams))
+                replace, done = Path.replace, []
+
+                def stopping(path, target):
+                    if len(done) == renames:
+                        raise Crash()
+                    done.append(target)
+                    return replace(path, target)
+
+                with mock.patch.object(Path, "replace", stopping):
+                    try:
+                        parity_shim.publish(key, record, new, document(new))
+                    except Crash:
+                        pass
+                # Streams first, the record last; no temporary file is left.
+                self.assertEqual([path.name for path in done], ["k.stdout", "k.stderr", "k.json"][:renames])
+                self.assertEqual(sorted(path.name for path in Path(temp).iterdir() if path.suffix == ".tmp"), [])
+                self.assertEqual(state(key, record), expected)
+
+    def test_a_hash_database_that_fails_is_left_alone_and_files_are_hashed_directly(self):
+        # Another shim may still have it open: a shim never removes or remakes it, and from its first failure on
+        # hashes every file itself, a miss and never a failure.
+        import sqlite3
+        from tools import parity_shim
+        expected = hashlib.sha256(Path(parity_shim.__file__).read_bytes()).hexdigest()
+
+        class Failing:
+            """A connection whose every statement meets a damaged page."""
+            def execute(self, *args):
+                raise sqlite3.DatabaseError("database disk image is malformed")
+
+            def commit(self):
+                raise sqlite3.DatabaseError("database disk image is malformed")
+
+            def close(self):
+                pass
+
+        class FailingStore(Failing):
+            def execute(self, statement, *args):
+                if statement.startswith("select"):
+                    return sqlite3.connect(":memory:").execute("select 1 where 0")
+                return super().execute(statement, *args)
+
+        class Busy(Failing):
+            def execute(self, *args):
+                raise sqlite3.OperationalError("database is locked")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity_shim, "CACHE", Path(temp) / "cache"):
+            path = parity_shim.CACHE / "hashes.sqlite"
+            hashes = parity_shim.Hashes()
+            hashes.db.execute("insert into hashes values ('marker', 0, 0, 'x')")
+            hashes.db.commit()
+            hashes.close()
+            for failing in (Failing, FailingStore, Busy):
+                with self.subTest(failing.__name__):
+                    hashes = parity_shim.Hashes()
+                    hashes.db.close()
+                    hashes.db = failing()
+                    self.assertEqual(hashes.file(parity_shim.__file__), expected)
+                    self.assertIsNone(hashes.db)
+                    self.assertEqual(hashes.file(parity_shim.__file__), expected)
+                    # The database is as it was: nothing removed or made again.
+                    db = sqlite3.connect(path)
+                    self.assertEqual(db.execute("select sha from hashes where path = 'marker'").fetchone(), ("x",))
+                    db.close()
+            # A file that is no database at all, as a restore cut short leaves it: left as it is.
+            for name in ("hashes.sqlite-wal", "hashes.sqlite-shm"):
+                (parity_shim.CACHE / name).unlink(missing_ok=True)
+            garbage = b"not a database" * 512
+            path.write_bytes(garbage)
+            hashes = parity_shim.Hashes()
+            self.assertIsNone(hashes.db)
+            self.assertEqual(hashes.file(parity_shim.__file__), expected)
+            self.assertEqual(path.read_bytes(), garbage)
+
+    def test_a_damaged_hash_database_is_removed_before_the_shims_start_only_by_a_run_owning_the_cache(self):
+        import sqlite3
+        from tools import parity_shim
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity_shim, "CACHE", Path(temp) / "cache"):
+            cache = parity_shim.CACHE
+            path = cache / "hashes.sqlite"
+            parity.check_oracle_hashes(cache, repair=True)  # none yet: nothing to do
+            self.assertFalse(path.exists())
+            hashes = parity_shim.Hashes()
+            hashes.db.execute("insert into hashes values ('marker', 0, 0, 'x')")
+            hashes.db.commit()
+            hashes.close()
+            # A sound one is kept.
+            parity.check_oracle_hashes(cache, repair=True)
+            db = sqlite3.connect(path)
+            self.assertEqual(db.execute("select sha from hashes where path = 'marker'").fetchone(), ("x",))
+            # One locked by another process, or not checked in time, is left as it is.
+            db.execute("begin exclusive")
+            parity.check_oracle_hashes(cache, repair=True)
+            db.execute("rollback")
+            db.close()
+            parity.check_oracle_hashes(cache, repair=True, seconds=-1)
+            self.assertTrue(path.exists())
+            # One that is no database: without repair (another parity run in the checkout may have it open) only
+            # named, every file kept; with repair removed with its WAL files, and the first shim makes it again.
+            path.write_bytes(b"not a database" * 512)
+            (cache / "hashes.sqlite-wal").write_bytes(b"x")
+            (cache / "hashes.sqlite-shm").write_bytes(b"x")
+            with mock.patch("builtins.print") as said:
+                parity.check_oracle_hashes(cache)
+            self.assertIn("is damaged: left as it is", said.call_args.args[0])
+            # (SQLite itself may drop an invalid -wal on closing its connection, only when no other has it open.)
+            self.assertEqual(path.read_bytes(), b"not a database" * 512)
+            for name in ("hashes.sqlite-wal", "hashes.sqlite-shm"):
+                (cache / name).write_bytes(b"x")
+            parity.check_oracle_hashes(cache, repair=True)
+            self.assertEqual(sorted(p.name for p in cache.iterdir() if p.name.startswith("hashes.sqlite")), [])
+            hashes = parity_shim.Hashes()
+            self.assertTrue(parity_shim.in_wal_mode(path))
+            hashes.close()
+            # One with a damaged page: a page of the table overwritten.
+            db = sqlite3.connect(path)
+            db.execute("pragma journal_mode=delete")
+            db.executemany("insert into hashes values (?, 0, 0, 'x')", ((f"p{i:06d}",) for i in range(5000)))
+            db.commit()
+            db.close()
+            data = bytearray(path.read_bytes())
+            data[4096 * 3:4096 * 3 + 512] = b"\xff" * 512
+            path.write_bytes(bytes(data))
+            parity.check_oracle_hashes(cache)
+            self.assertTrue(path.exists())
+            parity.check_oracle_hashes(cache, repair=True)
+            self.assertFalse(path.exists())
+        # Repair only when the caller says so: tools/parity.py's run takes it from PARITY_REPAIR_ORACLE_HASHES=1, which
+        # only parity-hosted.yml sets (tests/test_ci_runners.py).
+        self.assertIn('check_oracle_hashes(STATE_DIR / "oracle-cache", '
+                      'os.environ.get("PARITY_REPAIR_ORACLE_HASHES") == "1")',
+                      Path(parity.__file__).read_text(encoding="utf-8"))
+
+    def test_a_damaged_hash_database_never_fails_the_call(self):
+        cache = Path(self.env["PARITY_SHIM_CACHE"])
+        cache.mkdir()
+        (cache / "hashes.sqlite").write_bytes(b"\x00garbage" * 1024)
+        self.assertEqual(self.oracle(), 1)
+        self.assertEqual(self.oracle(), 1)
+        self.assertEqual(self.reasons(), ["no-record", "hit"])
+        # The shims left it as it was: tools/parity.py removes it before the next run's shims start.
+        self.assertEqual((cache / "hashes.sqlite").read_bytes(), b"\x00garbage" * 1024)
+
+    def test_an_environment_miss_names_every_variable_that_differs(self):
+        # Against the last run of the same command line: one changed, one added, one gone, and an ignored one that
+        # changed too, which is not named. Names only: no value reaches the line.
+        self.assertEqual(self.oracle(HORIZON_PHASE="full", HORIZON_A="1", HORIZON_GONE="x", VM_ID="vm-1"), 1)
+        self.assertEqual(self.oracle(HORIZON_PHASE="terrain", HORIZON_A="1", HORIZON_NEW="y", VM_ID="vm-2"), 2)
+        line = self.last()
+        self.assertEqual(line["reason"], "environment")
+        self.assertEqual(line["variables"], ["HORIZON_GONE", "HORIZON_NEW", "HORIZON_PHASE"])
+        self.assertNotIn("terrain", json.dumps(line))
 
     def test_a_datapack_folder_is_keyed_through_its_linked_folders(self):
         root = self.input.parent.parent

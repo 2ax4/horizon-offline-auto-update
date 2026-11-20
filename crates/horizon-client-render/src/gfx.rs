@@ -338,6 +338,20 @@ fn translucent_batchable(info: &wgpu::AdapterInfo, multi_draw: bool) -> bool {
     multi_draw && info.backend != wgpu::Backend::Gl
 }
 
+/// Whether the per-section translucent draws read their vertices from the arena page
+/// (`vs_section`), as the solid ones do: on OpenGL without indirect multi-draws, where the
+/// device has flat page groups. There each section is a draw of its own with its
+/// `first_instance`, which wgpu emulates by binding the origins again at an offset, and AMD's
+/// last driver for the Radeon HD 5000 series (15.200) drew water and glass with the vertex
+/// buffer's attributes other than the position read from the wrong place, in every section
+/// but the nearest, instance 0 (#18478; the driver's defect itself is not confirmed). The
+/// solid draws, which read the page, were right. Translucent Batching is never offered there
+/// (`translucent_batchable`), so the quads are in the section arena, whose pages the groups
+/// bind.
+fn translucent_pulled(info: &wgpu::AdapterInfo, multi_draw: bool, flat_page_groups: bool) -> bool {
+    info.backend == wgpu::Backend::Gl && !multi_draw && flat_page_groups
+}
+
 /// The vertices flat draws bind for a call's page key: a page of the section arena, or of
 /// the translucent arena up to its last range in use (`flat::TRANSLUCENT_KEYS`).
 fn flat_vertices<'a>(
@@ -402,8 +416,10 @@ impl<'a> SectionLists<'a> {
                 let translucent = self.translucent_arena.is_some() && index_page.is_some();
                 pass.set_bind_group(looks::GROUP, looks.page(page, translucent), &[]);
             }
+            // The page's group, for draws whose quads are in the section arena: the solid
+            // ones, and the translucent ones without an arena of their own.
             if pulled
-                && index_page.is_none()
+                && (index_page.is_none() || self.translucent_arena.is_none())
                 && let Some(group) = self.flat.and_then(|f| f.page_group(page))
             {
                 pass.set_bind_group(1, group, &[]);
@@ -496,6 +512,7 @@ mod displace;
 mod frame_policy;
 pub mod lightning;
 mod linear_blend;
+pub mod ray_lights;
 #[cfg(test)]
 use frame_policy::frame_format;
 use frame_policy::{frame_configuration, hand_depth_store, horizon_tone_curve, overlay_format};
@@ -1735,7 +1752,7 @@ pub struct Renderer {
     /// Changes whenever `block_entities` does (unique across renderers).
     block_entity_revision: u64,
     /// The light sources of each section and their revision, for `block_light`.
-    light_blocks: FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+    light_blocks: block_light::SectionLights,
     light_revision: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     occlusion: occlusion::Occlusion,
@@ -4251,6 +4268,28 @@ impl Renderer {
             .features()
             .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && indirect_execution;
+        let translucent = match &flat {
+            Some(f) if translucent_pulled(&adapter.get_info(), multi_draw, true) => {
+                let layout = kept.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Horizon terrain layout (pulled)"),
+                    bind_group_layouts: &[Some(&bindings), Some(&f.draw_layout)],
+                    ..Default::default()
+                });
+                pipeline_in(
+                    &layout,
+                    "Terrain translucent (pulled)",
+                    "vs_section",
+                    "fs_translucent",
+                    &[None, terrain_buffers[1].clone()],
+                    tri,
+                    Some(wgpu::Face::Back),
+                    true,
+                    true,
+                    Some(alpha_blend),
+                )
+            }
+            _ => translucent,
+        };
         let batchable = translucent_batchable(&adapter.get_info(), multi_draw);
         crate::graphics::offer_translucent_batching(batchable);
         let translucent_batching = batchable && translucent_batching;
@@ -5470,6 +5509,11 @@ impl Renderer {
     ) {
         self.draw_sections_from(pass, indirect, base, first, count, self.flat.is_some());
     }
+    /// Whether `translucent` reads the arena page itself (`translucent_pulled`): its draws
+    /// then bind each page's group, as `draw_solid_sections` does.
+    fn translucent_pulled(&self) -> bool {
+        translucent_pulled(&self.info, self.multi_draw, self.flat.is_some())
+    }
     fn draw_sections_from(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -5795,6 +5839,8 @@ impl Renderer {
         self.newest_upload = None;
         self.newest_lod_fade = None;
         self.block_entity_revision = next_block_entity_revision();
+        self.light_blocks.clear();
+        self.light_revision += 1;
         self.sections.clear();
         self.ray_clear();
         self.lods.clear();
@@ -6703,7 +6749,8 @@ impl Renderer {
             Vec<(String, f64)>,
             Vec<(u32, u32)>,
             Vec<(u32, u32)>,
-            block_light::LightTable,
+            // The `[[lights]]` colours, and the light sources rays read (`NativePack::new`).
+            (block_light::LightTable, ray_lights::Sources),
         )>,
     ) -> std::result::Result<Vec<String>, String> {
         self.world_held = false;
@@ -9410,6 +9457,7 @@ impl Renderer {
                 output: &output,
                 lights: &self.light_blocks,
                 light_revision: self.light_revision,
+                min_y: self.layout.min_y(),
                 sky_visible,
                 scene: self.ray_scene.as_ref(),
                 lightmap: &self.lightmap_pixels,
@@ -10633,12 +10681,14 @@ impl Renderer {
                     pass.set_pipeline(translucent_pipeline);
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.set_vertex_buffer(1, self.instances.slice(..));
-                    self.draw_sections(
+                    self.draw_sections_from(
                         &mut pass,
                         &self.indirect,
                         0,
                         solid_draws,
                         translucent_draws,
+                        // A shader pack's own translucent pipeline takes the vertex buffer.
+                        material.is_none() && self.translucent_pulled(),
                     );
                     pass.split(self.own_timing.as_mut(), "after translucent");
                 }
@@ -12048,6 +12098,23 @@ mod tests {
         assert!(batchable(&metal, true));
         assert!(!batchable(&vulkan, false));
         assert!(!batchable(&gl, true));
+    }
+
+    /// #18478: translucent sections read the arena page only on OpenGL without indirect
+    /// multi-draws (a Radeon HD 5500's last driver), with the page groups they bind; every
+    /// other device keeps its vertex buffer draws.
+    #[test]
+    fn translucent_sections_read_the_page_on_opengl_without_indirect_multi_draws() {
+        let vulkan = adapter(wgpu::DeviceType::DiscreteGpu);
+        let mut gl = adapter(wgpu::DeviceType::DiscreteGpu);
+        gl.backend = wgpu::Backend::Gl;
+        let pulled = super::translucent_pulled;
+        assert!(pulled(&gl, false, true));
+        assert!(!pulled(&gl, true, true));
+        assert!(!pulled(&gl, false, false));
+        assert!(!pulled(&vulkan, false, true));
+        // Their quads are in the section arena there: Translucent Batching is not offered.
+        assert!(!super::translucent_batchable(&gl, false));
     }
 
     /// GPU culling is offered where the device draws counts the GPU wrote and runs compute
