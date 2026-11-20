@@ -7128,7 +7128,7 @@ pub fn {f}("
             "prerelease": true,
             "assets": [],
         }]);
-        let r = &parse_releases(&list, None, |_| true)[0];
+        let r = &parse_releases(REPO, &list, None, |_| true)[0];
         assert_eq!((r.date.as_str(), r.time.as_str()), ("2026-11-20", "02:32"));
         let nightly = Release {
             nightly: Some(r.tag.clone()),
