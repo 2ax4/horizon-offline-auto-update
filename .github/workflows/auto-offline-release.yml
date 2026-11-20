@@ -9,6 +9,10 @@ on:
         description: 'Retry versions that already failed with these patches'
         type: boolean
         default: false
+      infra_attempt:
+        description: Internal infra-failure retry counter set by the workflow itself
+        type: string
+        default: '0'
   push:
     branches: [main]
 
@@ -318,3 +322,37 @@ jobs:
                 echo "Deleting $tag"
                 gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" || true
               done
+
+  retry-infra:
+    name: retry a build GitHub cancelled before it started
+    needs: [sync, build]
+    if: ${{ always() && (needs.build.result == 'cancelled' || needs.build.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Re-dispatch when no failing job actually ran
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.infra_attempt || '0' }}
+        run: |
+          set -euo pipefail
+          ran=0
+          for i in 1 2 3 4 5; do
+            out=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
+              --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name, (.steps | length)] | @tsv' 2>/dev/null) || out=""
+            ran=$(printf '%s\n' "$out" | awk -F'\t' '{s+=$2} END{print s+0}')
+            if [ "$ran" -gt 0 ]; then break; fi
+            if [ "$i" -lt 5 ]; then sleep 20; fi
+          done
+          if [ "$ran" -gt 0 ]; then
+            echo "::notice::a failing or cancelled job ran ${ran} step(s): a real failure or a manual cancel, not retrying"
+            exit 0
+          fi
+          next=$((ATTEMPT + 1))
+          if [ "$next" -gt 4 ]; then
+            echo "::notice::infra retry limit reached after ${ATTEMPT} attempts; the scheduled runs keep trying"
+            exit 0
+          fi
+          echo "::notice::no failing job ran any step: GitHub infra failure (macos arm64 runner capacity or internal error). Re-dispatching in 15 minutes, attempt ${next}/4"
+          sleep 900
+          gh workflow run auto-offline-release -R "$GITHUB_REPOSITORY" --ref main -f retry=false -f infra_attempt="$next"
