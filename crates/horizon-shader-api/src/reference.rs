@@ -2,7 +2,8 @@
 //! (`tests/reference.rs` fails when the file drifts).
 use crate::check::{MAX_EXPRESSIONS, MAX_TEXTURE_READS};
 use crate::inputs::{
-    COMPUTE_INPUT, DISPLACEMENT_INPUT, Frame, RAY_HIT, SHADED_TINT, SURFACE, Struct,
+    COMPUTE_INPUT, DISPLACEMENT_INPUT, Frame, LIT_TINT, MATERIAL_INPUT, RAY_HIT, SHADED_TINT,
+    SURFACE, Struct,
 };
 use crate::kept::{
     Element, Format, MAX_BEFORE_WORLD, MAX_BUFFER_BYTES, MAX_COMPUTE_POST,
@@ -15,8 +16,8 @@ use crate::manifest::{
 use crate::package::{MAX_TOTAL, MAX_WGSL};
 use crate::stages::{
     GROUP, KEPT_BINDING, MOTION_BINDING, PBR_NORMALS_BINDING, PBR_SPECULAR_BINDING,
-    RAY_ENTITY_RETAINED_BINDING, RAY_ENTITY_STORE_BINDING, RAY_SCENE_BINDING, RAY_SPRITE_ARRAYS,
-    RAY_SPRITES_BINDING, StageKind,
+    RAY_ENTITY_RETAINED_BINDING, RAY_ENTITY_STORE_BINDING, RAY_LOOKS_BINDING, RAY_SCENE_BINDING,
+    RAY_SPRITE_ARRAYS, RAY_SPRITES_BINDING, StageKind,
 };
 
 fn table(s: &Struct, offsets: Option<&[usize]>) -> String {
@@ -40,14 +41,25 @@ fn table(s: &Struct, offsets: Option<&[usize]>) -> String {
 
 /// `table` with `SHADED_TINT` as the last row: the struct ends with it in a pack that names it.
 fn shaded_table(s: &Struct) -> String {
+    input_table(s, true)
+}
+
+/// `table` with the rows of the fields a pack's files may add (`inputs::light_source`,
+/// `LIT_TINT` in `MaterialInput`, then `SHADED_TINT` where `shaded`), in the order the struct
+/// has them.
+fn input_table(s: &Struct, shaded: bool) -> String {
     let mut out = table(s, None);
     out.pop();
-    out + &format!(
-        "| `{}` | `{}` | {} |\n\n",
-        SHADED_TINT.name,
-        SHADED_TINT.ty,
-        one_line(SHADED_TINT.doc)
-    )
+    let lit = (s.name == MATERIAL_INPUT.name).then_some(&LIT_TINT);
+    let shaded = shaded.then_some(&SHADED_TINT);
+    for f in crate::inputs::light_source(s)
+        .iter()
+        .chain(lit)
+        .chain(shaded)
+    {
+        out += &format!("| `{}` | `{}` | {} |\n", f.name, f.ty, one_line(f.doc));
+    }
+    out + "\n"
 }
 
 fn one_line(doc: &str) -> String {
@@ -219,8 +231,9 @@ fn ray_tracing() -> String {
     out += &format!(
         "Bindings {RAY_SCENE_BINDING} to {} of group {GROUP} hold the scene while the game traces ({RAY_ENTITY_STORE_BINDING} to\n\
          {RAY_ENTITY_RETAINED_BINDING} the entity layer, for a pack that names it), and in a post, compute or `[[before_world]]` pass bindings\n\
-         {PBR_NORMALS_BINDING} and {PBR_SPECULAR_BINDING} the LabPBR maps (the material stage has them there already). They are Horizon's, as their\n\
-         `horizon_` names say, and change with the renderer.\n\n",
+         {PBR_NORMALS_BINDING} and {PBR_SPECULAR_BINDING} the LabPBR maps (the material stage has them there already).\n\
+         Binding {RAY_LOOKS_BINDING} holds terrain hit looks for a stage that reads `RayHit.tint`, `shade` or `ao` from its entry point.\n\
+         These bindings are Horizon's, as their `horizon_` names say, and change with the renderer.\n\n",
         RAY_SPRITES_BINDING + RAY_SPRITE_ARRAYS - 1
     );
     out
@@ -454,11 +467,10 @@ pub fn markdown() -> String {
     out += "\n";
     for kind in StageKind::ALL {
         out += &format!("## {}\n\n`{}`\n\n", kind.name(), kind.signature());
-        out += &if matches!(kind, StageKind::Material | StageKind::Vertex) {
-            shaded_table(kind.input())
-        } else {
-            table(kind.input(), None)
-        };
+        out += &input_table(
+            kind.input(),
+            matches!(kind, StageKind::Material | StageKind::Vertex),
+        );
         if kind == StageKind::Entity {
             out += ENTITY_NOTES;
         }
@@ -551,6 +563,13 @@ pub fn markdown() -> String {
             `previous` as it is. A temporal pass cannot do what TAA does here, even though a kept resource and\n\
             `frame.previous_view_projection` give it the last frame: nothing moves the camera by a fraction of a texel from one\n\
             frame to the next, so a still camera gives it the same picture twice and there is no sub-pixel detail to gather.\n\n\
+            A pack without `[[post]]` whose frame holds gamma light (not `blend = \"linear\"` on the float frame) gets the\n\
+            player's FXAA or TAA: with `fxaa` or `taa` on, Horizon anti-aliases the world at the world's size, in the frame's\n\
+            encoding, before the pack's `[tonemap]` (or Horizon's curve) reads it. TAA jitters the world's projection by\n\
+            `frame.jitter`, and its history starts over when the pack is loaded or rebuilt and when the display's values\n\
+            change. TAA upscaling and its sharpening stay off, and `resolutionScale` still reaches the window through the tone\n\
+            curve's read. Under any other pack TAA is off.\n\n\
+            A pack must never write an infinite value into the world's frame: TAA's history would carry it.\n\n\
             Without a pack the settings apply as the player set them.\n\n";
     out += &format!(
         "## Options\n\n\

@@ -336,6 +336,17 @@ pub fn clear_log() -> Result<(), String> {
     fs::write(log_path(), "").map_err(|e| format!("{}: {e}", log_path().display()))
 }
 
+/// Starts a build attempt's log from the window: [`clear_log`] under the build lease, so a
+/// build or cleanup already holding it keeps its log, result included (#18469). `Ok(false)`
+/// when one does: the attempt will be refused as busy and leaves the log alone.
+pub fn begin_log() -> Result<bool, String> {
+    match crate::native_cache::Cache::acquire(&backend::build_dir()) {
+        Err(crate::native_cache::Error::Busy) => Ok(false),
+        // Any other failure is the build's to report; the log is still this attempt's.
+        _lease => clear_log().map(|()| true),
+    }
+}
+
 /// Appends `message` (with a newline) to the build log, so a failure that happens before any
 /// command runs is still recorded.
 pub fn append_log(message: &str) -> Result<(), String> {
@@ -367,11 +378,7 @@ fn logged<T, E: std::fmt::Display + From<String>>(
         log_warning(warning);
     }
     let result = build(cache.as_ref().map_err(String::as_str));
-    // Keep this build lease through installation/export, including failed builds. It does not
-    // exclude independent game starts; automatic trimming can conservatively retain the cache.
-    if let Ok(cache) = cache {
-        crate::storage::eviction::after_build_logged(&cache, append_log, log_warning);
-    }
+    // The result is written first: the cleanup below can take long on big caches.
     match &result {
         Ok(_) => {
             let _ = append_log("Build completed.");
@@ -379,6 +386,11 @@ fn logged<T, E: std::fmt::Display + From<String>>(
         Err(error) => {
             let _ = append_log(&format!("The build failed: {error}"));
         }
+    }
+    // Keep this build lease through installation/export, including failed builds. It does not
+    // exclude independent game starts; automatic trimming can conservatively retain the cache.
+    if let Ok(cache) = cache {
+        crate::storage::eviction::after_build_logged(&cache, append_log, log_warning);
     }
     result
 }
@@ -405,6 +417,10 @@ pub fn cache_error(error: crate::storage::Error) -> String {
             "An older game build can use this cache without runtime leases.",
         )
         .into(),
+        crate::native_cache::Error::Dependent(build) => trf(
+            "This version supplies resources to native build {build}. Remove that build first.",
+            &[("build", &build)],
+        ),
         crate::native_cache::Error::UnsupportedFilesystem => {
             tr("Game cache leases require a supported local filesystem.").into()
         }
@@ -427,9 +443,10 @@ const NATIVE_MANIFEST: &str = horizon_platform::mod_package::manifest::MANIFEST;
 pub const INSTALLED: &str = horizon_platform::mod_package::mod_list::NATIVE_DIR;
 
 /// The native mods turned on in the game folder `home`, unpacked into a folder [`build`] takes.
-/// Each flat `.hmod` passes the registry's shared package boundary; no code is run.
+/// Each flat `.hmod` passes the registry's shared package boundary; no code is run. Each one in
+/// the format from before the SDK is left out ([`warn_legacy`] says so in the build's log).
 pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
-    stage_installed(home, root().join("installed.incoming"))?.ok_or_else(|| {
+    stage_installed(home, installed_incoming())?.ok_or_else(|| {
         format!(
             "No native mod is turned on in {}: install one from the Mods page first.",
             home.join(INSTALLED).display()
@@ -437,18 +454,43 @@ pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
     })
 }
 
-/// [`installed_mods`] into `out`, which it empties first.
-pub(crate) fn stage_installed(home: &Path, out: PathBuf) -> Result<Option<PathBuf>, String> {
-    let _ = fs::remove_dir_all(&out);
+fn installed_incoming() -> PathBuf {
+    root().join("installed.incoming")
+}
+
+/// Warns in the build log of each native mod in `home` in the format from before the SDK, which
+/// [`stage_installed`] left out of the build.
+fn warn_legacy(home: &Path) {
+    for path in installed_files(home) {
+        if crate::native_status::legacy_format(&path) {
+            log_warning(&crate::i18n::trf(
+                "{file} is a native mod in the old format and is left out of this build: it needs a version made for the new SDK.",
+                &[("file", &path.display().to_string())],
+            ));
+        }
+    }
+}
+
+fn installed_files(home: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = fs::read_dir(home.join(INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
     paths.retain(|p| p.extension().is_some_and(|e| e == "hmod"));
     paths.sort();
+    paths
+}
+
+/// [`installed_mods`] into `out`, which it empties first. A `.hmod` in the format from before the
+/// SDK is left out, untouched: no build can take it, and it must not stop the others.
+pub(crate) fn stage_installed(home: &Path, out: PathBuf) -> Result<Option<PathBuf>, String> {
+    let _ = fs::remove_dir_all(&out);
     let mut count = 0;
-    for path in paths {
-        let bundle = horizon_platform::mod_package::index::native::Bundle::read(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+    for path in installed_files(home) {
+        let bundle = match horizon_platform::mod_package::index::native::Bundle::read(&path) {
+            Ok(bundle) => bundle,
+            Err(_) if crate::native_status::legacy_format(&path) => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
         if !crate::browser::java::is_enabled(home, &bundle.manifest.id) {
             continue;
         }
@@ -775,10 +817,14 @@ fn about_in(dir: &Path) -> Option<About> {
 
 /// The newest installed release or Nightly in `installed` (newest first).
 /// Installed native clients retain their base's prepared data even when not selected.
-pub(crate) fn resource_dependents(tag: &str) -> bool {
+pub(crate) fn resource_dependent(tag: &str) -> Option<String> {
     backend::installed()
-        .iter()
-        .any(|version| about(version).is_some_and(|about| about.base == tag))
+        .into_iter()
+        .find(|version| about(version).is_some_and(|about| about.base == tag))
+}
+
+pub(crate) fn resource_dependents(tag: &str) -> bool {
+    resource_dependent(tag).is_some()
 }
 
 pub(crate) fn newest_installed(installed: &[String]) -> Option<&String> {
@@ -1621,7 +1667,7 @@ impl std::fmt::Display for Failed {
         match self {
             Self::Mods { error, .. } | Self::Other(error) => f.write_str(error),
             Self::Worlds(stake) => f.write_str(&stake.text),
-            Self::Nothing => Ok(()),
+            Self::Nothing => f.write_str(tr("There are no mods to build: the folder has none, or every mod was left out.")),
             Self::NoConsent => f.write_str(tr("Native mods run inside your game with your rights; mixins compile code into the game. Allow native mods in Settings, Storage, or pass --trust-native-code.")),
         }
     }
@@ -2336,6 +2382,8 @@ fn isolated(
                 }
                 last = error;
             }
+            // Nothing was left out yet: there is no earlier diagnostic to repeat.
+            Err(Failed::Nothing) if skip.is_empty() => return Err(Failed::Nothing),
             Err(Failed::Nothing) => return Err(said(&skip, last)),
             Err(Failed::NoConsent) => return Err(Failed::NoConsent),
             Err(Failed::Worlds(stake)) => return Err(Failed::Worlds(stake)),
@@ -2384,6 +2432,10 @@ pub fn build(
         return Err(Failed::Other(error));
     }
     logged(|cache| {
+        // After `logged` empties the log: the player reads it to learn why a mod is missing.
+        if folder == installed_incoming() {
+            warn_legacy(&instance.home);
+        }
         let lease = cache.map_err(|error| Failed::Other(error.into()))?;
         let profile = select_build_profile(instance.native_profile, profile, || {
             planning::classify(folder, Some(base), lease)
@@ -2649,6 +2701,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nothing_to_build_says_so() {
+        assert!(!Failed::Nothing.to_string().is_empty());
+    }
+
+    #[test]
     fn the_window_says_build_steps_in_player_words() {
         let rust = Step::Rust(0.42).shown();
         assert!(!rust.contains("Rust") && !rust.contains('%'), "{rust}");
@@ -2832,6 +2889,35 @@ mod tests {
         );
         assert_eq!(String::from(result.unwrap_err()), CANCELLED);
         assert_eq!(attempts, 2);
+    }
+
+    /// #18469: a folder with no mods says so instead of failing with an empty message; once
+    /// mods were left out, the error keeps naming them and the diagnostic that left them out.
+    #[test]
+    fn isolation_says_why_nothing_was_built() {
+        let _guard = scratch_state();
+        let result = isolated(|_| Err(Failed::Nothing), &|_| {});
+        assert!(matches!(result, Err(Failed::Nothing)), "{result:?}");
+        let result = isolated(
+            |skip| {
+                if !skip.is_empty() {
+                    return Err(Failed::Nothing);
+                }
+                Err(Failed::Mods {
+                    left: vec![LeftOut {
+                        id: "broken".into(),
+                        version: "1.0.0".into(),
+                        why: isolate::Why::OtherVersion,
+                    }],
+                    error: "compiler failure".into(),
+                    compiling: true,
+                })
+            },
+            &|_| {},
+        );
+        let error = String::from(result.unwrap_err());
+        assert!(error.contains("broken"), "{error}");
+        assert!(error.ends_with("compiler failure"), "{error}");
     }
 
     #[test]
@@ -3343,8 +3429,95 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A native `.hmod` in the format from before the SDK, as the player's FPS Counter was.
+    fn write_legacy_hmod(path: &Path) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in [
+            ("horizon-native.json", "{\"id\": \"fps_counter\"}"),
+            (
+                "rust/src/lib.rs",
+                "pub fn hook() {}
+",
+            ),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn an_old_format_native_mod_is_left_out_and_the_others_build() {
+        let _guard = scratch_state();
+        let d = dir("legacy-src");
+        write_native(&d, "veinminer", A, B);
+        let home = dir("legacy-home");
+        fs::create_dir_all(home.join(INSTALLED)).unwrap();
+        let legacy = home.join(INSTALLED).join("fps_counter.hmod");
+        let bytes = write_legacy_hmod(&legacy);
+        let mut zip = zip::ZipWriter::new(
+            fs::File::create(home.join(INSTALLED).join("veinminer.hmod")).unwrap(),
+        );
+        for file in [NATIVE_MANIFEST, "Cargo.toml", "src/lib.rs"] {
+            zip.start_file(file, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&fs::read(d.join(file)).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+        crate::browser::java::set_enabled(&home, "veinminer", true).unwrap();
+
+        let out = installed_mods(&home).unwrap();
+        let ids: Vec<_> = bundles(&out)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.manifest.id)
+            .collect();
+        assert_eq!(ids, ["veinminer"]);
+        let enabled: Vec<_> = crate::native_status::enabled(&home)
+            .into_iter()
+            .map(|m| m.0)
+            .collect();
+        assert_eq!(enabled, ["veinminer"], "the old file asks for no build");
+        clear_log().unwrap();
+        warn_legacy(&home);
+        let log = fs::read_to_string(log_path()).unwrap();
+        assert!(
+            log.starts_with("warning: ") && log.contains("fps_counter.hmod"),
+            "{log}"
+        );
+        assert_eq!(fs::read(&legacy).unwrap(), bytes, "left as it was");
+        let _ = fs::remove_dir_all(d);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn only_old_format_native_mods_means_no_native_mods() {
+        let _guard = scratch_state();
+        let home = dir("legacy-only-home");
+        fs::create_dir_all(home.join(INSTALLED)).unwrap();
+        let legacy = home.join(INSTALLED).join("fullbright.hmod");
+        let bytes = write_legacy_hmod(&legacy);
+
+        let enabled = crate::native_status::enabled(&home);
+        assert!(enabled.is_empty(), "{enabled:?}");
+        assert_eq!(
+            crate::native_status::state(&enabled, None),
+            crate::native_status::State::NoMods,
+            "Play needs no native build"
+        );
+        let error = installed_mods(&home).unwrap_err();
+        assert!(error.contains("No native mod is turned on"), "{error}");
+        assert_eq!(fs::read(&legacy).unwrap(), bytes, "left as it was");
+        let _ = fs::remove_dir_all(home);
+    }
+
     #[test]
     fn installed_mods_are_the_checked_files_of_those_turned_on() {
+        // `installed_mods` empties the one staging folder: the other tests using it wait.
+        let _guard = scratch_state();
         let d = dir("installed-src");
         write_native(&d, "veinminer", A, B);
         let home = dir("installed-home");
@@ -4109,17 +4282,47 @@ mod tests {
         assert!(failure.is_err());
         let log = fs::read_to_string(log_path()).unwrap();
         assert!(log.starts_with("error[E0425]"), "{log}");
-        assert!(
-            log.ends_with("The build failed: Could not export the engine\n"),
-            "{log}"
-        );
+        assert_result_then_cleanup(&log, "The build failed: Could not export the engine");
         assert!(!log.contains("Build completed."), "{log}");
         let success: Result<(), String> = logged(|_| Ok(()));
         success.unwrap();
         let log = fs::read_to_string(log_path()).unwrap();
-        assert!(log.ends_with("Build completed.\n"), "{log}");
+        assert_result_then_cleanup(&log, "Build completed.");
         assert!(!log.contains("error[E0425]"), "{log}");
         assert!(!log.contains("The build failed:"), "{log}");
+    }
+
+    /// #18469: a build attempt from the window while another build or its cleanup holds the
+    /// lease leaves that build's log, result included, as it is.
+    #[test]
+    fn a_busy_attempt_leaves_the_running_builds_log_alone() {
+        let _guard = scratch_state();
+        clear_log().unwrap();
+        append_log("Build completed.").unwrap();
+        let lease = crate::native_cache::Cache::acquire(&backend::build_dir()).unwrap();
+        assert_eq!(begin_log(), Ok(false));
+        assert_eq!(
+            fs::read_to_string(log_path()).unwrap(),
+            "Build completed.\n"
+        );
+        drop(lease);
+        assert_eq!(begin_log(), Ok(true));
+        assert_eq!(fs::read(log_path()).unwrap(), b"");
+    }
+
+    /// The build's result is written before the cache cleanup (#18469), so it is the build's
+    /// last line: only the cleanup's own notes (what it freed, what it kept) may follow it.
+    fn assert_result_then_cleanup(log: &str, result: &str) {
+        let lines: Vec<&str> = log.lines().collect();
+        let Some(at) = lines.iter().rposition(|l| *l == result) else {
+            panic!("no `{result}` line: {log}");
+        };
+        assert!(
+            lines[at + 1..]
+                .iter()
+                .all(|l| l.starts_with("warning: ") || l.starts_with("Freed ")),
+            "only cleanup notes may follow `{result}`: {log}"
+        );
     }
 
     #[test]

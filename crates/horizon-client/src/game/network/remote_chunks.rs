@@ -253,7 +253,8 @@ impl ChunkDecoder {
             }),
             Condvar::new(),
         ));
-        let worker_count = horizon_threads::worker_count().clamp(1, 4);
+        let worker_count =
+            horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::ChunkDecoder);
         let workers_alive = Arc::new(AtomicUsize::new(0));
 
         let mut spawned = 0;
@@ -264,7 +265,7 @@ impl ChunkDecoder {
             let builder = std::thread::Builder::new()
                 .name(format!("Chunk decoder {i}"))
                 .spawn(move || {
-                    horizon_threads::favour_current();
+                    horizon_threads::chunk_decoder_current();
                     'worker: loop {
                         let job = {
                             let mut q = match queue.0.lock() {

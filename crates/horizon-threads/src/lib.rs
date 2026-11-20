@@ -18,6 +18,7 @@ pub mod process_memory;
 pub mod profile;
 #[cfg(target_os = "linux")]
 pub mod sampler;
+pub mod sizing;
 pub mod stack_dump;
 /// Alt+Space and a bare Alt never open the window's system menu, as in GLFW.
 #[cfg(target_os = "windows")]
@@ -163,12 +164,27 @@ pub fn default_workers() -> usize {
     workers_for(worker_count(), performance_cores)
 }
 
+/// The cores this process has for its pools: [`worker_count`]'s share, narrowed to
+/// the performance cores where the machine tells them apart (its efficiency cores
+/// don't carry a worker, see [`default_workers`]).
+pub(crate) fn usable_cores() -> usize {
+    usable_cores_for(worker_count(), performance_cores)
+}
+
+/// [`usable_cores`] for `cores` cores, of which `performance` (asked only here, the
+/// sysctl) are performance cores where the machine tells them apart (`None` elsewhere).
+fn usable_cores_for(cores: usize, performance: impl FnOnce() -> Option<usize>) -> usize {
+    let fast = performance().filter(|&n| n > 0).unwrap_or(cores);
+    cores.min(fast)
+}
+
 /// [`default_workers`] for `cores` cores, of which `performance` (asked only here, the
 /// sysctl) are performance cores where the machine tells them apart (`None` elsewhere):
 /// one less than the smaller count, at least 1.
 fn workers_for(cores: usize, performance: impl FnOnce() -> Option<usize>) -> usize {
-    let fast = performance().filter(|&n| n > 0).unwrap_or(cores);
-    cores.min(fast).saturating_sub(1).max(1)
+    usable_cores_for(cores, performance)
+        .saturating_sub(1)
+        .max(1)
 }
 
 /// The machine's performance cores:
@@ -240,6 +256,12 @@ fn parse_worker_count(value: Option<String>) -> Option<usize> {
     value?.trim().parse().ok().filter(|&n| n > 0)
 }
 
+/// `true` only for `1` (`" 1 "` counts): `HORIZON_DECODER_PRIORITY` off where
+/// a run doesn't ask for it, and off for a value someone mistyped.
+fn parse_decoder_priority(value: Option<String>) -> bool {
+    value.is_some_and(|v| v.trim() == "1")
+}
+
 /// Ask the OS to run the calling thread ahead of the process's other
 /// threads, as vanilla's `MinecraftServer.spin` does for its server thread
 /// (`Thread.setPriority(8)` when there are more than four processors), so
@@ -276,6 +298,18 @@ fn favour() -> bool {
 #[cfg(not(any(target_vendor = "apple", windows)))]
 fn favour() -> bool {
     false
+}
+
+/// Called by a chunk decoder thread as it starts (the `ChunkDecoder` worker,
+/// up to four): the calling thread stays at the ordinary priority, below the
+/// one that ticks and draws a frame, as a decoder should. `HORIZON_DECODER_PRIORITY=1`
+/// gives the old raise back for an A/B run ([`favour_current`]); a value read
+/// once, like [`worker_count`]. Whether the OS took a raise it still asked for.
+pub fn chunk_decoder_current() -> bool {
+    static SWITCH: OnceLock<bool> = OnceLock::new();
+    let asked = *SWITCH
+        .get_or_init(|| parse_decoder_priority(std::env::var("HORIZON_DECODER_PRIORITY").ok()));
+    asked && favour_current()
 }
 
 /// The CPU time the calling thread has used, where only an OS call gives it
@@ -916,6 +950,67 @@ mod tests {
         .unwrap();
     }
 
+    /// Only `1` asks for the decoders to be raised again: a run asks, a
+    /// mistyped or missing value leaves them below the frame.
+    #[test]
+    fn decoder_priority_switch_parses() {
+        for (value, on) in [
+            (None, false),
+            (Some("1"), true),
+            (Some(" 1 "), true),
+            (Some("0"), false),
+            (Some("true"), false),
+            (Some("2"), false),
+            (Some(""), false),
+        ] {
+            assert_eq!(super::parse_decoder_priority(value.map(String::from)), on);
+        }
+    }
+
+    /// What #18241 is about: the thread a chunk decoder runs on stays at the
+    /// ordinary priority the pools' helpers have, while a thread that asks for
+    /// the raise the frame asks for goes above it — the control half, since
+    /// `favour_current` asks for nothing on a machine of four cores or fewer
+    /// and the first half alone would then pass without proving anything. A
+    /// run that starts with `HORIZON_DECODER_PRIORITY=1` has to raise the
+    /// decoder again instead, which checks the switch the same way.
+    #[cfg(windows)]
+    #[test]
+    fn a_decoder_thread_stays_below_the_frame() {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+            THREAD_PRIORITY_NORMAL,
+        };
+        if std::thread::available_parallelism().map_or(1, |n| n.get()) <= 4 {
+            return;
+        }
+        // A run started with `HORIZON_DECODER_PRIORITY=1` asks for the old
+        // raise: the same measurement then has to show it, which is the A/B.
+        // Read here, not through the switch the code under test reads.
+        let asked = std::env::var("HORIZON_DECODER_PRIORITY").is_ok_and(|v| v.trim() == "1");
+        let priority = |call: fn() -> bool| {
+            std::thread::spawn(move || {
+                call();
+                // SAFETY: reads the priority of the thread it runs on; the
+                // pseudo handle needs no closing.
+                unsafe { GetThreadPriority(GetCurrentThread()) }
+            })
+            .join()
+            .unwrap()
+        };
+        let decoder = priority(super::chunk_decoder_current);
+        let frame = priority(super::favour_current);
+        assert_eq!(
+            decoder,
+            if asked {
+                THREAD_PRIORITY_ABOVE_NORMAL
+            } else {
+                THREAD_PRIORITY_NORMAL
+            }
+        );
+        assert_eq!(frame, THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+
     /// A helper goes behind only once a dedicated server asks for it, and
     /// then, on Linux and Android, 10 nice levels below the process or in the idle class.
     #[test]
@@ -965,7 +1060,12 @@ mod tests {
     }
 
     /// The option set is the purge delay: mimalloc v3's default for it is
-    /// 1000 ms, and it is 0 once configured.
+    /// 1000 ms, and it is 0 once configured. Configured, a Linux process also
+    /// takes no transparent huge pages, whatever the system's setting.
+    ///
+    /// The allocator's options are the process's, and libtest runs tests in
+    /// parallel: this must stay the only test here that configures it, or the
+    /// default read first sees another test's setting.
     #[test]
     fn configuring_the_allocator_purges_at_once() {
         // SAFETY: reads and sets one integer option.
@@ -975,24 +1075,19 @@ mod tests {
         }
         super::configure_allocator();
         assert_eq!(get(), 0);
-    }
-
-    /// Configured, the process takes no transparent huge pages, whatever the
-    /// system's setting.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn configuring_the_allocator_turns_transparent_huge_pages_off() {
-        super::configure_allocator();
-        // SAFETY: reads this process's flag.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
-            1
-        );
-        // SAFETY: reads one integer option.
-        assert_eq!(
-            unsafe { libmimalloc_sys::mi_option_get(super::ALLOW_THP) },
-            0
-        );
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: reads this process's flag.
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
+                1
+            );
+            // SAFETY: reads one integer option.
+            assert_eq!(
+                unsafe { libmimalloc_sys::mi_option_get(super::ALLOW_THP) },
+                0
+            );
+        }
     }
 }
 

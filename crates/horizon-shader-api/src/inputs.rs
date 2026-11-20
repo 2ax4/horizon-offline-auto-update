@@ -250,6 +250,24 @@ uniform! {
         /// this field.
         moon_phase: u32,
         @pad padding: [u32; 1],
+        /// Vanilla's light colour at full block and sky light (15 and 15) this frame, linear: what
+        /// `MaterialInput.lightmap` and `EntityInput.lightmap` are where light is full. Its
+        /// brightest channel is 1 unless something dims all light (the Darkness effect, a
+        /// wither's bar). Only a pack whose files name `full_lightmap` has this field.
+        full_lightmap: [f32; 3],
+        @pad full_lightmap_padding: [u32; 1],
+        /// This frame's sub-pixel offset of the world, added to clip `xy / w` (y up): the offset
+        /// `projection` leaves out. Rebuilding a point from the depth subtracts it before
+        /// `projection_inverse` (`vec4<f32>(ndc.xy - frame.jitter, depth, 1.0)`); projecting a
+        /// point to sample what the world drew this frame adds it to `xy / w` after `projection`.
+        /// `(0, 0)` while the world isn't jittered. Only a pack whose files name `jitter` or `previous_jitter` has this
+        /// field.
+        jitter: [f32; 2],
+        /// Last frame's `jitter`: reprojecting a `keep = "view"` resource adds it to `xy / w`
+        /// after `previous_view_projection`. `(0, 0)` where `previous_view_projection` is this frame's
+        /// (the first frame, after a pause or a reset) and while the world isn't jittered. Only a
+        /// pack whose files name `jitter` or `previous_jitter` has this field.
+        previous_jitter: [f32; 2],
     }
 }
 
@@ -266,14 +284,30 @@ impl Frame {
     /// uploaded struct keeps its size and no field moves.
     pub const MOON_FIELDS: std::ops::Range<usize> = 61..62;
 
+    /// Where `full_lightmap` is among the fields: the last, on 16 bytes of its own after the
+    /// struct it had before, so no other field moves.
+    pub const FULL_LIGHTMAP_FIELDS: std::ops::Range<usize> = 62..63;
+
+    /// Where `jitter` and `previous_jitter` are among the fields: the last, on 16 bytes of their
+    /// own after `full_lightmap`'s, so no other field moves.
+    pub const JITTER_FIELDS: std::ops::Range<usize> = 63..65;
+
     /// The fields the prelude declares, by index, for a pack that asks for the scene
     /// (`[ray_tracing]`) or not, keeps resources (`[[resource]]`) or not, and whose files name
-    /// `moon_phase` or not.
-    fn declared_at(ray_tracing: bool, kept: bool, moon_phase: bool) -> Vec<usize> {
+    /// `moon_phase` or not, `full_lightmap` or not, and the jitter's (`JITTER_FIELDS`) or not.
+    fn declared_at(
+        ray_tracing: bool,
+        kept: bool,
+        moon_phase: bool,
+        full_lightmap: bool,
+        jitter: bool,
+    ) -> Vec<usize> {
         let skipped = |i: usize| {
             (!ray_tracing && Self::RAY_FIELDS.contains(&i))
                 || (!kept && Self::KEPT_FIELDS.contains(&i))
                 || (!moon_phase && Self::MOON_FIELDS.contains(&i))
+                || (!full_lightmap && Self::FULL_LIGHTMAP_FIELDS.contains(&i))
+                || (!jitter && Self::JITTER_FIELDS.contains(&i))
         };
         (0..Self::WGSL.fields.len())
             .filter(|&i| !skipped(i))
@@ -281,17 +315,32 @@ impl Frame {
     }
 
     /// The fields the prelude declares (`declared_at`).
-    pub fn declared(ray_tracing: bool, kept: bool, moon_phase: bool) -> Vec<Field> {
-        let at = Self::declared_at(ray_tracing, kept, moon_phase).into_iter();
+    pub fn declared(
+        ray_tracing: bool,
+        kept: bool,
+        moon_phase: bool,
+        full_lightmap: bool,
+        jitter: bool,
+    ) -> Vec<Field> {
+        let at = Self::declared_at(ray_tracing, kept, moon_phase, full_lightmap, jitter);
+        let at = at.into_iter();
         at.map(|i| Self::WGSL.fields[i]).collect()
     }
 
     /// `declared` as WGSL, each field at the offset the uploaded struct has it: a field followed
     /// by bytes WGSL's layout wouldn't leave (a removed field's, or the epochs' without
-    /// `[[resource]]`) keeps them (`@size`).
-    pub fn declared_wgsl(ray_tracing: bool, kept: bool, moon_phase: bool) -> String {
+    /// `[[resource]]`, or `full_lightmap`'s without it) keeps them (`@size`). Without the jitter's
+    /// fields the struct ends where it did before them, 16 bytes short of the uploaded one, and
+    /// without `full_lightmap` too, 32 bytes short.
+    pub fn declared_wgsl(
+        ray_tracing: bool,
+        kept: bool,
+        moon_phase: bool,
+        full_lightmap: bool,
+        jitter: bool,
+    ) -> String {
         let mut out = format!("struct {} {{\n", Self::WGSL.name);
-        let at = Self::declared_at(ray_tracing, kept, moon_phase);
+        let at = Self::declared_at(ray_tracing, kept, moon_phase, full_lightmap, jitter);
         for (n, &i) in at.iter().enumerate() {
             let f = Self::WGSL.fields[i];
             out += "    ";
@@ -382,10 +431,10 @@ pub const MATERIAL_INPUT: Struct = Struct {
 /// What the material stage returns.
 pub const SURFACE: Struct = Struct {
     name: "Surface",
-    doc: "What `material` returns. Vanilla's own is \
-          `albedo * vec4(tint.rgb * shade * ao * lightmap, 1.0)`, which \
-          `albedo * vec4(shaded_tint.rgb * lightmap, 1.0)` gives within two steps of 255 for nothing; \
-          Horizon then applies the alpha test (cutout and translucent; on the texture's alpha \
+    doc: "What `material` returns. Vanilla's own is `albedo * vec4(lit_tint, 1.0)`, its \
+          vertex colour lit at each corner; `albedo * vec4(shaded_tint.rgb * lightmap, 1.0)` \
+          costs nothing and is close, but smooths colour and light apart, so it differs where \
+          both change across a face (an occluded corner beside a torch). Horizon then applies the alpha test (cutout and translucent; on the texture's alpha \
           unless `[material] coverage = \"pack\"`) and fog (unless `[frame] fog = \"pack\"`).",
     fields: fields! {
         color: "vec4<f32>" = "The lit colour: rgb linear light, 0 or more and unbounded (more than 1 is brighter than white); alpha translucent terrain's opacity, and what the alpha test reads under `[material] coverage = \"pack\"`.",
@@ -471,16 +520,16 @@ pub const WEATHER_INPUT: Struct = Struct {
 /// What `trace` and `trace_layers` return (`[ray_tracing]`): the nearest surface along a ray.
 pub const RAY_HIT: Struct = Struct {
     name: "RayHit",
-    doc: "The nearest surface along a ray, from `trace` or `trace_layers`. Its `albedo`, `uv`, `material`, `tags`, `emission`, `fluid`, `translucent` and `tangent` are what `MaterialInput` gives the material stage for the same point, and its `light` is too without dynamic light (see it), so one function can shade both; a terrain hit's `tint`, `shade` and `ao` are not yet (see each). Their meaning in 0.2 is `MaterialInput`'s; bringing a terrain hit's to it is a fix to what this reference says, not a change of the line (stability.md), so a pack that wants today's combined colour reads the one that stays: the product `tint.rgb * shade * ao`, which `shaded_tint` is on every hit, a terrain hit's now and once the three are apart. On a miss, and in every stage while the scene isn't there (`frame.has_ray_tracing` 0), `distance` is negative and every other field is 0 (the `bool`s false).",
+    doc: "The nearest surface along a ray, from `trace` or `trace_layers`. Its `albedo`, `uv`, `material`, `tags`, `fluid`, `translucent` and `tangent` are what `MaterialInput` gives for the same point. Its `light` excludes dynamic light. On a terrain hit with a look record, `tint`, `shade` and `ao` follow `MaterialInput` in API 0.2. Terrain `emission` comes from the vertex and gives the block's light level over 15. A stage that reads a hit's `tint`, `shade` or `ao` has the scene keep its terrain's looks, eight bytes a face in video memory for the faces within its reach and as many in memory for every loaded section, from each section's next mesh on: when a pack starts reading these fields, loaded sections are queued for remeshing. With no usable record, including while the replacement mesh or GPU allocation is pending, hits use the baked vertex colour for `tint` and 1 for `shade` and `ao`. The scene holds the faces flat: under `[displacement]` a fragment shades from its displaced point, a hit from the face. `shaded_tint` stays the baked vertex colour on terrain and uses `tint.rgb * shade` on entity hits. On a miss, and in every stage while the scene isn't there (`frame.has_ray_tracing` 0), `distance` is negative and every other field is 0 (the `bool`s false).",
     fields: fields! {
         distance: "f32" = "How far along the ray the surface is, in blocks; negative on a miss.",
         position: "vec3<f32>" = "The point, camera-relative, in blocks (as `view_position`).",
         normal: "vec3<f32>" = "The face's normal, a unit vector in world axes, turned toward the ray's origin.",
         uv: "vec2<f32>" = "The texture coordinate inside the block's sprite (as `MaterialInput.uv`).",
         albedo: "vec4<f32>" = "The block texture's colour at the point, at full size (mip level 0), linear light; alpha the texture's.",
-        tint: "vec4<f32>" = "The colour vanilla multiplies the texture by, linear light; alpha 1. On a terrain hit, for now, with the face's shade and ambient occlusion in it, as `MaterialInput.shaded_tint` (`shade` and `ao` are then 1); an entity hit's is its vertices' (`entity`).",
-        shade: "f32" = "The face's directional shade, linear: vanilla's entity shade on an entity hit (`entity`); 1 on a terrain hit for now, its shade being in `tint`.",
-        ao: "f32" = "Ambient occlusion at the point, linear: 1 for now, a terrain hit's being in `tint` and an entity having none.",
+        tint: "vec4<f32>" = "The colour vanilla multiplies the texture by, linear light; alpha 1. On a terrain hit with a look record, as `MaterialInput.tint`: without the face's shade and ambient occlusion (`shade`, `ao`). Without a record, the baked vertex colour. An entity hit's is its vertices' (`entity`).",
+        shade: "f32" = "The face's directional shade, linear: `MaterialInput.shade` on a terrain hit with a look record, 1 without one, and vanilla's entity shade on an entity hit (`entity`).",
+        ao: "f32" = "Ambient occlusion at the point, linear: `MaterialInput.ao` smoothed over a terrain face with a look record, and 1 on other hits.",
         light: "vec2<f32>" = "Block and sky light, 0..1, smoothed over the face, as the world stores it: without the dynamic light (a held torch, a burning entity) that `MaterialInput.light` adds.",
         material: "u32" = "The `[[materials]]` id of the surface's sprite (0 when no entry names it).",
         tags: "u32" = "The pack's sprite tags the surface's sprite has: bit i for the manifest's i-th `[[tags]]`.",
@@ -524,22 +573,72 @@ pub fn ray_hit(entities: bool) -> Struct {
 pub const SHADED_TINT: Field = Field {
     name: "shaded_tint",
     ty: "vec4<f32>",
-    doc: "Only in a pack whose files name `shaded_tint`: the colour vanilla multiplies the texture by with the face's shade and ambient occlusion in it, `tint.rgb * shade * ao` as vanilla's vertex carries it (vanilla multiplies them at each corner in 8-bit integers, so it is within two steps of 255 of that product); alpha 1. Draw vanilla's colour with it; `tint`, `shade` and `ao` are for lighting faces yourself, and reading them from `MaterialInput` or `VertexInput` makes the world load again when the pack starts and terrain take a third again its memory (a `RayHit`'s cost nothing). On `RayHit` it is linear light, `tint.rgb * shade * ao` on every hit (an entity hit keeps its `tint`'s alpha), and 0 on a miss.",
+    doc: "Only in a pack whose files name `shaded_tint`: the colour vanilla multiplies the texture by with the face's shade and ambient occlusion in it, `tint.rgb * shade * ao` as vanilla's vertex carries it (vanilla multiplies them at each corner in 8-bit integers, so it is within two steps of 255 of that product); alpha 1. Draw vanilla's colour with it; `tint`, `shade` and `ao` are for lighting faces yourself, and reading them from `MaterialInput` or `VertexInput` makes the world load again when the pack starts and terrain take a third again its memory. For the cost of reading those fields on a terrain hit, see `RayHit`. On `RayHit` it is linear light. Terrain hits interpolate the baked vertex colour, entity hits use `tint.rgb * shade` and keep their `tint`'s alpha, and misses return 0.",
 };
 
 /// `input` with `SHADED_TINT` last where `shaded`.
 pub fn shaded(input: &Struct, shaded: bool) -> String {
-    let mut out = input.wgsl();
-    if shaded {
-        out.truncate(out.len() - 2);
-        out += &format!(
-            "    {}: {},
-}}
-",
-            SHADED_TINT.name, SHADED_TINT.ty
-        );
+    declared(input, false, false, shaded)
+}
+
+/// `lit_tint`, in `MaterialInput` after its light-source fields and before `shaded_tint`, in a
+/// pack whose files name it (`stages::names_lit_tint`): the renderer hands it down in a varying
+/// of its own, the last one the terrain has on the weakest GPUs.
+pub const LIT_TINT: Field = Field {
+    name: "lit_tint",
+    ty: "vec3<f32>",
+    doc: "Only in a pack whose files name `lit_tint`: vanilla's lit vertex colour, `shaded_tint.rgb * lightmap` multiplied at each corner and then smoothed over the face, as Horizon's own terrain draws blocks, with the frame's coloured lights added under the vertex colour at each corner (`min(shaded_tint.rgb * (lightmap + colored_light), 1)` there, wherever any reaches). Those products are taken in vanilla's gamma at each corner, on the corner's own values; the smoothed result is then decoded with the 2.2 power, as `shaded_tint` and `lightmap` are, so the formula doesn't hold for the decoded fields a stage gets. So `albedo.rgb * lit_tint` is vanilla's lit colour, where multiplying `shaded_tint` by `lightmap`, each smoothed apart, differs from it where both change across a face (an occluded corner beside a torch). `[displacement]`'s grid has it at each of its points between the face's four corners' products, as it has the vertex colour, each lit where the mesh puts the corner (before `[vertex]` moves it).",
+};
+
+/// What a pack whose files name one of their names (`stages::names_light_source`) has after
+/// `MaterialInput`'s other fields, before `shaded_tint`: Horizon's own look's light sources,
+/// which the vertex and the sprite already hold, so they cost nothing.
+pub const MATERIAL_LIGHT_SOURCE: [Field; 3] = [
+    Field {
+        name: "light_source_tier",
+        ty: "u32",
+        doc: "Only in a pack whose files name `light_source_tier`, `light_source_whole` or `light_source_threshold`: how Horizon's own HDR look ranks the surface's block as a light source: 0 none, 1 low (magma, a redstone torch, candles, froglights), 2 incandescent (torches, lanterns, fire, lava), 3 bright (glowstone, a beacon, campfires), 4 very bright (the sun and lightning; no block has it). It comes from the block, which `emission` doesn't tell (glow lichen gives light and is 0, a froglight gives 15 and is 1), the same on every face except a model face that gives its own light, which ranks at least by that light (an open eyeblossom's petals are 2); a fluid's surface has the fluid's (lava 2), and distant terrain keeps its block's (with `light_source_whole`), so far glowstone is 3.",
+    },
+    Field {
+        name: "light_source_whole",
+        ty: "bool",
+        doc: "Only in a pack whose files name `light_source_tier`, `light_source_whole` or `light_source_threshold`: the whole sprite shines in Horizon's look (froglights, fire, lava, campfires), whatever a texel's brightness; otherwise only its texels as bright as `light_source_threshold` do (a torch's flame, not its handle). False where `light_source_tier` is 0.",
+    },
+    Field {
+        name: "light_source_threshold",
+        ty: "f32",
+        doc: "Only in a pack whose files name `light_source_tier`, `light_source_whole` or `light_source_threshold`: the brightness a texel of the surface's sprite reaches where Horizon's look lets it shine (unless `light_source_whole`), 0..1. A texel's brightness is the mean of the luminance and the brightest channel of its colour in linear light: of `c = albedo.rgb`, `0.5 * (dot(c, vec3(0.2126, 0.7152, 0.0722)) + max(c.r, max(c.g, c.b)))`. It is measured from the sprite itself, a set share of the way from its darkest to its brightest opaque texel, when HDR output turns on: 0 for every sprite until the renderer drawing it has measured it (every texel passes), so a renderer made while HDR output is off, as turning it off makes one, reads 0; and 1 for a sprite without an opaque texel.",
+    },
+];
+
+/// What a pack whose files name one of `MATERIAL_LIGHT_SOURCE`'s names has last in `EntityInput`.
+pub const ENTITY_LIGHT_SOURCE: [Field; 1] = [Field {
+    name: "light_source_tier",
+    ty: "u32",
+    doc: "Only in a pack whose files name `light_source_tier`, `light_source_whole` or `light_source_threshold`: how Horizon's own HDR look ranks the surface as a light source, 0..4 as `MaterialInput.light_source_tier` (a blaze, spider and enderman eyes 3; a magma cube, a glow squid, glowing sign text 1). Horizon's look has no threshold or whole sprite for these: every texel shines by its own brightness, `albedo * tint`.",
+}];
+
+/// The fields `input` has after its own, before `shaded_tint`, in a pack whose files name one of
+/// `MATERIAL_LIGHT_SOURCE`'s names: `MaterialInput`'s three and `EntityInput`'s tier.
+pub fn light_source(input: &Struct) -> &'static [Field] {
+    match input.name {
+        "MaterialInput" => &MATERIAL_LIGHT_SOURCE,
+        "EntityInput" => &ENTITY_LIGHT_SOURCE,
+        _ => &[],
     }
-    out
+}
+
+/// `input` with its `light_source` fields where `light_source`, `LIT_TINT` where `lit` (only
+/// `MaterialInput` has it), then `SHADED_TINT` where `shaded`.
+pub fn declared(input: &Struct, light_source: bool, lit: bool, shaded: bool) -> String {
+    let mut out = input.wgsl();
+    out.truncate(out.len() - 2);
+    let more = (self::light_source(input).iter()).filter(|_| light_source);
+    let lit = (lit && input.name == MATERIAL_INPUT.name).then_some(&LIT_TINT);
+    for f in more.chain(lit).chain(shaded.then_some(&SHADED_TINT)) {
+        out += &format!("    {}: {},\n", f.name, f.ty);
+    }
+    out + "}\n"
 }
 
 /// The tonemap stage's input: one pixel of the window.
@@ -560,34 +659,27 @@ mod tests {
     #[test]
     fn frame_fields_carry_their_docs() {
         let wgsl = Frame::WGSL;
-        assert_eq!(wgsl.fields.len(), 62);
+        assert_eq!(wgsl.fields.len(), 65);
         assert!(wgsl.fields.iter().all(|f| !f.doc.trim().is_empty()));
         // `luminance` is a `vec3`, on the next 16 bytes, the epochs after it, then the fog's
-        // two pairs and the moon's phase, to the end of the next 16.
+        // two pairs and the moon's phase, to the end of the next 16; the full light's colour on
+        // the 16 after them, and the two jitters on the 16 after that.
         let size = std::mem::size_of::<Frame>();
-        assert_eq!(size, 6 * 64 + 15 * 16 + 8 * 16 + 5 * 16);
+        assert_eq!(size, 864);
         assert_eq!(
             Frame::OFFSETS[55..],
-            [
-                size - 48,
-                size - 36,
-                size - 32,
-                size - 28,
-                size - 24,
-                size - 16,
-                size - 8
-            ]
+            [784, 796, 800, 804, 808, 816, 824, 832, 848, 856]
         );
         // The scene's two fields are only a `[ray_tracing]` pack's, the epochs only a
         // `[[resource]]` pack's; the fog's every pack's; the moon's phase, last, only a pack's
         // that names it.
         let names = |s: Vec<Field>| s.iter().map(|f| f.name).collect::<Vec<_>>();
-        let traced = names(Frame::declared(true, false, false));
+        let traced = names(Frame::declared(true, false, false, false, false));
         assert_eq!(
             traced[Frame::RAY_FIELDS],
             ["has_ray_tracing", "ray_distance"]
         );
-        let untraced = names(Frame::declared(false, false, false));
+        let untraced = names(Frame::declared(false, false, false, false, false));
         assert_eq!(untraced.len(), 56);
         assert!(!untraced.iter().any(|n| n.contains("ray")));
         assert!(
@@ -598,13 +690,24 @@ mod tests {
         let epochs = ["view_epoch", "world_epoch", "reset_reasons"];
         let fog = ["fog_environment", "fog_render"];
         for ray_tracing in [false, true] {
-            let kept = names(Frame::declared(ray_tracing, true, false));
+            let kept = names(Frame::declared(ray_tracing, true, false, false, false));
             assert_eq!(kept[kept.len() - 5..kept.len() - 2], epochs);
-            let plain = names(Frame::declared(ray_tracing, false, false));
+            let plain = names(Frame::declared(ray_tracing, false, false, false, false));
             assert_eq!(plain[plain.len() - 3..], ["luminance", fog[0], fog[1]]);
-            let mooned = names(Frame::declared(ray_tracing, false, true));
+            let mooned = names(Frame::declared(ray_tracing, false, true, false, false));
             assert_eq!(mooned[mooned.len() - 3..], [fog[0], fog[1], "moon_phase"]);
+            let full = names(Frame::declared(ray_tracing, false, false, true, false));
+            assert_eq!(full[full.len() - 3..], [fog[0], fog[1], "full_lightmap"]);
+            let jittered = names(Frame::declared(ray_tracing, false, false, false, true));
+            assert_eq!(
+                jittered[jittered.len() - 3..],
+                [fog[1], "jitter", "previous_jitter"]
+            );
         }
+        assert_eq!(
+            names(Frame::WGSL.fields.to_vec())[Frame::FULL_LIGHTMAP_FIELDS],
+            ["full_lightmap"]
+        );
         assert_eq!(
             names(Frame::WGSL.fields.to_vec())[Frame::KEPT_FIELDS],
             epochs

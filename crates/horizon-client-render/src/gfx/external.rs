@@ -39,7 +39,8 @@ pub struct FrameState<'a> {
 pub trait ExternalPipeline: Send + std::any::Any {
     /// What it does in the engine's place, asked once, when it is installed. None: it draws
     /// nothing of the world, and the renderer runs as without a shader pack. Some: it also
-    /// presents the world, in `run_post`, which then runs in place of the engine's finish.
+    /// presents the world, in `run_post` and `run_output`, which then run in place of the
+    /// engine's finish.
     fn capabilities(&self) -> Option<Capabilities> {
         None
     }
@@ -139,10 +140,14 @@ pub trait ExternalPipeline: Send + std::any::Any {
     ) -> bool {
         false
     }
-    /// Its post passes in place of the engine's finish of the world: a pipeline whose
-    /// `capabilities` are Some writes the frame to `post.screen` here, since the renderer then
-    /// doesn't. The default writes nothing, for pipelines whose `capabilities` are None.
+    /// Its post passes in place of the engine's finish of the world, up to its picture: the
+    /// frame is written in `run_output`, after it. The default does nothing, for pipelines whose
+    /// `capabilities` are None.
     fn run_post(&mut self, _post: WorldPost<'_>) {}
+    /// Its output, in the same frame after `run_post`: a pipeline whose `capabilities` are Some
+    /// writes the frame to `output.screen` here, since the renderer then doesn't. The default
+    /// writes nothing, for pipelines whose `capabilities` are None.
+    fn run_output(&mut self, _output: WorldOutput<'_>) {}
 }
 
 /// Why a pipeline couldn't take over (`ExternalPipeline::take_over`), and what that left running.
@@ -181,8 +186,15 @@ pub struct Capabilities {
     pub entities: bool,
     /// Its rays read the scene's entity layer, which the engine then builds.
     pub ray_entities: bool,
+    /// Its rays read the terrain's quad looks in the ray scene, so sections keep them.
+    pub ray_looks: bool,
     /// Its terrain pipelines bind the arenas' quad looks (`looks::wanted`): sections carry them.
     pub looks: bool,
+    /// The renderer anti-aliases its world before the output reads it
+    /// (`WorldOutput::resolved`), with the player's TAA or FXAA: it has no post passes
+    /// (`[[post]]`) that draw the picture, and its frame holds gamma light, which their blends
+    /// are made for (not `blend = "linear"`).
+    pub engine_resolve: bool,
 }
 
 /// What the renderer hands the pack's post stage (`ExternalPipeline::run_post`).
@@ -191,11 +203,23 @@ pub struct WorldPost<'a> {
     pub encoder: &'a mut wgpu::CommandEncoder,
     /// The world's scaled target (colour, depth), of `size`.
     pub world: (&'a wgpu::TextureView, &'a wgpu::TextureView),
-    /// The window's frame, which the last pass draws.
-    pub screen: &'a wgpu::TextureView,
     pub size: [u32; 2],
+    /// The window's size, the frame's.
+    pub window: [u32; 2],
     /// The ray scene and the camera, when the game traces rays.
     pub scene: Option<(&'a RayScene, glam::DVec3)>,
+}
+
+/// What the renderer hands the pack's output (`ExternalPipeline::run_output`).
+pub struct WorldOutput<'a> {
+    pub device: &'a wgpu::Device,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// The window's frame, which the output draws.
+    pub screen: &'a wgpu::TextureView,
+    /// The world as the renderer resolved it (the player's TAA or FXAA), at the world's size,
+    /// for the output to read in its place; `None`: the world as drawn. TAA's is its
+    /// `Rgba16Float` history, FXAA's in the world's format.
+    pub resolved: Option<&'a wgpu::TextureView>,
 }
 
 /// The renderer's pass timing settings (`ExternalPipeline::set_up_timing`).
@@ -224,6 +248,11 @@ pub struct FrameStart<'a> {
     pub sky_visible: bool,
     /// The ray scene, when the game traces rays (`ExternalPipeline::start_frame`).
     pub scene: Option<&'a RayScene>,
+    /// This frame's lightmap, RGBA rows of sky level by block level (`Renderer::lightmap_pixels`).
+    pub lightmap: &'a [u8; 16 * 16 * 4],
+    /// The world's sub-pixel jitter this frame in clip space (`world_post::Post::jitter_clip`),
+    /// zero while TAA is off.
+    pub jitter: [f32; 2],
 }
 
 /// What the renderer hands the pack after the water mirror (`ExternalPipeline::prepare_world_targets`).
@@ -292,6 +321,8 @@ pub struct TerrainLayers<'a> {
     /// The layer of its grid of the solid terrain near the camera, where it draws one
     /// (`ExternalPipeline::draw_displaced`).
     pub displaced: Option<&'a wgpu::RenderPipeline>,
+    /// The solid layers for 4x MSAA (instanced, then flat draws), when the pack's material got them.
+    pub msaa: Option<&'a (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
     /// The solid layers' second target, which they write beside the world's colour.
     pub surface: Option<&'a wgpu::TextureView>,
     /// The layers read the world before translucent terrain: the renderer stops there for

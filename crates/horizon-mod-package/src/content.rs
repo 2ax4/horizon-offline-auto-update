@@ -5,8 +5,9 @@
 //!
 //! Content is data, not code: nothing here executes. What a mod
 //! may add is fenced instead. Its own namespaces (its id and the ones its
-//! manifest lists), plus additions to vanilla tags and to the convention
-//! tags (`c`, which NeoForge and Fabric mods share). Paths are plain, files
+//! manifest lists), plus additions to vanilla tags, to the convention
+//! tags (`c`, which NeoForge and Fabric mods share) and to the villagers'
+//! work-block tags (`horizon:villager_secondary_poi/<job>`). Paths are plain, files
 //! and totals are capped, vanilla ids cannot be redefined, and no two mods
 //! share a namespace ([`clash`]).
 use crate::manifest::Manifest;
@@ -33,8 +34,9 @@ pub fn check_bytes(name: &str, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Checks a content path: `assets/` or `data/`, then `/`-separated parts of
-/// `[a-z0-9_.-]`, none of them `.` or `..` (vanilla's resource-location
-/// characters, so the path means the same on every OS).
+/// `[a-z0-9_.-]`, none of them `.` or `..` and none ending in `.` (vanilla's
+/// resource-location characters, so the path means the same on every OS: Windows
+/// drops a trailing dot).
 pub fn check_path(name: &str) -> Result<(), String> {
     let bad = || format!("{name:?} is not a plain assets/ or data/ path");
     let mut parts = name.split('/');
@@ -47,7 +49,7 @@ pub fn check_path(name: &str) -> Result<(), String> {
         let chars_ok = part
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
-        if part.is_empty() || part == "." || part == ".." || !chars_ok {
+        if part.is_empty() || part.ends_with('.') || !chars_ok {
             return Err(bad());
         }
     }
@@ -73,10 +75,24 @@ pub(crate) fn check_namespace(name: &str, manifest: &Manifest) -> Result<(), Str
     // tags and atlases, and to the convention tags mods share.
     let shared = matches!(namespace, "minecraft" | "c");
     let atlas = top == "assets" && namespace == "minecraft" && rest.starts_with("atlases/");
-    let allowed = owned || (top == "data" && shared && rest.starts_with("tags/")) || atlas;
+    // The blocks each job's villagers also work at, which the villager brain reads: one
+    // `<job>.json` per job, nothing deeper; the rest of the `horizon` namespace stays the game's.
+    let villager_poi = top == "data"
+        && namespace == "horizon"
+        && rest
+            .strip_prefix("tags/block/villager_secondary_poi/")
+            .and_then(|file| file.strip_suffix(".json"))
+            .is_some_and(|job| {
+                !job.is_empty()
+                    && job
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            });
+    let allowed =
+        owned || (top == "data" && shared && rest.starts_with("tags/")) || atlas || villager_poi;
     if !allowed {
         return Err(format!(
-            "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to vanilla and convention (c) tags, or to vanilla's atlases"
+            "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to vanilla and convention (c) tags, to the villagers' work-block tags (data/horizon/tags/block/villager_secondary_poi/<job>.json, <job> of [a-z0-9_]), or to vanilla's atlases"
         ));
     }
 
@@ -939,6 +955,11 @@ impl Content {
                 for i in 0..zip.len() {
                     let entry = zip.by_index_raw(i).map_err(|e| e.to_string())?;
                     let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+                    // As `Package::read_zip`: the loader reads `\` as `/`, so no entry may
+                    // name a path these checks would read differently.
+                    if !crate::manifest::plain_path(name.strip_suffix('/').unwrap_or(&name)) {
+                        return Err(format!("invalid package path: {name}"));
+                    }
                     if (name.starts_with("assets/") || name.starts_with("data/")) && !entry.is_dir()
                     {
                         out.push((name.to_owned(), entry.size()));
@@ -3358,6 +3379,97 @@ capabilities = ["registries"]
         assert!(e.contains("item ids"), "{e}");
     }
 
+    /// An archive entry is checked under the name every reader sees: one with `\`, a leading
+    /// `/` or an empty part refuses the archive, even beside valid files, as the resource
+    /// loader would read `data\minecraft\...` as `data/minecraft/...`.
+    #[test]
+    fn an_archive_entry_with_another_separator_is_refused() {
+        use std::io::Write;
+        let read = |name: &str, extra: &str| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default();
+            let entries: [(&str, &[u8]); 3] = [
+                ("horizon-mod.toml", MANIFEST_TEXT.as_bytes()),
+                ("data/ruby/horizon/block/ruby_block.json", BLOCK),
+                (extra, b"{}"),
+            ];
+            for (entry, bytes) in entries {
+                zip.start_file(entry, options).unwrap();
+                zip.write_all(bytes).unwrap();
+            }
+            let dir = scratch(name);
+            let path = dir.join("m.hmod");
+            std::fs::write(&path, zip.finish().unwrap().into_inner()).unwrap();
+            let manifest = Manifest::parse(MANIFEST_TEXT).unwrap();
+            let package = Package::read(&path).map(|_| ());
+            let content = Content::read(&path, &manifest).map(|_| ());
+            std::fs::remove_dir_all(&dir).unwrap();
+            (package, content)
+        };
+        let (package, content) = read(
+            "plain-entry",
+            "data/minecraft/tags/block/mineable/pickaxe.json",
+        );
+        assert!(
+            package.is_ok() && content.is_ok(),
+            "{package:?} {content:?}"
+        );
+        for bad in [
+            "data\\minecraft\\tags\\block\\mineable\\pickaxe.json",
+            "data/minecraft\\recipe/stone.json",
+            "/data/ruby/a.json",
+            "data//ruby/a.json",
+        ] {
+            let (package, content) = read("alias-entry", bad);
+            for e in [package.unwrap_err(), content.unwrap_err()] {
+                assert!(e.contains("invalid package path"), "{bad}: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn adds_villager_work_blocks_but_nothing_else_of_horizon() {
+        let farmer = br#"{"values": ["ruby:ruby_block"]}"#;
+        let files: &[(&str, &[u8])] = &[
+            ("data/ruby/horizon/block/ruby_block.json", BLOCK),
+            (
+                "data/horizon/tags/block/villager_secondary_poi/farmer.json",
+                farmer,
+            ),
+        ];
+        let content = hmod("villager-poi", MANIFEST_TEXT, files).unwrap();
+        assert_eq!(content.files.len(), 2);
+        for name in [
+            "data/horizon/tags/block/other.json",
+            "data/horizon/tags/item/villager_secondary_poi/farmer.json",
+            "data/horizon/recipe/stone.json",
+            "assets/horizon/tags/block/villager_secondary_poi/farmer.json",
+            "data/horizon/tags/block/villager_secondary_poi/nested/farmer.json",
+            "data/horizon/tags/block/villager_secondary_poi/farmer.txt",
+            "data/horizon/tags/block/villager_secondary_poi/farmer.json.",
+            "data/horizon/tags/block/villager_secondary_poi/.json",
+            "data/horizon/tags/block/villager_secondary_poi/far.mer.json",
+        ] {
+            let e = hmod("horizon-ns", MANIFEST_TEXT, &[(name, farmer)]).unwrap_err();
+            // `farmer.json.` is already refused as a path part ending in a dot.
+            let expected = if name.ends_with("farmer.json.") {
+                "not a plain"
+            } else {
+                "own namespaces"
+            };
+            assert!(e.contains(expected), "{name}: {e}");
+        }
+        // A mod can't take the game's namespace as its id to step past the fence.
+        let as_horizon = MANIFEST_TEXT.replacen("id = \"ruby\"", "id = \"horizon\"", 1);
+        let e = hmod(
+            "horizon-id",
+            &as_horizon,
+            &[("data/horizon/recipe/stone.json", b"{}")],
+        )
+        .unwrap_err();
+        assert!(e.contains("no mod may claim"), "{e}");
+    }
+
     #[test]
     fn refuses_content_outside_its_fence() {
         let refused = |name: &str, files: &[(&str, &[u8])]| {
@@ -3600,6 +3712,9 @@ capabilities = ["registries"]
             "/assets/ruby/a",
             "other/ruby/a",
             "assets\\ruby\\a",
+            "data/ruby/a.",
+            "data/ruby./a",
+            "assets/ruby/a./b",
         ] {
             assert!(check_path(bad).is_err(), "{bad}");
         }

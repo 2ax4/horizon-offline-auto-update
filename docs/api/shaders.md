@@ -250,7 +250,9 @@ linear light: decode a constant written for display values with a 2.2 power, com
 `frame.luminance`, and stop returning `input.color.a` from post passes (their alpha is ignored). The example pack,
 `crates/horizon-shader-api/packs/golden_hour`, was moved this way. `packs/traced_shadows` and
 `packs/traced_water` are the smallest packs that trace rays, from a post pass and from the material stage
-([the guide](../shaders.md#ray-tracing)).
+([the guide](../shaders.md#ray-tracing)). `packs/horizon_hdr` is Horizon's own HDR look as a pack, from the look file
+the renderer's own shaders start with: it reads the light-source fields, `frame.full_lightmap` and `lit_tint`
+(changelog, 2026-11-19), and its README lists what a pack can't draw of the look yet.
 
 A 0.2 pack from before 2026-11-16 moves to the terrain's own inputs so: where it drew vanilla's colour with
 `input.tint` or `hit.tint`, it reads `shaded_tint` (the old value, the shade and ambient occlusion in it), or lights
@@ -295,6 +297,38 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
 
+- 2026-11-19: API 0.2 (change, preview): a pack without `[[post]]` whose frame holds gamma light also gets the
+  player's TAA, at the world's size (#16126 step 7); `frame.jitter` and `frame.previous_jitter` then carry its offset.
+  TAA upscaling and its sharpening stay off, and under any other pack TAA is off. With TAA off nothing changes. A pack
+  must never write an infinite value into the world's frame: TAA's history would carry it.
+- 2026-11-19: API 0.2 (additions, preview): `frame.jitter`, the world's sub-pixel offset this frame in clip space,
+  which `frame.projection` leaves out, and `frame.previous_jitter`, last frame's, declared only for a pack whose files
+  name either, at the end of `Frame`. Both are `(0, 0)` while the world isn't jittered, today in every pack's frame. A
+  pack that names neither sees the same prelude as before, and its picture is unchanged.
+- 2026-11-19: API 0.2 (addition, preview): a pack without `[[post]]` whose frame holds gamma light (not
+  `blend = "linear"` on the float frame) gets the player's FXAA, at the world's size, before its `[tonemap]` (#16126
+  step 6). TAA and upscaling stay off under every pack, and a pack with a post chain is unchanged. With FXAA off
+  nothing changes.
+- 2026-11-19: API 0.2 (addition, preview): `MaterialInput.lit_tint`, vanilla's lit vertex colour as Horizon's terrain
+  draws it: `shaded_tint` times the lightmap (coloured lights added under it) at each corner, then smoothed over the
+  face, so `albedo * lit_tint` is vanilla's lit colour where multiplying the two smoothed apart is not (6.6 steps of
+  255 off at an occluded corner beside a torch). Decoded as `shaded_tint` is, declared after the light-source fields
+  and before `shaded_tint` only for a pack whose files name it. It takes one varying, the terrain's last on the weakest
+  GPUs, and no look storage; a pack that doesn't name it sees the same prelude and entry points as before, and its
+  picture is unchanged. `packs/horizon_hdr` draws its blocks with it.
+- 2026-11-19: API 0.2 (additions, preview): what Horizon's own HDR look reads of light sources, for a pack that
+  draws it. `MaterialInput.light_source_tier` (0 none, 1 low to 4 very bright), `light_source_whole` (the whole sprite
+  shines) and `light_source_threshold` (the brightness a texel of the sprite must reach to shine), and
+  `EntityInput.light_source_tier`, declared after their other fields (before `shaded_tint`) only for a pack whose
+  files name one of the three; and `frame.full_lightmap`, the lightmap at full block and sky light, declared only for
+  a pack whose files name it, at the end of `Frame`. The vertex, the sprite and the lightmap already hold them: they
+  cost no vertex data, no look storage and no reload. A pack that names none of them sees the same prelude and entry
+  points as before, and its picture is unchanged.
+- 2026-11-18: API 0.2 (terrain ray-hit fix): a terrain hit's `tint`, `shade` and `ao` match
+  `MaterialInput` when a usable look record is available. Reading any of them queues fresh meshes for
+  loaded sections and costs eight bytes per face in CPU memory for loaded sections and in video
+  memory within the ray scene's reach. Without a usable record, `tint` uses the baked vertex
+  colour, with `shade` and `ao` both 1. `shaded_tint` and `emission` come from the vertex.
 - 2026-11-18: API 0.2 (preview), a fix toward the reference: a terrain hit's `RayHit.emission` is its block's light
   level over 15, as `MaterialInput.emission` (one candle 3/15, a lantern 1), no longer its brightness class (7/15,
   14/15 or 1); an entity hit's stays 0. `MaterialInput.emission` comes with the vertex, as `shaded_tint` does: of

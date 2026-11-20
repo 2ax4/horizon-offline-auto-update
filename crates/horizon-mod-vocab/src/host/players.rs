@@ -483,8 +483,7 @@ pub trait PlayersBackend {
     /// Side: server.
     /// The permission level `player_hide` hides the player from (players below it don't see
     /// them), None when they are not hidden. Kept by UUID, so it reads the same for a player
-    /// who rejoined hidden. The outer None is a stale world epoch, a client, or a world
-    /// nobody else can join.
+    /// who rejoined hidden. The outer None is a stale world epoch or a client.
     #[access(WorldOnly)]
     fn player_hidden(&self, player: PlayerRef) -> Option<Option<u8>>;
     /// Side: server.
@@ -492,6 +491,16 @@ pub trait PlayersBackend {
     /// have none. The outer None is a stale or offline player, or no server list.
     #[access(WorldOnly)]
     fn player_nickname(&self, player: PlayerRef) -> Option<Option<String>>;
+    /// Side: both.
+    /// `Player.hasCorrectToolForDrops(state)`: true when `state` needs no tool, else whether
+    /// the stack in the player's selected hotbar slot is a correct tool for it
+    /// (`BlockStates::is_correct_tool_for_drops`). Vanilla's own rule: mods'
+    /// `can_harvest_block` and `player_harvest_check` are not asked, so a listener of them
+    /// may call it. On a client, for the local player only. None for an unknown state, a
+    /// stale or unavailable player.
+    #[access(WorldOnly)]
+    fn player_has_correct_tool_for_drops(&self, player: PlayerRef, state: BlockState)
+    -> Option<bool>;
 }
 /// The handles' client reads of the `players` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -631,6 +640,19 @@ pub trait PlayersBackendMut {
     #[access(WorldOnly)]
     fn player_set_nickname(&mut self, player: PlayerRef, nickname: Option<&str>) -> bool;
     /// Side: server.
+    /// Shows `sidebar` on that player's screen in place of the one shown before, or takes it
+    /// away (None): an objective only their client holds, displayed in the sidebar slot, its
+    /// lines as scores with fixed or blank number formats (`ClientboundSetObjectivePacket`,
+    /// `SetDisplayObjective`, `SetScore`). The server's scoreboard, `/scoreboard` and the other
+    /// players don't see it; it covers a sidebar objective the world shows, for this player,
+    /// and is gone when they leave. False when they aren't on.
+    #[access(WorldOnly)]
+    fn player_set_sidebar(
+        &mut self,
+        player: PlayerRef,
+        sidebar: Option<Sidebar>,
+    ) -> Result<bool, TextFormError>;
+    /// Side: server.
     /// Shows `name` for that player in everyone's Tab list (Paper's `Player.playerListName`,
     /// NeoForge's `ServerPlayer.refreshTabListName`), colours and all; None shows the name the
     /// game would (their nickname or real name). The `player_tab_list_name_format` hook still
@@ -653,7 +675,7 @@ pub trait PlayersBackendMut {
     /// a player made an operator meanwhile sees them again. Kept by UUID, even
     /// after this handle disconnects (the player rejoins hidden), until a mod sets it again
     /// or the server stops. Works inside a player's hook too; false for a stale
-    /// world epoch, on a client and in a world nobody else can join.
+    /// world epoch and on a client.
     #[access(WorldOnly)]
     fn player_hide(&mut self, player: PlayerRef, level: Option<u8>) -> bool;
     /// Side: server.
