@@ -2385,6 +2385,7 @@ impl Game<'_> {
                     }
                 }
                 HostEvent::PlayerMove(conn) => self.lan_player_move(conn),
+                HostEvent::Pong { conn, id } => self.announce_player_pong(conn, id),
                 HostEvent::Input { conn, flags } => {
                     if !mod_api::__private::listened(mod_api::HookId::PlayerInput) {
                         continue;
@@ -2452,6 +2453,7 @@ impl Game<'_> {
     /// sees the support (arismoko/horizon#4510). `tick_lan` then syncs the level; a paused
     /// tick that never calls this still drains inside `tick_lan`.
     pub(in crate::game) fn tick_lan_packets(&mut self) {
+        self.answer_status_pings();
         if self.level_pass.packets_drained {
             return;
         }
@@ -2783,7 +2785,7 @@ impl Game<'_> {
             // piston's `triggerEvent` on the blocks as they were before the
             // move, a base the last tick restored included.
             for (pos, b0, b1, state) in std::mem::take(&mut self.lan_block_events) {
-                host.hub.block_event(pos, b0, b1, state);
+                host.hub.block_event(&self.world, pos, b0, b1, state);
             }
             let entities = states.as_slice();
             self.lan_prepare_captured_sounds(entities);
@@ -3331,7 +3333,7 @@ impl Game<'_> {
             }
         }
         for (pos, b0, b1, state) in std::mem::take(&mut self.lan_block_events) {
-            host.hub.block_event(pos, b0, b1, state);
+            host.hub.block_event(&self.world, pos, b0, b1, state);
         }
         for (id, event) in std::mem::take(&mut self.lan_entity_events) {
             host.hub.entity_event(id, event);

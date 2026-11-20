@@ -43,18 +43,43 @@ pub trait PlayersServerHost {
     #[access(WorldOnly)]
     fn server_set_max_players(&mut self, max_players: u32) -> Result<(), PlayerLimitRefusal>;
     /// Side: server.
+    /// Define or replace a view owned by the calling mod. Its ID is local to that mod.
+    /// An identical definition does nothing. Replacing rules refreshes every selection of that ID.
+    #[access(WorldOnly)]
+    fn server_define_terrain_view(
+        &mut self,
+        id: u32,
+        rules: &TerrainView,
+    ) -> Result<(), TerrainViewError>;
+    /// Side: server.
+    /// Select the calling mod's view for this connected player and dimension, or release its
+    /// selection with `None`. The first mod to select owns the slot until it releases it.
+    /// The UUID can come from `player_login`, before a player has a world handle. A changed
+    /// selection requeues terrain already sent in that dimension. Rules apply to both native and Wasm mods.
+    #[access(WorldOnly)]
+    fn player_set_terrain_view(
+        &mut self,
+        player: u128,
+        dimension: &str,
+        view: Option<u32>,
+    ) -> Result<(), TerrainViewError>;
+    /// Side: server.
     /// The profile of the player with this UUID, as the server knows it,
     /// never asked of Mojang: an online player's whole profile (the properties
     /// the player list gives, so with those `player_set_profile_property` set),
     /// else the user cache's name (`usercache.json`, a dedicated server's),
-    /// without properties. None when neither knows them.
+    /// without properties. None when neither knows them. For a current Mojang
+    /// lookup, including an account the server has never seen, use
+    /// [`Profiles::resolve_id`](crate::Profiles).
     #[access(WorldOnly)]
     fn profile_by_uuid(&self, uuid: u128) -> Option<GameProfile>;
     /// Side: server.
     /// The profile of the player with this name, any case, as
     /// `profile_by_uuid` knows it: an online player's, else an unexpired
     /// user cache entry. Never asked of Mojang, and an unknown name is not
-    /// made an offline player.
+    /// made an offline player. For a current Mojang lookup, including an
+    /// account the server has never seen, use
+    /// [`Profiles::resolve_name`](crate::Profiles).
     #[access(WorldOnly)]
     fn profile_by_name(&self, name: &str) -> Option<GameProfile>;
 }
@@ -484,7 +509,8 @@ pub trait PlayersBackend {
     /// Whether `viewer`'s client is shown the player `target` by the rules players are tracked
     /// with (`ServerPlayer.broadcastToPlayer`; Paper's `Player.canSee`): a spectator is seen
     /// only by spectators, and by them only while it watches through its own camera, and a
-    /// player hidden with `player_hide` is seen only by players of at least that level.
+    /// player hidden with `player_hide` is seen only by players of at least that level, and one a
+    /// mod hid from this viewer with `entity_set_visible_to` is not seen.
     /// Distance and chunks are not part of it, so a player out of range is still seen. A player
     /// sees themselves. Refuses with `PlayerWorldRefusal`: `Client`, `Stale` (a handle of the
     /// two no longer identifies a player in the server's list) and `NoConnection` (a fake
@@ -525,8 +551,11 @@ pub trait PlayersBackend {
     /// may call it. On a client, for the local player only. None for an unknown state, a
     /// stale or unavailable player.
     #[access(WorldOnly)]
-    fn player_has_correct_tool_for_drops(&self, player: PlayerRef, state: BlockState)
-    -> Option<bool>;
+    fn player_has_correct_tool_for_drops(
+        &self,
+        player: PlayerRef,
+        state: BlockState,
+    ) -> Option<bool>;
 }
 /// The handles' client reads of the `players` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -738,6 +767,30 @@ pub trait PlayersBackendMut {
         pos: Option<[i32; 3]>,
         replace: MenuReplace,
     ) -> Result<Option<i32>, OpenMenuError>;
+    /// Side: server.
+    /// Opens vanilla workstation menu `menu` for a connected player with no block, as a Java
+    /// item does with a `ContainerLevelAccess` at the player: `minecraft:crafting`, `loom`,
+    /// `grindstone`, `cartography_table`, `stonecutter`, `smithing` or `anvil`. The station
+    /// works where the player stands at each use (its sounds, experience and level events);
+    /// its input slots start with `inputs` (the crafting grid's nine, row by row; a station's
+    /// in its menu's order). It stays open while the player's inventory holds one of `keep`
+    /// (`AbstractContainerMenu.stillValid`) and closes as walking away does once it holds
+    /// none, so an empty `keep` closes it on the next tick. An anvil opened this way wears no
+    /// block and plays no anvil event: its mod does both after `anvil_craft_post`. Before the
+    /// inputs go back to the inventory on closing, `station_closing` lets a mod keep them.
+    /// The menu replaces the one the player had open, as `player_open_menu`'s does; a stock
+    /// client shows it. The window id, or Ok(None) when a mod cancelled the open. Errors:
+    /// `NotStation`, `PlayerUnavailable`, `TooManyInputs`, `Stack` for an input the game
+    /// refuses, or `Busy` from a hook the player's station asks while it opens or takes a click;
+    /// a refused open leaves the old menu as it was.
+    #[access(WorldOnly)]
+    fn player_open_station(
+        &mut self,
+        player: PlayerRef,
+        menu: MenuKey,
+        inputs: Vec<Option<ItemStack>>,
+        keep: Vec<ItemKey>,
+    ) -> Result<Option<i32>, OpenStationError>;
     /// Side: server.
     /// Backs the container slots of the mod menu `window` that `player_open_mod_menu` opened
     /// for the player with storage that is not a block entity (arismoko/horizon#3385; NeoForge's
