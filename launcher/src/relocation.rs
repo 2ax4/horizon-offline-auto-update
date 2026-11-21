@@ -39,6 +39,10 @@ fn remap(value: &mut Value, source: &Roots, target: &Roots) {
 pub fn prepare_paths(stage: &Roots, source: &Roots, target: &Roots) -> Result<(), String> {
     for name in ["settings.json", "servers.json", "instances.json"] {
         let path = stage.launcher.join(name);
+        // A copied relative link must not be written through to another staged file.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            data_location::reject_link(&path, &meta)?;
+        }
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -89,6 +93,16 @@ pub fn prepare_paths(stage: &Roots, source: &Roots, target: &Roots) -> Result<()
 
 /// Refuse live games/build tools even if the window that started them has already exited.
 fn ensure_idle(source: &Roots) -> Result<(), String> {
+    // A background service may run the server runtime's program from the launcher's data, and
+    // which one it runs can't be told without running it, so any registered one stops the move.
+    let services = crate::servers::registered_services()
+        .map_err(|e| format!("Couldn't check for background servers: {e}"))?;
+    if !services.is_empty() {
+        return Err(format!(
+            "Turn off running in the background on the Servers page, or run `horizon-server --dir <server folder> service uninstall` (add --system for a system service), before moving data: {}",
+            services.join(", ")
+        ));
+    }
     #[cfg(windows)]
     let output = process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"])
