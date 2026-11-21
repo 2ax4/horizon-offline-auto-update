@@ -895,10 +895,10 @@ fn a_replay_open_never_displaces_a_joining_or_multiplayer_session() {
 }
 
 /// The control socket's seek goes the way chat's, Studio's and mods' do: to the end, the world
-/// is rebuilt there and the clock reports exactly that, ended.
+/// is brought there and the clock reports exactly that, ended.
 #[test]
 #[ignore = "daily"]
-fn a_control_socket_seek_to_the_end_rebuilds_the_world_there() {
+fn a_control_socket_seek_to_the_end_brings_the_world_there() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("trip.mcpr");
     write_packets(
@@ -929,7 +929,7 @@ fn a_control_socket_seek_to_the_end_rebuilds_the_world_there() {
         assert_eq!((state.position_ms, state.ended), (1_000, true));
         assert!(
             said(game),
-            "the world rebuilt at the end holds what was said before it"
+            "the world at the end holds what was said before it"
         );
         assert!(
             game.replay.seek_report,
@@ -1426,4 +1426,555 @@ fn a_reopen_of_the_playing_archive_after_an_editor_save_is_refused() {
             "closed trip".into(),
         ]
     );
+}
+
+/// What a replay shows that its packets set: the chat, where entity 50 is, the block at
+/// (1, 64, 1).
+fn shown(game: &crate::game::Game<'_>) -> (Vec<String>, Option<[f64; 3]>, Option<String>) {
+    let host: &dyn ClientHost = game;
+    let position = game
+        .entity(50)
+        .and_then(|entity| game.entity_position(entity));
+    let block = host
+        .level("minecraft:overworld")
+        .and_then(|level| level.block(host, [1, 64, 1]))
+        .and_then(mod_api::__private::block_key_id)
+        .map(str::to_owned);
+    (game.ui.chat.recent_lines(10), position, block)
+}
+
+/// An air column at chunk (0, 0), for a recorded block change to land in.
+fn air_column(game: &crate::game::Game<'_>) -> horizon_protocol::packets::play::Clientbound {
+    use horizon_protocol::chunk::{ChunkData, LightData, Paletted, Section, Strategy};
+    use horizon_protocol::packets::play;
+    let air = game.res.facts().air.0 as i32;
+    let sections: Vec<_> = (0..24)
+        .map(|_| Section {
+            non_empty: 0,
+            fluids: 0,
+            states: Paletted::from_values(&[air; 4096], Strategy::Blocks, 16),
+            biomes: Paletted::from_values(&[0; 64], Strategy::Biomes, 2),
+        })
+        .collect();
+    play::Clientbound::LevelChunkWithLight(play::LevelChunkWithLight {
+        x: 0,
+        z: 0,
+        chunk: ChunkData {
+            heightmaps: vec![],
+            buffer: ChunkData::from_sections(&sections),
+            block_entities: vec![],
+        },
+        light: LightData {
+            sky_mask: vec![],
+            block_mask: vec![],
+            empty_sky_mask: vec![],
+            empty_block_mask: vec![],
+            sky: vec![],
+            block: vec![],
+        },
+    })
+}
+
+/// A mod's seek, carried out at the frame's end, and the frame drawn after it.
+fn seek_frame(game: &mut crate::game::Game<'_>, ms: u32) {
+    game.replay_seek(ms).unwrap();
+    game.native_replay_requests();
+    frame(game, 16);
+}
+
+/// A paused replay sought forward in steps shows what one rebuilt at the same position shows:
+/// the chat said by then, the entity where it is drawn and where the game's ticks then carry
+/// it, the block changed. Each step is heard exactly where it went.
+#[test]
+#[ignore = "daily"]
+fn a_replay_sought_forward_in_steps_shows_what_a_rebuild_there_shows() {
+    use horizon_protocol::packets::play;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trip.mcpr");
+    let mut steps = Vec::new();
+    let heard = with_heard(|game| {
+        // The session's ids for a pig and stone, read off a replay's session first.
+        let ids = root.path().join("ids.mcpr");
+        write_recording(&ids, 1_000, &[]);
+        let answer = game.open_studio_replay(&ids.display().to_string()).unwrap();
+        assert_eq!(answer["ok"], true);
+        let pig = game
+            .remote
+            .as_ref()
+            .unwrap()
+            .builtin
+            .get("minecraft:entity_type")
+            .unwrap()
+            .id("minecraft:pig")
+            .unwrap();
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap()
+            .0 as i32;
+        assert!(game.close_studio_replay());
+
+        write_packets(
+            &path,
+            1_000,
+            vec![
+                (0, login_packet()),
+                (0, air_column(game)),
+                (200, chat_packet("said at 200")),
+                (
+                    300,
+                    play::Clientbound::AddEntity(play::AddEntity {
+                        id: 50,
+                        uuid: 50,
+                        kind: pig,
+                        position: [0.5, 64.0, 0.5],
+                        velocity: [0.0; 3],
+                        pitch: 0,
+                        yaw: 0,
+                        head_yaw: 0,
+                        data: 0,
+                    }),
+                ),
+                (500, chat_packet("said at 500")),
+                (
+                    600,
+                    play::Clientbound::EntityPositionSync(play::EntityPositionSync {
+                        id: 50,
+                        path: play::PositionPath::Linear([3.5, 64.0, 2.5]),
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        on_ground: true,
+                    }),
+                ),
+                (
+                    700,
+                    play::Clientbound::BlockUpdate(play::BlockUpdate {
+                        pos: [1, 64, 1],
+                        state: stone,
+                    }),
+                ),
+                (900, chat_packet("said at 900")),
+            ],
+        );
+        let answer = game
+            .open_studio_replay(&path.display().to_string())
+            .unwrap();
+        assert_eq!(answer["ok"], true);
+        game.replay_pause().unwrap();
+        let opened = shown(game);
+        assert_eq!(opened.1, None, "no entity yet");
+        assert_eq!(opened.2.as_deref(), Some("minecraft:air"));
+
+        // Forward in steps, each past some of the packets.
+        for ms in [250, 400, 650, 800] {
+            seek_frame(game, ms);
+            assert_eq!(game.replay_state().unwrap().position_ms, ms);
+            steps.push(shown(game));
+        }
+        let forward = steps.last().unwrap().clone();
+        assert_eq!(
+            forward
+                .0
+                .iter()
+                .filter(|line| line.starts_with("said at"))
+                .count(),
+            2,
+            "{:?}",
+            forward.0
+        );
+        // Drawn where it was added on the seek's frame, whichever way the seek went: the game's
+        // own ticks (they run while the replay is paused) then carry it to where the sync at
+        // 600 sends it.
+        assert_eq!(forward.1, Some([0.5, 64.0, 0.5]));
+        assert_eq!(forward.2.as_deref(), Some("minecraft:stone"));
+        let ticked = |game: &mut crate::game::Game<'_>| {
+            for _ in 0..3 {
+                game.tick_remote_level().unwrap();
+            }
+            shown(game).1
+        };
+        assert_eq!(
+            ticked(game),
+            Some([3.5, 64.0, 2.5]),
+            "where the sync sent it"
+        );
+
+        // To the end, then back: the world rebuilt from the start at the same position.
+        seek_frame(game, 1_000);
+        assert!(game.replay_state().unwrap().ended);
+        seek_frame(game, 800);
+        assert_eq!(shown(game), forward, "a rebuild at 800 shows the same");
+        assert_eq!(ticked(game), Some([3.5, 64.0, 2.5]), "and moves the same");
+
+        game.replay_close().unwrap();
+        game.native_replay_requests();
+    });
+    assert_eq!(steps[0].1, None, "the pig comes at 300");
+    assert_eq!(steps[1].1, Some([0.5, 64.0, 0.5]), "added there");
+    assert_eq!(steps[1].2.as_deref(), Some("minecraft:air"));
+    let heard: Vec<_> = heard
+        .into_iter()
+        .filter(|line| line.starts_with("advanced"))
+        .collect();
+    assert_eq!(
+        heard,
+        [
+            "advanced 250",
+            "advanced 400",
+            "advanced 650",
+            "advanced 800",
+            "advanced 1000",
+            "advanced 800",
+        ]
+    );
+}
+
+/// A seek forward plays on in the same session; only a seek back makes a new one.
+#[test]
+#[ignore = "daily"]
+fn a_forward_seek_plays_on_and_only_a_backward_one_rebuilds() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trip.mcpr");
+    write_recording(&path, 1_000, &[200, 600]);
+    with_heard(|game| {
+        let answer = game
+            .open_studio_replay(&path.display().to_string())
+            .unwrap();
+        assert_eq!(answer["ok"], true);
+        let session = game.replay.connections;
+        game.seek_studio_replay(300).unwrap();
+        game.seek_studio_replay(900).unwrap();
+        assert_eq!(game.replay.connections, session, "played on");
+        assert_eq!(game.replay.connection, session);
+        game.seek_studio_replay(100).unwrap();
+        assert_eq!(game.replay.connections, session + 1, "rebuilt");
+        assert_eq!(game.replay.connection, game.replay.connections);
+        game.replay_close().unwrap();
+        game.native_replay_requests();
+    });
+}
+
+/// A seek to where the clock is, between two whole milliseconds or paused on one, reports that
+/// position; a seek forward past a packet that leaves the session ends the replay once, the
+/// rest of the batch not applied and nothing heard after.
+#[test]
+#[ignore = "daily"]
+fn a_seek_to_the_clock_reports_it_and_a_seek_past_a_leave_ends_the_replay_once() {
+    use horizon_protocol::packets::play;
+    let root = tempfile::tempdir().unwrap();
+    write_packets(
+        &root.path().join("kick.mcpr"),
+        1_000,
+        vec![
+            (0, login_packet()),
+            (
+                500,
+                play::Clientbound::DeleteChat(play::DeleteChat {
+                    signature: (5, None),
+                }),
+            ),
+            (500, chat_packet("said after the kick")),
+        ],
+    );
+    let mut request = 0;
+    let heard = with_heard(|game| {
+        game.replay.recordings_dir = Some(root.path().to_path_buf());
+        request = game.replay_open("kick").unwrap();
+        finish_opening(game);
+        let session = game.replay.connections;
+        // The open's first frame ran 16 ms; 33 ms at half speed puts the clock at 32.5.
+        game.replay_set_speed(0.5).unwrap();
+        frame(game, 33);
+        assert_eq!(game.replay_state().unwrap().position_ms, 32);
+        seek_frame(game, 32);
+        game.replay_pause().unwrap();
+        seek_frame(game, 32);
+        assert_eq!(game.replay.connections, session, "never rebuilt");
+
+        game.replay_seek(600).unwrap();
+        game.native_replay_requests();
+        assert_eq!(game.replay_state(), None);
+        frame(game, 16);
+        game.native_replay_requests();
+        assert!(
+            !game
+                .ui
+                .chat
+                .recent_lines(10)
+                .iter()
+                .any(|line| line == "said after the kick"),
+            "the rest of the batch went nowhere"
+        );
+    });
+    assert_eq!(
+        heard,
+        [
+            format!("opened kick 1000 true #{request}"),
+            "advanced 32".into(),
+            "advanced 32".into(),
+            "advanced 32".into(),
+            "closed kick".into(),
+        ]
+    );
+}
+
+/// A seek forward across a recorded relative teleport of the player is rebuilt: the player
+/// lands where a fresh open sought there puts it, not on wherever the game's ticks had moved it.
+#[test]
+#[ignore = "daily"]
+fn a_forward_seek_across_a_relative_teleport_lands_where_a_rebuild_does() {
+    use horizon_protocol::packets::play;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("hop.mcpr");
+    let at = |relatives, position| {
+        play::Clientbound::PlayerPosition(play::PlayerPosition {
+            teleport: 0,
+            position,
+            delta: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            relatives,
+        })
+    };
+    let height = |game: &crate::game::Game<'_>| game.player.as_ref().unwrap().position;
+    with_heard(|game| {
+        // The session's air, read off a replay's session first.
+        let ids = root.path().join("ids.mcpr");
+        write_recording(&ids, 1_000, &[]);
+        let answer = game.open_studio_replay(&ids.display().to_string()).unwrap();
+        assert_eq!(answer["ok"], true);
+        let column = air_column(game);
+        assert!(game.close_studio_replay());
+        write_packets(
+            &path,
+            1_000,
+            vec![
+                (0, login_packet()),
+                (0, column),
+                (0, at(0, [8.5, 80.0, 8.5])),
+                (500, at(play::relative::Y, [0.0, 2.0, 0.0])),
+            ],
+        );
+
+        let answer = game
+            .open_studio_replay(&path.display().to_string())
+            .unwrap();
+        assert_eq!(answer["ok"], true);
+        for _ in 0..10 {
+            game.tick_remote_level().unwrap();
+        }
+        assert!(height(game).y < 80.0, "the game's ticks moved the player");
+        let session = game.replay.connections;
+        game.seek_studio_replay(600).unwrap();
+        assert_eq!(game.replay.connections, session + 1, "rebuilt");
+        let sought = height(game);
+        assert!(game.close_studio_replay());
+
+        let answer = game
+            .open_studio_replay(&path.display().to_string())
+            .unwrap();
+        assert_eq!(answer["ok"], true);
+        game.seek_studio_replay(600).unwrap();
+        assert_eq!(sought, height(game), "as a fresh open sought there");
+        assert_eq!(sought.y, 82.0);
+        assert!(game.close_studio_replay());
+    });
+}
+
+/// A recording whose reads all fail from here on, as a damaged archive's would: playing and
+/// every seek that reads fail.
+struct FailingReads(Box<dyn PacketSource>);
+
+impl FailingReads {
+    fn error() -> io::Error {
+        io::Error::other("injected read failure")
+    }
+}
+
+impl PacketSource for FailingReads {
+    fn position_ms(&self) -> u32 {
+        self.0.position_ms()
+    }
+    fn duration_ms(&self) -> u32 {
+        self.0.duration_ms()
+    }
+    fn packet_count(&self) -> usize {
+        self.0.packet_count()
+    }
+    fn progress(&self) -> f32 {
+        self.0.progress()
+    }
+    fn speed(&self) -> f64 {
+        self.0.speed()
+    }
+    fn set_speed(&mut self, speed: f64) {
+        self.0.set_speed(speed);
+    }
+    fn is_paused(&self) -> bool {
+        self.0.is_paused()
+    }
+    fn set_paused(&mut self, paused: bool) {
+        self.0.set_paused(paused);
+    }
+    fn toggle_pause(&mut self) {
+        self.0.toggle_pause();
+    }
+    fn set_looping(&mut self, looping: bool) {
+        self.0.set_looping(looping);
+    }
+    fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+    fn advance(&mut self, _: Duration) -> io::Result<Vec<TimestampedPacket>> {
+        Err(Self::error())
+    }
+    fn seek(&mut self, _: u32) -> io::Result<()> {
+        Err(Self::error())
+    }
+    fn seek_and_collect(&mut self, _: u32) -> io::Result<Vec<TimestampedPacket>> {
+        Err(Self::error())
+    }
+    fn seek_forward(&mut self, _: u32) -> io::Result<Vec<TimestampedPacket>> {
+        Err(Self::error())
+    }
+    fn restart(&mut self) -> io::Result<()> {
+        Err(Self::error())
+    }
+    // The editor's close reaches the real driver (its camera path).
+    fn as_any(&self) -> &dyn Any {
+        self.0.as_any()
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self.0.as_any_mut()
+    }
+}
+
+/// A read that fails while a replay seeks or plays ends it as a close does: mods hear it closed
+/// once, a standalone replay's session goes, and the seek's caller gets the error. A refused
+/// backward seek of an in-world replay ends nothing.
+#[test]
+#[ignore = "daily"]
+fn a_failed_read_ends_the_replay_as_a_close_does() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("worn.mcpr");
+    write_recording(&path, 1_000, &[200, 600]);
+    let open = |game: &mut crate::game::Game<'_>| {
+        let answer = game
+            .open_studio_replay(&path.display().to_string())
+            .unwrap();
+        assert_eq!(answer["ok"], true);
+        let driver = game.replay.driver.take().unwrap();
+        game.replay.driver = Some(Box::new(FailingReads(driver)));
+    };
+    let ended = |game: &mut crate::game::Game<'_>| {
+        assert_eq!(game.replay_state(), None);
+        assert!(game.remote.is_none(), "the replay's session went");
+        frame(game, 16);
+        game.native_replay_requests();
+    };
+    let heard = with_heard(|game| {
+        // A seek back rebuilds; a seek forward whose read fails falls back to a rebuild.
+        for target in [0, 900] {
+            open(game);
+            assert!(game.seek_studio_replay(target).is_err());
+            ended(game);
+        }
+        open(game);
+        game.replay_seek(900).unwrap();
+        game.native_replay_requests();
+        ended(game);
+        open(game);
+        let answer = game
+            .studio_control(&["studio", "replay", "seek", "900"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer["error"], "injected read failure");
+        ended(game);
+        open(game);
+        assert!(game.studio_command("studio replay seek 900"));
+        ended(game);
+        open(game);
+        frame(game, 16);
+        ended(game);
+
+        play(game, 10_000);
+        let mut clock = Clock::new(10_000);
+        clock.seek(500).unwrap();
+        game.replay.driver = Some(Box::new(FailingReads(Box::new(clock))));
+        assert_eq!(
+            game.seek_studio_replay(100).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(game.replay_state().is_some(), "refused, not ended");
+        assert!(game.seek_studio_replay(800).is_err());
+        assert_eq!(game.replay_state(), None);
+    });
+    let closed: Vec<_> = heard
+        .iter()
+        .filter(|line| line.starts_with("closed"))
+        .collect();
+    // A replay opened by path has no recording id.
+    assert_eq!(
+        closed,
+        ["closed "; 6]
+            .into_iter()
+            .chain(["closed demo"])
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A close whose save of the edited camera path fails keeps the path in a new draft beside the
+/// recording and says where in chat, whether a failed read or the player closed it; a later
+/// draft never replaces an earlier one.
+#[test]
+#[ignore = "daily"]
+fn a_close_that_cannot_save_the_camera_path_keeps_it_in_a_draft() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trip.mcpr");
+    write_recording(&path, 1_000, &[200, 600]);
+    let draft = |name: &str| {
+        let json = std::fs::read(root.path().join(name)).unwrap();
+        serde_json::from_slice::<CameraTrack>(&json).unwrap()
+    };
+    with_heard(|game| {
+        game.replay.recordings_dir = Some(root.path().to_path_buf());
+        let edited = |game: &mut crate::game::Game<'_>, at| {
+            game.replay_open("trip").unwrap();
+            finish_opening(game);
+            let keyframe = CameraKeyframe::new(at, [1.0, 2.0, 3.0], 10.0, 5.0, 70.0);
+            game.studio.freecam.track.insert(keyframe.clone());
+            game.studio.camera_track_dirty = true;
+            // Another file put at the recording's path: the save into it is refused.
+            std::fs::remove_file(&path).unwrap();
+            write_recording(&path, 1_000, &[200, 600]);
+            keyframe
+        };
+        let said = |game: &crate::game::Game<'_>, name: &str| {
+            let draft = root.path().join(name).display().to_string();
+            game.ui
+                .chat
+                .recent_lines(10)
+                .iter()
+                .any(|line| line.contains(&draft))
+        };
+
+        let first = edited(game, 250);
+        let driver = game.replay.driver.take().unwrap();
+        game.replay.driver = Some(Box::new(FailingReads(driver)));
+        assert!(game.seek_studio_replay(900).is_err());
+        assert_eq!(game.replay_state(), None);
+        assert_eq!(draft("trip.camera-draft.json").keyframes(), [first]);
+        assert!(said(game, "trip.camera-draft.json"));
+
+        let second = edited(game, 750);
+        assert!(game.close_studio_replay());
+        assert_eq!(draft("trip.camera-draft-2.json").keyframes(), [second]);
+        assert!(said(game, "trip.camera-draft-2.json"));
+        assert!(
+            ReplayDriver::open(&path).unwrap().camera_path().is_none(),
+            "the file put in its place is untouched"
+        );
+    });
 }

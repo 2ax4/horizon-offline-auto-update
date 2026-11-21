@@ -15,6 +15,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// A recorded `PlayerPosition` that moves the local player relative to where it is (a rotation
+/// or velocity relative to it moves nothing).
+fn moves_player_relatively(packet: &horizon_client::studio::mcpr::TimestampedPacket) -> bool {
+    use horizon_protocol::packets::play::{self, relative};
+    packet.id == horizon_protocol::ids::play::clientbound::PLAYER_POSITION
+        && matches!(
+            play::Clientbound::decode(packet.id, &packet.payload),
+            Ok(play::Clientbound::PlayerPosition(p))
+                if p.relatives & (relative::X | relative::Y | relative::Z) != 0
+        )
+}
+
 /// The packet replay a `Game` plays, if any, and its playback clock.
 #[derive(Default)]
 pub(super) struct Replay {
@@ -361,9 +373,13 @@ impl Game<'_> {
         }
     }
 
-    /// Reconstruct replay state at a target timestamp. Standalone replays can
-    /// safely reset their synthetic remote; an in-world replay can only seek
-    /// forward because its pre-replay world must remain intact.
+    /// Bring replay state to a target timestamp. A seek forward plays on: only the packets
+    /// between the clock and the target are applied, paused or playing, since every packet up
+    /// to the clock already was. A standalone replay seeking back (or forward across a relative
+    /// teleport of the player, or after a failed forward read) resets its synthetic remote and
+    /// replays from the start; an in-world replay can only seek forward because its
+    /// pre-replay world must remain intact. A failed rebuild, or a failed forward read of an
+    /// in-world replay, ends the replay (`fail_studio_replay`) and its error is returned.
     pub(super) fn seek_studio_replay(&mut self, target_ms: u32) -> std::io::Result<()> {
         let current_ms = self
             .replay
@@ -371,16 +387,35 @@ impl Game<'_> {
             .as_ref()
             .map_or(0, |driver| driver.position_ms());
         let packets = if self.replay.standalone {
-            let packets = self
+            let driver = self
                 .replay
                 .driver
                 .as_mut()
-                .expect("replay checked by caller")
-                .seek_and_collect(target_ms)?;
-            self.init_remote_for_replay()
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            self.reset_replay_world_extras();
-            packets
+                .expect("replay checked by caller");
+            // A failed forward read may have dropped packets it had taken, and a relative
+            // teleport would land on the player's simulated position: rebuilt instead, from the
+            // start, whatever the forward read took.
+            let forward = (target_ms >= current_ms)
+                .then(|| driver.seek_forward(target_ms).ok())
+                .flatten()
+                .filter(|packets| !packets.iter().any(moves_player_relatively));
+            match forward {
+                Some(packets) => packets,
+                None => {
+                    let rebuilt = driver.seek_and_collect(target_ms).and_then(|packets| {
+                        self.init_remote_for_replay()
+                            .map(|()| packets)
+                            .map_err(|error| std::io::Error::other(error.to_string()))
+                    });
+                    match rebuilt {
+                        Ok(packets) => {
+                            self.reset_replay_world_extras();
+                            packets
+                        }
+                        Err(error) => return Err(self.fail_studio_replay(error)),
+                    }
+                }
+            }
         } else {
             if target_ms < current_ms {
                 return Err(std::io::Error::new(
@@ -388,11 +423,16 @@ impl Game<'_> {
                     "backward seek requires a standalone replay",
                 ));
             }
-            self.replay
+            let forward = self
+                .replay
                 .driver
                 .as_mut()
                 .expect("replay checked by caller")
-                .seek_forward(target_ms)?
+                .seek_forward(target_ms);
+            match forward {
+                Ok(packets) => packets,
+                Err(error) => return Err(self.fail_studio_replay(error)),
+            }
         };
 
         self.dispatch_studio_replay_packets(packets);
@@ -403,6 +443,15 @@ impl Game<'_> {
         self.replay.last_tick = Some(std::time::Instant::now());
         self.replay.seek_report = true;
         Ok(())
+    }
+
+    /// A read that failed part-way left the reader, the clock and the world out of step, and
+    /// the packets it took are lost: the replay ends as a close ends it. `error` goes back to
+    /// the caller to report.
+    fn fail_studio_replay(&mut self, error: std::io::Error) -> std::io::Error {
+        log::error!("Studio replay read failed, closing the replay: {error}");
+        self.close_studio_replay();
+        error
     }
 
     /// What the recording's packets set on the game outside the replay's session (which
@@ -499,8 +548,8 @@ impl Game<'_> {
 
         let ready_packets = match driver.advance(delta) {
             Ok(pkts) => pkts,
-            Err(e) => {
-                log::warn!("Studio replay advance error: {e}");
+            Err(error) => {
+                self.fail_studio_replay(error);
                 return Ok(());
             }
         };
@@ -641,7 +690,7 @@ impl Game<'_> {
                     if self.replay.driver.is_none() {
                         return Ok(Some(json!({ "error": "no active replay" })));
                     }
-                    // As chat, Studio and mods seek: the world rebuilt at the position, which the
+                    // As chat, Studio and mods seek: the world brought to the position, which the
                     // next frame reports exactly.
                     if let Err(error) = self.seek_studio_replay(ms) {
                         return Ok(Some(json!({ "error": error.to_string() })));
