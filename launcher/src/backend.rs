@@ -1066,6 +1066,47 @@ pub fn version_dir(tag: &str) -> PathBuf {
 
 pub(crate) const COMPLETE: &str = ".installed";
 
+/// Whether version `tag` is still installed: its folder holds the mark an install ends with. A
+/// player may delete `versions` (or one version's folder) while the window keeps the list it read.
+pub fn is_installed(tag: &str) -> bool {
+    version_dir(tag).join(COMPLETE).exists()
+}
+
+/// The first of `tags` no longer installed, with the installed versions read again, for a window
+/// whose list is older than the disk ([`is_installed`]).
+pub fn gone(tags: &[&str]) -> Option<(String, Vec<String>)> {
+    gone_from(&versions_dir(), tags)
+}
+
+/// The installed versions read again when `tag` is installed after all: another launcher or the
+/// command line may take a version's mark away for a moment while it replaces it, so Reinstall
+/// looks once more before downloading it.
+pub fn installed_again(tag: &str) -> Option<Vec<String>> {
+    installed_again_in(&versions_dir(), tag)
+}
+
+fn installed_again_in(versions: &Path, tag: &str) -> Option<Vec<String>> {
+    gone_from(versions, &[tag])
+        .is_none()
+        .then(|| installed_in(versions))
+}
+
+fn gone_from(versions: &Path, tags: &[&str]) -> Option<(String, Vec<String>)> {
+    let gone = tags
+        .iter()
+        .find(|tag| !versions.join(tag).join(COMPLETE).exists())?;
+    Some((gone.to_string(), installed_in(versions)))
+}
+
+/// What Prepare and Play say when the version they were asked for is no longer installed: `name`
+/// is the version as the window names it.
+pub fn version_gone(name: &str) -> String {
+    crate::i18n::trf(
+        "{version} is no longer on this computer.",
+        &[("version", name)],
+    )
+}
+
 /// Installed versions, newest tag first.
 pub fn installed() -> Vec<String> {
     installed_in(&versions_dir())
@@ -1183,10 +1224,24 @@ pub(crate) fn save_checked(
     to: &Path,
     progress: &impl Fn(f32),
 ) -> Result<(), String> {
+    save_checked_until(reader, size, name, sha256, to, progress, &|| Ok(()))
+}
+
+/// [`save_checked`] that asks `stop` before each chunk it reads: its error ends the download at
+/// once, word for word, and the temporary file is removed.
+pub(crate) fn save_checked_until(
+    reader: impl Read,
+    size: u64,
+    name: &str,
+    sha256: &str,
+    to: &Path,
+    progress: &impl Fn(f32),
+    stop: &dyn Fn() -> Result<(), String>,
+) -> Result<(), String> {
     let mut temp = to.as_os_str().to_owned();
     temp.push(format!(".part-{}", std::process::id()));
     let temp = PathBuf::from(temp);
-    let saved = write_checked(reader, size, name, sha256, &temp, progress)
+    let saved = write_checked(reader, size, name, sha256, &temp, progress, stop)
         .and_then(|()| fs::rename(&temp, to).map_err(|e| e.to_string()));
     if saved.is_err() {
         let _ = fs::remove_file(&temp);
@@ -1201,11 +1256,13 @@ fn write_checked(
     sha256: &str,
     to: &Path,
     progress: &impl Fn(f32),
+    stop: &dyn Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     let mut file = fs::File::create(to).map_err(|e| e.to_string())?;
     let mut hash = horizon_release_sign::Sha256::default();
     let (mut done, mut buf) = (0u64, vec![0u8; 1 << 16]);
     loop {
+        stop()?;
         let n = reader
             .read(&mut buf)
             .map_err(|e| format!("Download interrupted: {e}"))?;
@@ -2020,7 +2077,7 @@ fn minecraft_folders() -> Vec<PathBuf> {
     let mut folders: Vec<PathBuf> = Settings::load().minecraft_dir.into_iter().collect();
     folders.extend([
         prepare::artifacts::minecraft_dir(None),
-        data_dir().join("linked-minecraft"),
+        data_dir().join(sources::LINKED),
         data_dir().join("minecraft"),
     ]);
     folders.extend(
@@ -2351,7 +2408,7 @@ fn assets_folder(
 ) -> PathBuf {
     match resolved {
         Ok(sources::Resolved::Folder(dir)) => dir,
-        Ok(sources::Resolved::NotFound(_)) => {
+        Ok(sources::Resolved::NotFound(..)) => {
             log(format!(
                 "Minecraft {version}'s assets were not found in any launcher folder: the game \
                  will be silent and the title screen plain"
@@ -2362,6 +2419,27 @@ fn assets_folder(
             log(format!("Minecraft {version}'s assets: {e}"));
             chosen.to_path_buf()
         }
+    }
+}
+
+/// Why no Minecraft folder could be prepared from, after the download from Mojang failed with
+/// `download` (a line starting with a bullet). Folders that have the game but lack `incomplete` (a
+/// library's file name) get one short sentence, and the window offers the download again
+/// ([`prepare_offers_mojang`]); otherwise every folder looked in, with what it lacks.
+fn incomplete_or_not_found(
+    version: &str,
+    checked: &[(PathBuf, String)],
+    chosen: &Path,
+    incomplete: Option<String>,
+    download: &str,
+) -> String {
+    match incomplete {
+        Some(file) => {
+            MOJANG_OFFERED.store(true, std::sync::atomic::Ordering::Relaxed);
+            let why = download.trim_start_matches("\n  • ");
+            format!("{} {why}", sources::incomplete(version, &file))
+        }
+        None => sources::not_found(version, checked, chosen) + download,
     }
 }
 
@@ -2410,6 +2488,15 @@ pub fn set_prepare_step(step: PrepareStep) {
     PREPARE_STEP.store(step as usize, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Set when the last [`preparer`] failed because the only Minecraft folders with the game lack a
+/// library and the download from Mojang didn't happen: the window then offers that download.
+static MOJANG_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the last failed preparation offers Download from Mojang ([`MOJANG_OFFERED`]).
+pub fn prepare_offers_mojang() -> bool {
+    MOJANG_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Checks what the preparation needs and picks how to run it. PLAY.txt describes the same
 /// steps: the player's own launcher install, the server jar from that version's own json, and
 /// Java (and Python, for versions before horizon-prepare). Also returns the Minecraft folder
@@ -2422,6 +2509,11 @@ pub fn preparer(
     log: &dyn Fn(String),
 ) -> Result<(Preparer, PathBuf), String> {
     set_prepare_step(PrepareStep::Files);
+    // Deleted while the window was open: never the folder's OS error from the steps below.
+    if !is_installed(tag) {
+        return Err(version_gone(tag));
+    }
+    MOJANG_OFFERED.store(false, std::sync::atomic::Ordering::Relaxed);
     let version = game_version(tag);
     let dir = version_dir(tag);
     let reused = prepare::artifacts::reuse_imported(&dir, &|line| log(line.to_string()))?;
@@ -2439,22 +2531,35 @@ pub fn preparer(
                 .unwrap_or_default(),
         );
         let fetch = crate::downloads::install_metadata;
-        let linked = data_dir().join("linked-minecraft");
+        let linked = data_dir().join(sources::LINKED);
         if from == MinecraftFrom::Mojang {
             // Straight from Mojang (what is already there and whole is kept), for an owner only.
             download_for_owner(&pins, &own, &fetch, log)
                 .map_err(|e| e.trim_start_matches("\n  • ").to_string())?;
             own
         } else {
-            let resolved = sources::resolve(minecraft, &pins, &known, &linked, &fetch, log);
+            // Reused game files need only the assets: a folder missing libraries still has them.
+            // Otherwise a library this version already imported needn't be in the folder.
+            let imported = prepare::artifacts::Lock::read(&dir).map(|lock| lock.directory);
+            let whole = imported.as_ref().ok().filter(|_| !reused);
+            let resolved = sources::resolve(
+                minecraft,
+                &pins,
+                &known,
+                &linked,
+                whole.map(PathBuf::as_path),
+                &fetch,
+                log,
+            );
             if reused {
                 assets_folder(resolved, &chosen, &version, log)
             } else {
                 match resolved? {
                     sources::Resolved::Folder(dir) => dir,
-                    sources::Resolved::NotFound(checked) => {
-                        let not_found = sources::not_found(&version, &checked, minecraft);
-                        download_for_owner(&pins, &own, &fetch, log).map_err(|e| not_found + &e)?;
+                    sources::Resolved::NotFound(checked, incomplete) => {
+                        download_for_owner(&pins, &own, &fetch, log).map_err(|e| {
+                            incomplete_or_not_found(&version, &checked, minecraft, incomplete, &e)
+                        })?;
                         own
                     }
                 }
@@ -3518,13 +3623,13 @@ pub fn install_tag(tag: &str, as_update: bool, progress: impl Fn(f32)) -> Result
         releases
             .iter()
             .find(|r| r.asset.is_some() && !r.prerelease)
-            .ok_or("No release has a build for this platform yet.")?
+            .ok_or_else(|| crate::refusals::no_build(None))?
     } else {
         release_selection::by_tag(&releases, tag)
             .ok_or_else(|| format!("No Horizon release is tagged {tag}."))?
     };
     if release.asset.is_none() {
-        return Err(format!("{} has no build for this platform.", release.tag));
+        return Err(crate::refusals::no_build(Some(&release.tag)));
     }
     let before = installed();
     let downgrade = nightly_downgrade(release, &before);
@@ -4299,6 +4404,8 @@ pub enum Job {
 pub struct Running {
     pub child: Arc<Mutex<Child>>,
     pub stdin: Option<ChildStdin>,
+    /// Set before `Msg::Exit` when the game refused its folder leases (exit 78).
+    pub leases_refused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Launcher-owned tree-lock primitives and optional Windows runtime state.
@@ -4332,9 +4439,10 @@ pub fn prepare_command(cmd: Command) -> Result<(Command, RuntimeGuard), String> 
             Vec::new()
         }
         Err(error @ crate::native_cache::Error::Io(_)) => {
-            return Err(crate::i18n::trf(
-                "{error}. Make sure your account can write to the game's and the launcher's folders, then try again.",
-                &[("error", &crate::native_mods::cache_error(error))],
+            return Err(crate::refusals::unwritable(
+                &crate::native_mods::cache_error(error),
+                cmd.get_current_dir(),
+                &data_dir(),
             ));
         }
         Err(error) => return Err(crate::native_mods::cache_error(error)),
@@ -4384,6 +4492,7 @@ pub fn spawn(job: Job, cmd: Command, tx: Sender<Msg>) -> Result<Running, String>
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let direct = job == Job::Client && crate::refusals::runs_horizon_directly(&cmd);
     let mut child = play_log::spawn(&mut cmd)?;
     let stdin = child.stdin.take();
     let mut readers = Vec::new();
@@ -4405,6 +4514,8 @@ pub fn spawn(job: Job, cmd: Command, tx: Sender<Msg>) -> Result<Running, String>
     }
     let child = Arc::new(Mutex::new(child));
     let waited = child.clone();
+    let leases_refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refused = leases_refused.clone();
     std::thread::spawn(move || {
         for r in readers {
             let _ = r.join();
@@ -4417,13 +4528,22 @@ pub fn spawn(job: Job, cmd: Command, tx: Sender<Msg>) -> Result<Running, String>
         };
         let result = match status {
             Ok(s) if s.success() => Ok(()),
-            Ok(s) => Err(format!("Exited with {s}")),
+            Ok(s) => {
+                let exit = crate::refusals::exit_error(direct, s);
+                // Ordered before the send: the window reads it when the exit arrives.
+                refused.store(exit.leases_refused, std::sync::atomic::Ordering::SeqCst);
+                Err(exit.text)
+            }
             Err(e) => Err(e.to_string()),
         };
         drop(runtime);
         let _ = tx.send(Msg::Exit(job, result));
     });
-    Ok(Running { child, stdin })
+    Ok(Running {
+        child,
+        stdin,
+        leases_refused,
+    })
 }
 
 /// The launcher's appearance, as older launchers saved it: a theme is one look now, and a saved
@@ -5315,7 +5435,7 @@ pub fn {f}("
         let fetch = |_: &str| Ok(manifest.to_vec());
         let lines = std::cell::RefCell::new(Vec::new());
         let log = |line: String| lines.borrow_mut().push(line);
-        let resolved = sources::resolve(&instance, &pins, &[], &linked, &fetch, &log);
+        let resolved = sources::resolve(&instance, &pins, &[], &linked, None, &fetch, &log);
         let folder = assets_folder(resolved, &instance, "26.3", &log);
         assert_eq!(folder, linked);
         assert!(folder.join("assets/indexes/34.json").is_file());
@@ -5323,7 +5443,7 @@ pub fn {f}("
         // Nothing found: the chosen folder, and a line saying what the game will lack.
         let empty = dir.join("empty");
         fs::create_dir_all(&empty).unwrap();
-        let resolved = sources::resolve(&empty, &pins, &[], &linked, &fetch, &log);
+        let resolved = sources::resolve(&empty, &pins, &[], &linked, None, &fetch, &log);
         assert_eq!(assets_folder(resolved, &empty, "26.3", &log), empty);
         assert!(lines.borrow().last().unwrap().contains("will be silent"));
         fs::remove_dir_all(&dir).unwrap();
@@ -6555,6 +6675,40 @@ pub fn {f}("
         save_checked(bytes, 0, "asset", &right, &to, &|_: f32| {}).unwrap();
         assert_eq!(fs::read(&to).unwrap(), bytes);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A stopped download reads nothing after the stop, ends with the stop's words and keeps
+    /// no temporary file (#19300).
+    #[test]
+    fn a_stopped_download_reads_no_further_and_keeps_nothing() {
+        struct Endless<'a>(&'a std::cell::Cell<u32>);
+        impl Read for Endless<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.set(self.0.get() + 1);
+                buf.fill(7);
+                Ok(buf.len())
+            }
+        }
+        let dir = scratch("save-stopped");
+        let to = dir.join("download.zip");
+        let reads = std::cell::Cell::new(0);
+        let stop = || match reads.get() >= 3 {
+            true => Err("stopped".to_string()),
+            false => Ok(()),
+        };
+        let result = save_checked_until(
+            Endless(&reads),
+            1 << 30,
+            "asset",
+            &horizon_release_sign::sha256_hex(b""),
+            &to,
+            &|_: f32| {},
+            &stop,
+        );
+        assert_eq!(result.unwrap_err(), "stopped");
+        assert_eq!(reads.get(), 3);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -7969,7 +8123,9 @@ pub fn {f}("
             fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
             fs::create_dir_all(app.join("Contents/Resources")).unwrap();
             let bin = app.join("Contents/MacOS/horizon-launcher");
-            fs::copy("/usr/bin/true", &bin).unwrap();
+            // This test binary, not a system one: an ad-hoc re-signed arm64e system binary is killed on
+            // GitHub's macOS 15 runners.
+            fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
             fs::write(app.join("Contents/Resources/version"), version).unwrap();
             fs::write(
@@ -8005,7 +8161,13 @@ pub fn {f}("
         assert_eq!(version, "2.0.0");
         let bin = installed.join("Contents/MacOS/horizon-launcher");
         assert!(
-            Command::new(&bin).status().unwrap().success(),
+            // Lists no test and runs none.
+            Command::new(&bin)
+                .args(["--list", "--exact", "no test has this name"])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
             "still executable"
         );
         let valid = Command::new("codesign")
@@ -8254,6 +8416,88 @@ pub fn {f}("
             envs.get(OsStr::new("PIPEWIRE_PROPS")),
             Some(&Some(OsStr::new("kept")))
         );
+    }
+
+    /// A player deleted a version's folder while the window was open: Prepare and Play refuse
+    /// with one sentence, never the folder's OS error, and the window's list and selection are
+    /// read again from the disk.
+    #[test]
+    fn a_version_deleted_while_the_window_is_open_is_refused_and_the_list_refreshed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let versions = scratch.path().join("versions");
+        for tag in ["scratch-a", "scratch-b"] {
+            fs::create_dir_all(versions.join(tag)).unwrap();
+            fs::write(versions.join(tag).join(COMPLETE), b"").unwrap();
+        }
+        let mut settings = Settings {
+            selected: Some("scratch-a".into()),
+            ..Settings::default()
+        };
+        assert_eq!(gone_from(&versions, &["scratch-a"]), None);
+
+        fs::remove_dir_all(versions.join("scratch-a")).unwrap();
+        let (gone, installed) = gone_from(&versions, &["scratch-a", "scratch-b"]).unwrap();
+        assert_eq!(gone, "scratch-a");
+        assert_eq!(installed, ["scratch-b"]);
+        settings.keep_installed_selection(&installed);
+        assert_eq!(settings.selected.as_deref(), Some("scratch-b"));
+
+        // Back before Reinstall was pressed (another process replacing it): the list again.
+        assert_eq!(installed_again_in(&versions, "scratch-a"), None);
+        fs::create_dir_all(versions.join("scratch-a")).unwrap();
+        fs::write(versions.join("scratch-a").join(COMPLETE), b"").unwrap();
+        let mut again = installed_again_in(&versions, "scratch-a").unwrap();
+        again.sort();
+        assert_eq!(again, ["scratch-a", "scratch-b"]);
+
+        // The whole `versions` folder gone: nothing left to select.
+        fs::remove_dir_all(&versions).unwrap();
+        let (gone, installed) = gone_from(&versions, &["scratch-b"]).unwrap();
+        assert_eq!((gone.as_str(), installed.len()), ("scratch-b", 0));
+
+        // Prepare itself, for a version not on the disk (the command line, or a delete while
+        // the window's check was already past): the sentence, not `canonicalize`'s error.
+        let error = preparer(
+            "deleted-scratch-version",
+            scratch.path(),
+            MinecraftFrom::Install,
+            &|_| {},
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            error,
+            "deleted-scratch-version is no longer on this computer."
+        );
+    }
+
+    /// The only folders with the game lack one of its libraries and the download from Mojang
+    /// failed: one sentence naming the library, and the window offers the download again.
+    #[test]
+    fn incomplete_minecraft_files_name_the_library_and_offer_the_download() {
+        let download = "\n  • Downloading 26.3 from Mojang needs your Microsoft account";
+        let chosen = Path::new("chosen");
+        let checked = vec![(chosen.to_path_buf(), "no Minecraft 26.3 client jar".into())];
+        let error = incomplete_or_not_found(
+            "26.3",
+            &checked,
+            chosen,
+            Some("azure-json-1.4.0.jar".into()),
+            download,
+        );
+        assert_eq!(
+            error,
+            "Your Minecraft 26.3 files are incomplete (azure-json-1.4.0.jar is missing). \
+             Downloading 26.3 from Mojang needs your Microsoft account"
+        );
+        assert!(prepare_offers_mojang());
+        // Nothing found at all: every folder looked in, as before.
+        let error = incomplete_or_not_found("26.3", &checked, chosen, None, download);
+        assert!(
+            error.starts_with("Minecraft 26.3 was not found."),
+            "{error}"
+        );
+        assert!(error.ends_with(download), "{error}");
     }
 }
 
