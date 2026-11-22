@@ -1,23 +1,23 @@
-From 4f20ab0a3d615f71742807027223364a6bc94b86 Mon Sep 17 00:00:00 2001
+From 674afea361d09f7ba6a86892f0a3470afc8b3486 Mon Sep 17 00:00:00 2001
 From: 2ax4 <2ax4@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 11:44:12 +0000
 Subject: [PATCH] Ad-free: remove the partner banners
 
 ---
- launcher/src/backend.rs        |  7 ------
- launcher/src/blocks_chrome.rs  | 28 ----------------------
- launcher/src/frame.rs          | 21 -----------------
- launcher/src/glass_servers.rs  | 43 ----------------------------------
- launcher/src/launcher_setup.rs | 24 -------------------
- launcher/src/main.rs           |  1 -
- launcher/src/servers_page.rs   | 31 ++++--------------------
+ launcher/src/backend/settings.rs |  7 ------
+ launcher/src/blocks_chrome.rs    | 28 ---------------------
+ launcher/src/frame.rs            | 21 ----------------
+ launcher/src/glass_servers.rs    | 43 --------------------------------
+ launcher/src/launcher_setup.rs   | 24 ------------------
+ launcher/src/main.rs             |  1 -
+ launcher/src/servers_page.rs     | 31 +++--------------------
  7 files changed, 4 insertions(+), 151 deletions(-)
 
-diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
-index 057e7589fe..1422224b7c 100644
---- a/launcher/src/backend.rs
-+++ b/launcher/src/backend.rs
-@@ -4380,13 +4380,6 @@ pub struct Settings {
+diff --git a/launcher/src/backend/settings.rs b/launcher/src/backend/settings.rs
+index a58ebcb8cc..b62b7f0f8b 100644
+--- a/launcher/src/backend/settings.rs
++++ b/launcher/src/backend/settings.rs
+@@ -125,13 +125,6 @@ pub struct Settings {
      /// one now (the owner gate's screen).
      #[serde(default)]
      pub owner_notice_seen: bool,
@@ -164,7 +164,7 @@ index fc72b28698..0b7d6d051a 100644
  
  /// The open server's port.
 diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
-index 8682288c58..213f6501e4 100644
+index 3f54d6c5f2..368a433691 100644
 --- a/launcher/src/launcher_setup.rs
 +++ b/launcher/src/launcher_setup.rs
 @@ -24,30 +24,6 @@ impl Launcher {
@@ -199,10 +199,10 @@ index 8682288c58..213f6501e4 100644
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
-index 8d90bf6b06..d3fb558ade 100644
+index 7e50e6ee22..0dd06fcba9 100644
 --- a/launcher/src/main.rs
 +++ b/launcher/src/main.rs
-@@ -76,7 +76,6 @@ mod new_instance;
+@@ -77,7 +77,6 @@ mod new_instance;
  mod notes_cache;
  mod owner_page;
  mod packs_page;
@@ -211,7 +211,7 @@ index 8d90bf6b06..d3fb558ade 100644
  mod picture_cache;
  mod plate;
 diff --git a/launcher/src/servers_page.rs b/launcher/src/servers_page.rs
-index b05084a1d3..85cd0b817b 100644
+index 45f1b570c9..3b104f240e 100644
 --- a/launcher/src/servers_page.rs
 +++ b/launcher/src/servers_page.rs
 @@ -1452,34 +1452,11 @@ impl Launcher {
@@ -262,5 +262,5 @@ index b05084a1d3..85cd0b817b 100644
  
      fn add_server_folder(&mut self, cx: &mut Context<Self>) {
 -- 
-2.47.3
+2.56.1
 
