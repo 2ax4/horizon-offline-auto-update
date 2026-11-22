@@ -67,7 +67,7 @@ mod sky_disc_blend_tests;
 mod undrawn_terrain_tests;
 
 mod image_formats;
-use image_formats::{image_format, storage_formats_of};
+use image_formats::{binds_as, image_format, storage_formats_of};
 #[cfg(test)]
 mod full_outputs_tests;
 #[cfg(test)]
@@ -75,6 +75,8 @@ mod shadow_faces_tests;
 
 #[cfg(test)]
 mod r11f_image_tests;
+#[cfg(test)]
+mod storage_format_tests;
 
 #[cfg(test)]
 mod work_group_fold_tests;
@@ -748,6 +750,7 @@ pub struct PackPost {
     pub timing: Option<super::pack_timing::PassTiming>,
     /// `depthtex0` at the screen's centre, read back for `centerDepthSmooth`.
     center_depth: Option<super::pack_center_depth::CenterDepth>,
+    export_depth_since: Option<std::time::Instant>,
     /// `shaders.properties`' custom uniforms, after the frame's in `uniforms.values`.
     custom: horizon_shaders::Custom,
     atlas: Option<wgpu::TextureView>,
@@ -1845,13 +1848,9 @@ fn bindings(
                 (None, None) => stand_in(&i.name, notes),
             }
         };
-        // An `R11F_G11F_B10F` image or buffer this device makes `RGBA16F` (a float stand-in
-        // that neither clamps nor drops NaN) takes `layout(r11f_g11f_b10f)` as `rgba16f`
-        // (`storage_formats_of`): Iris 1.11.7 stored into and read back such an image with a
-        // probe pack of ours (#10490), where Horizon refused the program.
-        let stand_in = format == wgpu::TextureFormat::Rg11b10Ufloat
-            && actual == wgpu::TextureFormat::Rgba16Float;
-        if actual != format && !stand_in {
+        // The texture's format wins over a qualifier `binds_as` takes for it; the module's image
+        // then declares it too (`storage_formats_of`).
+        if !binds_as(format, actual) {
             notes.push(format!(
                 "{name}: `{}` is {} but its texture is {actual:?}",
                 i.name, i.format
@@ -3451,6 +3450,7 @@ impl PackPost {
             gui_size: world.gui_size,
             timing: None,
             center_depth: None,
+            export_depth_since: None,
             custom,
             atlas: world.atlas.as_ref().map(|a| a.0.clone()),
             material_maps: world.material_maps,
@@ -3605,6 +3605,7 @@ impl PackPost {
         self.custom.restart_at(0);
         self.custom.forget_world();
         self.center_depth = None;
+        self.export_depth_since = None;
         self.targets = None;
         self.main = 0;
         self.mips_valid = 0;
@@ -4495,9 +4496,34 @@ impl PackPost {
         }
     }
 
+    pub(super) fn await_export_center_depth(&mut self) {
+        self.export_depth_since = Some(std::time::Instant::now());
+    }
+
+    pub(super) fn poll_export_center_depth(
+        &mut self,
+        device: &wgpu::Device,
+    ) -> Result<bool, String> {
+        let Some(since) = self.export_depth_since else {
+            return Ok(true);
+        };
+        let depth = self
+            .center_depth
+            .as_mut()
+            .ok_or("the shader pack copied no centre depth")?;
+        if depth.poll_completed(device)?.is_some() {
+            self.export_depth_since = None;
+            Ok(true)
+        } else if since.elapsed() >= super::frame_export::FRAME_EXPORT_STALL_TIMEOUT {
+            Err("export stalled waiting for the frame's centre depth".into())
+        } else {
+            Ok(false)
+        }
+    }
+
     /// The centre depth the frame copied: its readback, started by calling it right after the
     /// frame's submission.
-    pub fn submitted(&mut self) -> Option<impl FnOnce() + Send + 'static> {
+    pub fn submitted(&mut self) -> Option<impl FnOnce() + Send + 'static + use<>> {
         self.center_depth.as_mut()?.submitted()
     }
 

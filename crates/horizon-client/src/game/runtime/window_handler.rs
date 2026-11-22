@@ -29,7 +29,10 @@ impl Game<'_> {
     /// focus stays as the run found it (`held_focus`) and its pointer grab stays inside the game
     /// (`internal_grab`).
     pub(super) fn scripted_run(&self) -> bool {
-        self.screenshot_sequence.is_some() || self.tick_script.playing() || self.repro.replaying()
+        self.export.is_some()
+            || self.screenshot_sequence.is_some()
+            || self.tick_script.playing()
+            || self.repro.replaying()
     }
 }
 
@@ -48,10 +51,33 @@ fn is_input(event: &WindowEvent) -> bool {
     )
 }
 
+fn input_release(event: &WindowEvent) -> bool {
+    match event {
+        WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Released,
+        WindowEvent::MouseInput { state, .. } => *state == ElementState::Released,
+        _ => false,
+    }
+}
+
 /// A person's input during a scripted run is dropped. What the run itself sends (the control
 /// socket, a replay, the game's own) still plays.
 fn locks_out(origin: input_trace::InputOrigin, scripted: bool, event: &WindowEvent) -> bool {
     scripted && origin == input_trace::InputOrigin::User && is_input(event)
+}
+
+/// Linux can drop a confined pointer grab while a touchpad is moving and a
+/// movement key is held. Reassert it on the next key press as well as on the
+/// pointer events that already did so.
+fn should_reassert_key(state: ElementState, repeat: bool) -> bool {
+    state == ElementState::Pressed && !repeat
+}
+
+pub(super) fn should_reassert_pointer_capture(event: &WindowEvent) -> bool {
+    match event {
+        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => true,
+        WindowEvent::KeyboardInput { event, .. } => should_reassert_key(event.state, event.repeat),
+        _ => false,
+    }
 }
 
 /// A person clicking into the window or away from it during a scripted run. A replay's look and
@@ -164,17 +190,21 @@ impl Game<'_> {
         if let Some(modifiers) = held_modifiers(origin, self.unclaimed_window, &event) {
             self.unclaimed_modifiers = Some(modifiers);
         }
-        if locks_out(origin, self.scripted_run(), &event) {
-            return;
-        }
-        if let Some(focused) = held_focus(origin, self.scripted_run(), &event) {
-            self.focus_after_run = Some(focused);
-            return;
-        }
-        match at_unclaimed(origin, self.unclaimed_window, &event) {
-            Unclaimed::Claims => self.claim_window(event_loop),
-            Unclaimed::Dropped => return,
-            Unclaimed::Passes => {}
+        let locked = locks_out(origin, self.scripted_run(), &event);
+        if locked {
+            if !input_release(&event) {
+                return;
+            }
+        } else {
+            if let Some(focused) = held_focus(origin, self.scripted_run(), &event) {
+                self.focus_after_run = Some(focused);
+                return;
+            }
+            match at_unclaimed(origin, self.unclaimed_window, &event) {
+                Unclaimed::Claims => self.claim_window(event_loop),
+                Unclaimed::Dropped => return,
+                Unclaimed::Passes => {}
+            }
         }
         follow_keymap(&mut event);
         // MacosUtil.setCtrlClickEmulatesRightClick: Control + left click is a right click.
@@ -190,16 +220,35 @@ impl Game<'_> {
         }
         // Who caused it, before the event is handled: the trace wants the
         // window's own keys, never the ones the socket made up.
-        self.trace_window_event(origin, &event);
+        if !locked {
+            self.trace_window_event(origin, &event);
+        }
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
             if event.state == ElementState::Pressed {
                 self.physical_keys.insert(key);
                 horizon_client::keybinds::learn_layout(event);
-            } else {
-                self.physical_keys.remove(&key);
+            } else if self.physical_keys.remove(&key)
+                && locked
+                && let Some(export) = &mut self.export
+            {
+                export
+                    .released_mappings
+                    .extend(self.settings.keys.translate_all(key));
             }
+        }
+        if locked {
+            // Only releases reach here. Keep the physical state current without dispatching clicks.
+            if let WindowEvent::MouseInput { button, .. } = &event
+                && self.physical_buttons.remove(button)
+                && let Some(export) = &mut self.export
+            {
+                export
+                    .released_mappings
+                    .extend(self.settings.keys.translate_mouse_all(*button));
+            }
+            return;
         }
         if matches!(
             &event,
@@ -264,6 +313,7 @@ impl Game<'_> {
         if self.error.is_none() && self.safe_start_proof.exit() {
             horizon_client::gfx::safe_start::clear(&Self::options_path());
         }
+        self.cancel_export_on_quit();
         self.end_screenshot_sequence(Err("cancelled: the game is closing".into()));
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
@@ -294,6 +344,7 @@ impl Game<'_> {
                 return;
             }
         }
+        self.poll_export();
         if self.pending_save.is_some() {
             match self.poll_closing_save() {
                 Ok(true) => event_loop.exit(),
@@ -348,6 +399,12 @@ impl Game<'_> {
         {
             self.error = Some(format!("run timed out after {} s", limit.as_secs()).into());
             event_loop.exit();
+            return;
+        }
+        if self.export_held() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(16),
+            ));
             return;
         }
         if let Some(w) = &self.window {
@@ -731,6 +788,23 @@ mod tests {
             WindowEvent::ModifiersChanged(Modifiers::from(ModifiersState::empty())),
             WindowEvent::Ime(Ime::Commit("a".into())),
         ]
+    }
+
+    #[test]
+    fn pointer_capture_reasserts_for_pointer_events_but_not_cursor_moves() {
+        let events = inputs();
+        assert!(should_reassert_pointer_capture(&events[0]));
+        assert!(should_reassert_pointer_capture(&events[1]));
+        assert!(!should_reassert_pointer_capture(&events[2]));
+        assert!(!should_reassert_pointer_capture(&events[3]));
+        assert!(!should_reassert_pointer_capture(&events[4]));
+    }
+
+    #[test]
+    fn pointer_capture_ignores_key_repeats() {
+        assert!(should_reassert_key(ElementState::Pressed, false));
+        assert!(!should_reassert_key(ElementState::Pressed, true));
+        assert!(!should_reassert_key(ElementState::Released, false));
     }
 
     #[test]

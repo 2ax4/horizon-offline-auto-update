@@ -16,6 +16,8 @@ pub use model_reducing::set_mod_namespaces;
 use model_reducing::{full_size_sprites, mod_namespaces, reducible_model_sprites};
 
 mod animate;
+#[cfg(test)]
+mod atlas_32x_tests;
 pub mod cit_glint;
 mod clip_corner;
 mod gui_sprite;
@@ -744,16 +746,18 @@ fn atlas_sprites(root: &ResourceSource, packed: &[PackedImage]) -> (Vec<PackedIm
                 SpriteOrigin::File(texture) => {
                     // Its path under `textures/` in any namespace (a server
                     // pack's `lobby:item/...` as well as vanilla's).
-                    let path = texture.split_once(':').map_or(texture.as_str(), |(_, p)| p);
                     let file = atlas_sources::texture_resource(texture, "textures");
                     decode_resource(root, &file).ok().map(|image| {
                         // Animated strips keep their first frame and animate, like the
                         // packed files, under any folder: vanilla animates every sprite of
                         // these atlases (a server pack's `wynn/...` as well as `item/...`).
+                        // A still texture is the whole image (`SpriteResourceLoader`: the frame
+                        // size is the image's without an animation section), so a 64x32 item
+                        // texture keeps its right half.
                         let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
                         let animation = animation_of(mcmeta.as_deref());
                         animated = animation.is_some();
-                        if animated || path.starts_with("block/") || path.starts_with("item/") {
+                        if animated {
                             first_frame(image, animation.as_ref())
                         } else {
                             image
@@ -796,7 +800,7 @@ fn galactic_widths(
     let Some(sheet) = sprites.get("font/ascii_sga") else {
         return widths;
     };
-    let cell = sheet.w / 16;
+    let cell = sheet.texels((width, height)).0 / 16;
     let (px, py) = (
         (sheet.u0 * width as f32) as u32,
         (sheet.v0 * height as f32) as u32,
@@ -1380,9 +1384,9 @@ impl HudAtlas {
             };
             let mcmeta = source.read_to_string(&format!("{path}.mcmeta")).ok();
             let animation = animation_of(mcmeta.as_deref());
-            // An animated strip keeps its first frame.
-            let frames =
-                animation.is_some() || name.starts_with("block/") || name.starts_with("item/");
+            // An animated strip keeps its first frame; a still texture is the whole image
+            // (`SpriteResourceLoader`), whatever its folder or shape.
+            let frames = animation.is_some();
             let (w, h, pixels) = if frames {
                 first_frame(image, animation.as_ref())
             } else {
@@ -1390,9 +1394,17 @@ impl HudAtlas {
             };
             // The default texture's size, when a pack's differs from it. A sprite
             // that fell back to the default is at that size already: the broken
-            // file's header must not give it another one.
+            // file's header must not give it another one. Read the layer the
+            // pack resolved over (`shadow`, as the decode fallback does): the
+            // callers pass the resolved overlay itself as `defaults`, so
+            // `defaults` would answer a replaced texture with the pack's own
+            // file and a hi-res pack would draw its pixel size everywhere.
             let gui_size = png_size(
-                if defaulted { source } else { defaults },
+                if defaulted {
+                    source
+                } else {
+                    shadow.unwrap_or(defaults)
+                },
                 &crate::atlas_sources::texture_resource(&name, "textures"),
             )
             .map(|(dw, dh)| {
@@ -1468,6 +1480,23 @@ impl HudAtlas {
             let (more, more_animated) = atlas_sprites(root, &images);
             images.extend(more);
             animated.extend(more_animated);
+            // A generated sprite keeps the generation the pack resolved over as
+            // its logical size, as a walked file's gui_size does: the pack's
+            // own hi-res source (a paletted permutation's palette, a renamed
+            // texture) is no logical size. The defaults' own generation names
+            // every sprite they generate; a sprite only the pack generates
+            // keeps its own size.
+            let generation = if defaults.same_generation(root) {
+                root.underlay()
+            } else {
+                Some(defaults)
+            };
+            if let Some(generation) = generation {
+                let (default_generated, _) = atlas_sprites(generation, &[]);
+                for (name, w, h, _) in default_generated {
+                    gui_sizes.entry(name).or_insert((w, h));
+                }
+            }
             for (image, image_flags, is_animated) in cit_sprites(root, &images) {
                 cit_names.insert(image.0.clone());
                 if let Some(f) = image_flags {
@@ -1548,17 +1577,32 @@ impl HudAtlas {
                         Ok(layout) => layout,
                         Err(_) => {
                             let keep = full_size_sprites(root, &images, &bordered);
-                            let layout = Self::layout_capping_mod_textures(
+                            let capped = Self::layout_capping_mod_textures(
                                 &mut images,
                                 &mut gui_sizes,
                                 &keep,
                                 &mod_namespaces(),
                                 MAX_ATLAS_SIZE,
-                            )?;
-                            log::warn!(
-                                "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
                             );
-                            return Ok(layout);
+                            match capped {
+                                Ok(layout) => {
+                                    log::warn!(
+                                        "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
+                                    );
+                                    return Ok(layout);
+                                }
+                                Err(_) => {
+                                    let layout = Self::layout_reducing_hires(
+                                        &mut images,
+                                        &gui_sizes,
+                                        MAX_ATLAS_SIZE,
+                                    )?;
+                                    log::warn!(
+                                        "reduced the pack's high-resolution sprites toward their logical sizes to keep the resource pack: {error}"
+                                    );
+                                    return Ok(layout);
+                                }
+                            }
                         }
                     };
                     log::warn!(
@@ -1590,6 +1634,8 @@ impl HudAtlas {
             }
             let b = u32::from(bordered.contains(name));
             let (px, py, w, h) = (px + b, py + b, w - 2 * b, h - 2 * b);
+            // A sprite's logical size is its rect's: the region the UVs cover,
+            // past the wrapped border, whatever the default named.
             let (gw, gh) = gui_sizes.get(name).copied().unwrap_or((w, h));
             sprites.insert(
                 name.clone(),
@@ -4161,6 +4207,42 @@ mod tests {
         assert_eq!(texel_at(&atlas, rect, 0, 0), [40, 180, 80, 255]);
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// A still item texture is the whole image, as `SpriteResourceLoader` loads one without an
+    /// animation section: a mod's 64x32 texture keeps the right half its model's UVs reach (a
+    /// cut to the top-left square left an item's parts drawing transparent texels).
+    #[test]
+    fn a_still_wide_item_texture_packs_whole() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-atlas-wide-item-{}", std::process::id()));
+        let atlases = root.join("assets/minecraft/atlases");
+        let item = root.join("assets/gear/textures/item");
+        fs::create_dir_all(&atlases).unwrap();
+        fs::create_dir_all(&item).unwrap();
+        fs::write(
+            atlases.join("items.json"),
+            r#"{"sources": [{"type": "directory", "source": "item", "prefix": "item/"}]}"#,
+        )
+        .unwrap();
+        // Top rows green, bottom rows red, no mcmeta.
+        write_strip(
+            &item.join("wide.png"),
+            64,
+            32,
+            &[[0, 255, 0, 255], [255, 0, 0, 255]],
+            None,
+        );
+        let atlas = HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+            root.to_path_buf(),
+        ))
+        .unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let rect = atlas.sprites["gear:item/wide"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (64, 32));
+        assert_eq!(texel_at(&atlas, rect, 63, 0), [0, 255, 0, 255]);
+        assert_eq!(texel_at(&atlas, rect, 63, 31), [255, 0, 0, 255]);
+    }
+
     #[test]
     fn another_namespaces_animated_item_texture_packs_its_first_frame_and_animates() {
         let root =
@@ -4662,6 +4744,11 @@ texture=wide",
         write_png(&pack, "block/stone", 32, 32);
         write_png(&pack, "item/compass", 32, 1024);
         write_png(&pack, "gui/sprites/pack_only", 30, 10);
+        // The strip animates in each: a still texture is the whole image, its folder aside.
+        for root in [&defaults, &pack] {
+            let meta = root.join("assets/minecraft/textures/item/compass.png.mcmeta");
+            fs::write(meta, r#"{"animation": {}}"#).unwrap();
+        }
         let atlas = HudAtlas::build_over(
             &horizon_assets::resource_source::ResourceSource::directory(pack.to_path_buf()),
             &horizon_assets::resource_source::ResourceSource::directory(defaults.to_path_buf()),

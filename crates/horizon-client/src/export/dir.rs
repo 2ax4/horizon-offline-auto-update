@@ -1,4 +1,4 @@
-use super::ExportSpec;
+use super::{ExportSpec, Reservation};
 use crate::file_id::valid_export_name;
 #[cfg(not(windows))]
 use cap_fs_ext::DirExt;
@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const EXPORTS: &str = "exports";
 
@@ -44,6 +45,12 @@ pub struct ExportFolder {
     path: PathBuf,
 }
 
+pub(super) struct ExportDestination<'a> {
+    exports: Dir,
+    path: PathBuf,
+    name: &'a str,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ExportManifest<'a> {
     pub spec: &'a ExportSpec,
@@ -53,8 +60,79 @@ pub struct ExportManifest<'a> {
     pub gpu: &'a str,
 }
 
-impl ExportFolder {
-    pub fn create(game_dir: &Path, name: &str) -> Result<Self, DirError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ManifestState {
+    Pending = 0,
+    Publishing,
+    Published,
+    Cancelled,
+    Failed,
+}
+
+impl ManifestState {
+    fn from_byte(value: u8) -> Self {
+        match value {
+            0 => Self::Pending,
+            1 => Self::Publishing,
+            2 => Self::Published,
+            3 => Self::Cancelled,
+            4 => Self::Failed,
+            _ => unreachable!("invalid manifest publication state"),
+        }
+    }
+}
+
+/// Shared by the publisher and the event loop. Neither holds a lock across file I/O.
+#[derive(Default)]
+pub struct ManifestPublication(AtomicU8);
+
+impl ManifestPublication {
+    pub fn state(&self) -> ManifestState {
+        ManifestState::from_byte(self.0.load(Ordering::Acquire))
+    }
+
+    /// Cancel before rename, or report the state already reached by the publisher.
+    pub fn cancel(&self) -> ManifestState {
+        match self.0.compare_exchange(
+            ManifestState::Pending as u8,
+            ManifestState::Cancelled as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => ManifestState::Cancelled,
+            Err(state) => ManifestState::from_byte(state),
+        }
+    }
+
+    fn rename(&self, pending: &mut StagedFile<'_>) -> io::Result<()> {
+        self.publish(|| pending.publish())
+    }
+
+    /// Track the outcome of an atomic manifest rename independently of staging and cleanup.
+    #[doc(hidden)]
+    pub fn publish(&self, rename: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        self.0
+            .compare_exchange(
+                ManifestState::Pending as u8,
+                ManifestState::Publishing as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| io::Error::from(io::ErrorKind::Interrupted))?;
+        let result = rename();
+        let state = if result.is_ok() {
+            ManifestState::Published
+        } else {
+            ManifestState::Failed
+        };
+        self.0.store(state as u8, Ordering::Release);
+        result
+    }
+}
+
+impl<'a> ExportDestination<'a> {
+    pub(super) fn open(game_dir: &Path, name: &'a str) -> Result<Self, DirError> {
         if !valid_export_name(name) {
             return Err(DirError::InvalidName);
         }
@@ -67,19 +145,54 @@ impl ExportFolder {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(DirError::Folder(err)),
         }
-        let exports = open_directory(&game, EXPORTS).map_err(DirError::Folder)?;
-        exports.create_dir(name).map_err(|err| {
-            if err.kind() == io::ErrorKind::AlreadyExists {
-                DirError::Exists
-            } else {
-                DirError::Folder(err)
-            }
-        })?;
-        let dir = open_directory(&exports, name).map_err(DirError::Folder)?;
         Ok(Self {
-            dir,
+            exports: open_directory(&game, EXPORTS).map_err(DirError::Folder)?,
             path: game_path.join(EXPORTS).join(name),
+            name,
         })
+    }
+
+    pub(super) fn check_absent(&self) -> Result<(), DirError> {
+        check_absent(&self.exports, self.name).map_err(take_error)
+    }
+
+    pub(super) fn stage(&self) -> io::Result<Staging<'_>> {
+        Staging::create(&self.exports)
+    }
+
+    pub(super) fn create(&self, charge: Option<Reservation<'_>>) -> Result<ExportFolder, DirError> {
+        self.exports.create_dir(self.name).map_err(take_error)?;
+        // The take remains even if opening it or publishing output fails.
+        if let Some(charge) = charge {
+            charge.commit();
+        }
+        Ok(ExportFolder {
+            dir: open_directory(&self.exports, self.name).map_err(DirError::Folder)?,
+            path: self.path.clone(),
+        })
+    }
+}
+
+fn take_error(err: io::Error) -> DirError {
+    if err.kind() == io::ErrorKind::AlreadyExists {
+        DirError::Exists
+    } else {
+        DirError::Folder(err)
+    }
+}
+
+impl ExportFolder {
+    pub fn create(game_dir: &Path, name: &str) -> Result<Self, DirError> {
+        ExportDestination::open(game_dir, name)?.create(None)
+    }
+
+    /// Commit the reservation when the take directory is created.
+    pub fn create_charged(
+        game_dir: &Path,
+        name: &str,
+        charge: Reservation<'_>,
+    ) -> Result<Self, DirError> {
+        ExportDestination::open(game_dir, name)?.create(Some(charge))
     }
 
     pub fn path(&self) -> &Path {
@@ -91,33 +204,38 @@ impl ExportFolder {
     }
 
     pub(super) fn check_absent(&self, name: &str) -> io::Result<()> {
-        match self.dir.symlink_metadata(name) {
-            Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
-        }
+        check_absent(&self.dir, name)
     }
 
     pub(super) fn stage(&self) -> io::Result<Staging<'_>> {
-        let mut nonce = [0; 16];
-        getrandom::fill(&mut nonce).map_err(|err| io::Error::other(err.to_string()))?;
-        let name = format!(".export-{:032x}.tmp", u128::from_ne_bytes(nonce));
-        let mut builder = DirBuilder::new();
-        builder.recursive(false);
-        #[cfg(unix)]
-        cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        self.dir.create_dir_with(&name, &builder)?;
-        Staging::open(&self.dir, &name)
+        Staging::create(&self.dir)
     }
 
     /// Record the final result once, including partial output from a stopped or failed export.
     pub fn write_manifest(&self, manifest: &ExportManifest<'_>) -> io::Result<()> {
+        self.write_manifest_tracked(manifest, &ManifestPublication::default())
+    }
+
+    /// Record the rename outcome before dropping the staged file and directory.
+    pub fn write_manifest_tracked(
+        &self,
+        manifest: &ExportManifest<'_>,
+        publication: &ManifestPublication,
+    ) -> io::Result<()> {
         let staging = self.stage()?;
         let mut pending = staging.create_new("export.json")?;
         serde_json::to_writer_pretty(&mut pending.file, manifest)?;
         pending.file.write_all(b"\n")?;
         pending.file.sync_all()?;
-        pending.publish()
+        publication.rename(&mut pending)
+    }
+}
+
+fn check_absent(dir: &Dir, name: &str) -> io::Result<()> {
+    match dir.symlink_metadata(name) {
+        Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -127,6 +245,18 @@ pub(super) struct Staging<'a> {
 }
 
 impl<'a> Staging<'a> {
+    fn create(export: &'a Dir) -> io::Result<Self> {
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|err| io::Error::other(err.to_string()))?;
+        let name = format!(".export-{:032x}.tmp", u128::from_ne_bytes(nonce));
+        let mut builder = DirBuilder::new();
+        builder.recursive(false);
+        #[cfg(unix)]
+        cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        export.create_dir_with(&name, &builder)?;
+        Self::open(export, &name)
+    }
+
     fn open(export: &'a Dir, name: &str) -> io::Result<Self> {
         #[cfg(not(windows))]
         let dir = open_directory(export, name)?;
@@ -229,12 +359,20 @@ pub(super) struct StagedFile<'a> {
 
 impl StagedFile<'_> {
     pub(super) fn publish(&mut self) -> io::Result<()> {
+        self.publish_in(self.export)
+    }
+
+    pub(super) fn publish_to(&mut self, folder: &ExportFolder) -> io::Result<()> {
+        self.publish_in(&folder.dir)
+    }
+
+    fn publish_in(&mut self, destination: &Dir) -> io::Result<()> {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsHandle as _;
             horizon_threads::file_publish::rename_new(
                 self.file.as_handle(),
-                self.export.as_handle(),
+                destination.as_handle(),
                 self.name,
             )?;
         }
@@ -245,7 +383,7 @@ impl StagedFile<'_> {
             match renameat_with(
                 self.staging,
                 self.name,
-                self.export,
+                destination,
                 self.name,
                 RenameFlags::NOREPLACE,
             ) {
@@ -402,6 +540,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_open_staged_file_can_publish_into_a_new_take() {
+        let game = tempfile::tempdir().unwrap();
+        let destination = ExportDestination::open(game.path(), "take").unwrap();
+        let staging = destination.stage().unwrap();
+        let mut pending = staging.create_new("video.mp4").unwrap();
+        let mut output = pending.file.try_clone().unwrap();
+        let folder = destination.create(None).unwrap();
+
+        pending.publish_to(&folder).unwrap();
+        output.write_all(b"saved").unwrap();
+        drop(output);
+        drop(pending);
+        drop(staging);
+
+        assert_eq!(fs::read(folder.path().join("video.mp4")).unwrap(), b"saved");
+        assert_eq!(
+            fs::read_dir(game.path().join("exports")).unwrap().count(),
+            1
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_exports_cannot_redirect_writes() {
@@ -478,15 +638,22 @@ mod tests {
             format: Format::PngSequence,
             hud: true,
         };
-        folder
-            .write_manifest(&ExportManifest {
-                spec: &spec,
-                state: "stopped",
-                frames_written: 9,
-                build: "build-id",
-                gpu: "test adapter",
-            })
-            .unwrap();
+        let stopped = ExportManifest {
+            spec: &spec,
+            state: "stopped",
+            frames_written: 9,
+            build: "build-id",
+            gpu: "test adapter",
+        };
+        let publication = ManifestPublication::default();
+        assert_eq!(publication.cancel(), ManifestState::Cancelled);
+        let cancelled = folder
+            .write_manifest_tracked(&stopped, &publication)
+            .unwrap_err();
+        assert_eq!(cancelled.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::read_dir(folder.path()).unwrap().count(), 0);
+
+        folder.write_manifest(&stopped).unwrap();
         let error = folder
             .write_manifest(&ExportManifest {
                 spec: &spec,
