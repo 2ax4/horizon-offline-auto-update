@@ -151,8 +151,9 @@ class Game:
         for folder in homes.values():
             folder.mkdir()
         self.game_home = homes['HORIZON_HOME']
-        # A first launch shows the accessibility onboarding before the title.
-        (self.game_home / 'options.txt').write_text('onboardAccessibility:false\n')
+        # A first launch shows the accessibility onboarding before the title. The checks click
+        # widget ids, slugs of the drawn (translated) label: pin English.
+        (self.game_home / 'options.txt').write_text('onboardAccessibility:false\nlang:en_us\n')
         if seed:
             seed(self.game_home)
         self.env = {**lab.game_env(**homes), **(env or {})}
@@ -4793,7 +4794,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--game', type=Path, default=lab.cargo_target() / f'fast/horizon-client{EXE}')
     parser.add_argument('--ctl', type=Path, default=lab.cargo_target() / f'fast/horizon-ctl{EXE}')
-    parser.add_argument('--resources', type=Path, default=ROOT / '.local/horizon-client/26.3')
+    parser.add_argument('--resources', type=Path, default=lab.RESOURCES)
     parser.add_argument('--only', nargs='*', choices=sorted(CASES), help='run only these cases')
     parser.add_argument('--shots', type=Path, help='keep screenshots in this folder')
     parser.add_argument('--jobs', type=int, default=1, help='cases at once; each has its own game and home')

@@ -13,7 +13,6 @@ impl Game<'_> {
         self.lod = None;
         self.lod_source_attempted = false;
         self.lod_observe.clear();
-        self.lod_blue_map = None;
         self.far_beacons.clear();
         self.lod_covered_at = None;
         if let Some(renderer) = &mut self.renderer {
@@ -75,35 +74,7 @@ impl Game<'_> {
                 let root = home.join("server-terrain");
                 let dir = terrain::level_dir(&root, address, remote.hashed_seed, &remote.level);
                 self.lod_level = Some(remote.level.clone());
-                // Past them, the server's BlueMap, if the player named it or
-                // lets Horizon look for it (on the BlueMap worker).
-                let maps = root.join(terrain::server_folder(address)).join("BlueMap");
-                let settings = &self.settings.horizon.blue_map;
-                let blue_map = horizon_client::bluemap_detect::source(
-                    settings,
-                    address,
-                    &maps,
-                    std::time::SystemTime::now(),
-                )
-                .map(|source| {
-                    use horizon_client::{bluemap, bluemap_detect::Source};
-                    // The map's address only at debug: logs land in crash reports.
-                    log::info!("Horizon: far terrain also draws {}'s BlueMap", remote.level);
-                    if let Source::Url { url, .. } = &source {
-                        log::debug!("Horizon: BlueMap at {url}");
-                    }
-                    let map = Arc::new(bluemap::BlueMap::from_source(
-                        source,
-                        &remote.level,
-                        maps,
-                        settings.radius_blocks(),
-                        bluemap::Palette::from_game(self.pack.assets.registry, self.res.biomes()),
-                    ));
-                    map.start();
-                    map
-                });
-                self.lod_blue_map = blue_map.clone();
-                // And the player's Bobby cache of the level, only read.
+                // Past them, the player's Bobby cache of the level, only read.
                 let bobby = terrain::bobby_level_dir(
                     &terrain::minecraft_dir().join(".bobby"),
                     address,
@@ -131,7 +102,7 @@ impl Game<'_> {
                         });
                     terrain::Bobby::new(bobby, decode, self.res.facts())
                 });
-                terrain::ServerTerrain::with_bobby(dir, blue_map, bobby) as _
+                terrain::ServerTerrain::with_bobby(dir, bobby) as _
             }),
             _ => Some(self.streaming.lod_source()),
         };
@@ -183,12 +154,6 @@ impl Game<'_> {
         }
         self.observe_light_edits();
         self.ask_edited_light_emission();
-        if let (Some(map), Some(p), Some(lod)) = (&self.lod_blue_map, &self.player, &mut self.lod) {
-            map.set_center(p.position.x.floor() as i32, p.position.z.floor() as i32);
-            for change in map.take_changed() {
-                lod.refresh(change.area, change.widths);
-            }
-        }
         if let Some(p) = &self.player {
             self.streaming.center = (
                 (p.position.x.floor() as i32) >> 4,
@@ -318,10 +283,12 @@ impl Game<'_> {
         let view = (self.streaming.center, radius);
         let has = |column: (i32, i32)| self.world.chunks.contains_key(&column);
         let now = Instant::now();
-        let arriving = {
+        let view_arriving = {
             let _span = horizon_client::spans::guard("view_arrival");
-            self.view_arrival.arriving(view, now, has) || self.remote_backlog() > 0
+            self.view_arrival.arriving(view, now, has)
         };
+        self.view_arriving = view_arriving;
+        let arriving = view_arriving || self.remote_backlog() > 0;
         // Which far tiles a zoom magnifies (`lod::ZoomAim`), read before
         // `self.renderer.as_mut()` below borrows self mutably for the rest of
         // this function. Cheap: trigonometry on one angle, or None when the
@@ -464,5 +431,66 @@ impl Game<'_> {
                 });
             }
         }
+    }
+    /// Run `f` inside a local player block-edit scope so writes record `World::immediate_sections`.
+    pub(in crate::game) fn with_player_block_edit<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.world.begin_player_edit();
+        let out = f(self);
+        self.world.end_player_edit();
+        out
+    }
+
+    /// Rebuild sections dirtied by player block edits (or nearby dirty sections when
+    /// `prioritizeChunkUpdates == 2`) and upload them before the current frame renders, matching
+    /// vanilla's `SectionRenderDispatcher.rebuildSectionSync`. Under Threaded (`0`, default),
+    /// no main-thread meshing occurs.
+    pub(in crate::game) fn flush_immediate_meshes(&mut self) {
+        let mode = self.settings.prioritize_chunk_updates;
+        if mode == 0 || self.title.is_some() || self.renderer.is_none() {
+            self.world.immediate_sections.clear();
+            return;
+        }
+        if mode >= 2
+            && let Some(p) = self.player.as_ref()
+        {
+            let camera_block = [
+                p.position.x.floor() as i32,
+                p.position.y.floor() as i32,
+                p.position.z.floor() as i32,
+            ];
+            self.world.mark_nearby_dirty_immediate(
+                camera_block,
+                horizon_client::streaming::immediate_mesh::NEARBY_IMMEDIATE_DIST_SQ,
+                horizon_client::streaming::immediate_mesh::IMMEDIATE_MESH_LIMIT,
+            );
+        }
+        if self.world.immediate_sections.is_empty() {
+            return;
+        }
+        self.observe_light_edits();
+        self.ask_edited_light_emission();
+        let uploads = self.streaming.mesh_immediate(&mut self.world, mode);
+        if uploads.is_empty() {
+            return;
+        }
+        let fresh: horizon_client::fast_hash::FxHashSet<(i32, i32, i32)> =
+            uploads.iter().map(|(k, _)| *k).collect();
+        let spent: Vec<_> = self
+            .pending_uploads
+            .extract_if(.., |(k, _)| fresh.contains(k))
+            .collect();
+        if !spent.is_empty() {
+            self.streaming.free(spent);
+        }
+        if self.lod.is_some() {
+            self.lod_observe
+                .extend(uploads.iter().map(|(key, _)| (key.0, key.2)));
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            for (key, mesh) in &uploads {
+                renderer.upload(*key, mesh);
+            }
+        }
+        self.streaming.free(uploads);
     }
 }

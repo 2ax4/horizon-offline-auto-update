@@ -63,55 +63,6 @@ fn pack_files(world_tables: &Option<WorldTables>) -> horizon_world::loot::PackOv
     }
 }
 include!(concat!(env!("OUT_DIR"), "/game_modules.rs"));
-/// Installs the dispatcher of each injection point a mod listens at as its function's entry,
-/// once the points are sealed. The prebuilt game's staging pass writes the call; a build without
-/// points has none to arm.
-macro_rules! arm_points {
-    () => {};
-}
-
-/// The game's side of the injection points (arismoko/horizon#589), whose slots and listeners live above the engine.
-#[doc(hidden)]
-pub mod points {
-    /// A `side = "both"` point's host, out of line: each point's listener call stays a few bytes.
-    /// Called only by the `#[point]`s the stage adds to its copy.
-    #[inline(never)]
-    #[allow(dead_code, reason = "used by the staged copy's points")]
-    pub(super) fn host_side<'a>(game: &'a mut super::Game<'_>) -> mod_api::HostSide<'a> {
-        super::execution_role::host_side(game)
-    }
-
-    /// An engine value's `mod_api` mirror for a point record, through the boundary's conversion.
-    #[allow(dead_code, reason = "used by the staged copy's points")]
-    pub(super) fn mirror_in<T: super::api_values::TryIntoApi + ?Sized>(
-        value: &T,
-    ) -> Option<T::Api> {
-        value.try_into_api().ok()
-    }
-
-    /// A listener's `mod_api` value as the engine's, validated as every mod value is; a value the
-    /// engine refuses leaves the engine's own in place.
-    #[allow(dead_code, reason = "used by the staged copy's points")]
-    pub(super) fn mirror_out<A: super::api_values::TryIntoEngine<()>>(
-        value: &A,
-        point: &str,
-    ) -> Option<A::Engine> {
-        let engine = value.try_into_engine(&()).ok();
-        if engine.is_none() {
-            log::warn!(
-                "point {point}: a listener's value has no engine form; the engine's is kept"
-            );
-        }
-        engine
-    }
-
-    /// An engine value with no `mod_api` form at this call: its listeners are skipped this once.
-    #[cold]
-    #[allow(dead_code, reason = "used by the staged copy's points")]
-    pub(super) fn unconverted(point: &str) {
-        log::warn!("point {point}: a value has no API form; its listeners were skipped");
-    }
-}
 mod host;
 mod native_hooks;
 use event_loop::EventLoopCtl;
@@ -1009,9 +960,6 @@ struct Game<'a> {
     lod_observe: horizon_client::fast_hash::FxHashSet<(i32, i32)>,
     /// The server level far terrain keeps the chunks of.
     lod_level: Option<String>,
-    /// The server's BlueMap far terrain draws from, when the player named one
-    /// or Find BlueMap found it.
-    lod_blue_map: Option<Arc<horizon_client::bluemap::BlueMap>>,
     /// Beacon beam sections kept after their chunk unloads, so far terrain
     /// LOD still draws their beams (`beacon_geometry` refreshes them).
     far_beacons: HashMap<(i32, i32, i32), Vec<(u32, i32)>>,
@@ -1020,6 +968,10 @@ struct Game<'a> {
     /// Whether the view's columns have all arrived, and how new it is: large
     /// translucent pages wait for both before they shrink (`set_terrain_loading`).
     view_arrival: horizon_client::streaming::ViewArrival,
+    /// Whether the view's outermost columns are still on their way from a
+    /// server, as the last `update_world` saw them (`ViewArrival::arriving`):
+    /// `Streaming` cannot see columns the server has not sent yet.
+    view_arriving: bool,
     options: Options,
     player: Option<PlayerMotion>,
     spawn: Option<Vec3>,
@@ -4513,9 +4465,12 @@ impl Game<'_> {
                 self.handle_end_gateway_portals();
             });
             self.ordered_before(ordered_tick::Batch::Items)?;
-            horizon_client::spans::time("tick_items", || self.tick_items());
+            let original_item_moves =
+                horizon_client::spans::time("tick_items", || self.tick_items());
             if self.remote.is_none() {
-                span("hoppers_catch_items", || self.hoppers_catch_items());
+                span("hoppers_catch_items", || {
+                    self.hoppers_catch_items(&original_item_moves)
+                });
             }
             // Merged, burnt, despawned or picked up.
             span("mods_leaves_flush", || self.native_leaves_flush());
@@ -7276,7 +7231,7 @@ impl Game<'_> {
             &self.gui,
             None,
             None,
-            self.settings.horizon.api,
+            self.settings.horizon.effective_api(),
             self.settings.horizon.translucent_batching,
             self.settings.vsync,
             &self.settings.horizon,
@@ -10197,6 +10152,7 @@ impl Game<'_> {
                     self.advance_flight();
                     self.tick_world_icon();
                     let ticked = Instant::now();
+                    self.flush_immediate_meshes();
                     let rendered = self.render_and_flip(elapsed)?;
                     self.native_frame_end()?;
                     // The frame's spans, taken every frame they are recorded so they never
@@ -10528,9 +10484,9 @@ impl<'a> Game<'a> {
             far_beacons: HashMap::new(),
             lod_observe: Default::default(),
             lod_level: None,
-            lod_blue_map: None,
             lod_covered_at: None,
             view_arrival: Default::default(),
+            view_arriving: false,
             options,
             player: None,
             spawn: None,
@@ -11206,13 +11162,26 @@ pub(crate) fn run_with(
     }
     // A window's start takes the last one's graphics device loss into its settings
     // (`gfx::safe_start`); held in memory too, for a hold its settings file didn't keep.
-    let device_loss_hold = Game::options_path()
+    let marker_dir = Game::options_path()
         .parent()
         .filter(|_| owns_device_loss_marker(&options))
+        .map(std::path::Path::to_path_buf);
+    if let Some(dir) = &marker_dir {
+        horizon_client::gfx::safe_start::arm_watchdog_dir(dir);
+    }
+    let device_loss_hold = marker_dir
+        .as_deref()
         .and_then(horizon_client::gfx::safe_start::take);
+    let watchdog_api = marker_dir
+        .as_deref()
+        .and_then(|dir| horizon_client::gfx::safe_start::take_watchdog(dir, std::env::consts::OS));
     let mut early_settings = Settings::load(&Game::options_path());
     if device_loss_hold.is_some() {
         early_settings.horizon.safe_start = device_loss_hold;
+    }
+    if let Some(api) = watchdog_api {
+        early_settings.horizon.watchdog_api = Some(api);
+        early_settings.horizon.watchdog_driver = None;
     }
     options
         .mods
@@ -11230,7 +11199,6 @@ pub(crate) fn run_with(
         crate::entry::initialize_code(&inventory);
     }
     horizon_engine_slots::seal().expect("engine registration seals once at startup");
-    arm_points!();
     mod_phase.advance(mod_api::__private::ModPhase::Registration)?;
     crate::game::part_admission::admit_parts(mod_api::__private::mods())?;
     // The structure types those mods registered, handed to the engine before

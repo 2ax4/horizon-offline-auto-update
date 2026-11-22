@@ -24,7 +24,9 @@ CHECKS = ("horizon-checks",)
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
 # verify-scope decides on a small runner which of the launcher and Rust parts start; it goes where they go.
 VERIFY_PARTS = ("verify-scope", "verify-tree", "verify-lint", "verify-server", "verify-launcher", "verify-test",
-                "verify-mod-points")
+                "verify-mod-api")
+WINDOWS_WASM_JOB = "verify-windows-wasm-cache"
+VERIFY_NEEDS = (*VERIFY_PARTS, WINDOWS_WASM_JOB)
 # On Windows the bash on PATH is Git's; a bare "bash" there would be WSL's (tests/test_pr_ready.py).
 BASH = shutil.which("bash")
 # verify's parts: our checks runners only with SELF_HOSTED_CI=all, Blacksmith's otherwise.
@@ -129,7 +131,7 @@ class OwnRunnerTests(unittest.TestCase):
         for part in VERIFY_PARTS:
             with self.subTest(part=part):
                 self.assertRegex(runs_on(ci[part]), ONLY_WITH_ALL)
-        self.assertIn(f"needs: [{', '.join(VERIFY_PARTS)}]", ci["verify"])
+        self.assertIn(f"needs: [{', '.join(VERIFY_NEEDS)}]", ci["verify"])
         # Never skipped: GitHub counts a skipped required check as passed.
         self.assertIn("if: always()", ci["verify"])
 
@@ -530,15 +532,16 @@ class VerifyGateTests(unittest.TestCase):
     that failed, was cancelled or was never decided for fails."""
 
     PASSED = {"SCOPE": "success", "TREE": "success", "LINT": "success", "SERVER": "success", "LAUNCHER": "success",
-              "TEST": "success", "MODPOINTS": "success", "EVENT": "pull_request", "RUST_ANSWER": "true",
-              "LAUNCHER_ANSWER": "true", "MODPOINTS_ANSWER": "true"}
+              "TEST": "success", "MODAPI": "success", "EVENT": "pull_request", "RUST_ANSWER": "true",
+              "LAUNCHER_ANSWER": "true", "MODAPI_ANSWER": "true",
+              "WINDOWS_WASM_CACHE": "success", "WINDOWS_WASM_CACHE_ANSWER": "true"}
     # Each part verify-scope can leave out: its result's variable, its job, the answer that decides it, that answer's
     # output, and whether the merge queue leaves the part out too.
     GATED = [("LINT", "verify-lint", "RUST_ANSWER", "rust", True),
              ("SERVER", "verify-server", "RUST_ANSWER", "rust", True),
              ("LAUNCHER", "verify-launcher", "LAUNCHER_ANSWER", "launcher", True),
              ("TEST", "verify-test", "RUST_ANSWER", "rust", False),
-             ("MODPOINTS", "verify-mod-points", "MODPOINTS_ANSWER", "mod_points", False)]
+             ("MODAPI", "verify-mod-api", "MODAPI_ANSWER", "mod_api", False)]
 
     @classmethod
     def setUpClass(cls):
@@ -559,17 +562,19 @@ class VerifyGateTests(unittest.TestCase):
         return self.bash(self.gate["run"], {**self.PASSED, **results}).returncode == 0
 
     def test_the_gate_reads_every_part_and_always_runs(self):
-        self.assertEqual(self.jobs["verify"]["needs"], list(VERIFY_PARTS))
+        self.assertEqual(self.jobs["verify"]["needs"], list(VERIFY_NEEDS))
         # Without always() a failed or skipped part would skip verify, which GitHub counts as passed.
         self.assertEqual(self.jobs["verify"]["if"], "always()")
         for name, part in [("SCOPE", "verify-scope"), ("TREE", "verify-tree"), ("LINT", "verify-lint"),
                            ("SERVER", "verify-server"), ("LAUNCHER", "verify-launcher"), ("TEST", "verify-test"),
-                           ("MODPOINTS", "verify-mod-points")]:
+                           ("MODAPI", "verify-mod-api"), ("WINDOWS_WASM_CACHE", WINDOWS_WASM_JOB)]:
             self.assertEqual(self.gate["env"][name], "${{ needs.%s.result }}" % part)
         self.assertEqual(self.gate["env"]["EVENT"], "${{ github.event_name }}")
         self.assertEqual(self.gate["env"]["RUST_ANSWER"], "${{ needs.verify-scope.outputs.rust }}")
         self.assertEqual(self.gate["env"]["LAUNCHER_ANSWER"], "${{ needs.verify-scope.outputs.launcher }}")
-        self.assertEqual(self.gate["env"]["MODPOINTS_ANSWER"], "${{ needs.verify-scope.outputs.mod_points }}")
+        self.assertEqual(self.gate["env"]["MODAPI_ANSWER"], "${{ needs.verify-scope.outputs.mod_api }}")
+        self.assertEqual(self.gate["env"]["WINDOWS_WASM_CACHE_ANSWER"],
+                         "${{ needs.verify-scope.outputs.windows_wasm_cache }}")
         self.assertTrue(self.passes())
 
     def test_the_parts_wait_for_the_checked_answers(self):
@@ -587,38 +592,69 @@ class VerifyGateTests(unittest.TestCase):
         self.assertNotIn("if", self.answers)
         self.assertEqual(self.jobs["verify-scope"]["outputs"], {
             "rust": "${{ steps.answers.outputs.rust }}", "launcher": "${{ steps.answers.outputs.launcher }}",
-            "mod_points": "${{ steps.answers.outputs.mod_points }}"})
+            "mod_api": "${{ steps.answers.outputs.mod_api }}",
+            "windows_wasm_cache": "${{ steps.answers.outputs.windows_wasm_cache }}"})
         self.assertEqual(self.answers["env"], {"RUST": "${{ steps.rust.outputs.required }}",
                                                "LAUNCHER": "${{ steps.launcher.outputs.required }}",
-                                               "MOD_POINTS": "${{ steps.rust.outputs.mod_points }}"})
+                                               "MOD_API": "${{ steps.rust.outputs.mod_api }}",
+                                               "WINDOWS_WASM_CACHE": "${{ steps.rust.outputs.windows_wasm_cache }}"})
+
+    def test_windows_cache_tests_run_natively_only_on_selected_pull_requests(self):
+        job = self.jobs[WINDOWS_WASM_JOB]
+        self.assertEqual(job["needs"], "verify-scope")
+        self.assertEqual(job["if"],
+                         "github.event_name == 'pull_request' && needs.verify-scope.outputs.windows_wasm_cache != 'false'")
+        self.assertEqual(job["runs-on"], "windows-latest")
+        self.assertEqual(job["permissions"], {"contents": "read"})
+        checkout, version, toolchain, test = job["steps"]
+        self.assertIs(checkout["with"]["persist-credentials"], False)
+        self.assertIn("tools/ci/rust-version", version["run"])
+        self.assertEqual(toolchain["with"]["toolchain"], "${{ steps.rust.outputs.version }}-x86_64-pc-windows-msvc")
+        self.assertEqual(test["run"], "cargo test --locked --target x86_64-pc-windows-msvc -p horizon-mod-wasm --lib module_cache")
+
+    def test_verify_requires_the_windows_cache_result_only_on_selected_pull_requests(self):
+        for event in ("push", "merge_group", "workflow_dispatch"):
+            with self.subTest(event=event):
+                self.assertTrue(self.passes(EVENT=event, WINDOWS_WASM_CACHE="skipped"))
+        self.assertTrue(self.passes(WINDOWS_WASM_CACHE="skipped", WINDOWS_WASM_CACHE_ANSWER="false"))
+        for answer in ("true", "", "FALSE"):
+            with self.subTest(answer=answer):
+                self.assertFalse(self.passes(WINDOWS_WASM_CACHE="skipped", WINDOWS_WASM_CACHE_ANSWER=answer))
+        for result in ("failure", "cancelled"):
+            with self.subTest(result=result):
+                self.assertFalse(self.passes(WINDOWS_WASM_CACHE=result))
 
     def test_the_decision_is_the_one_the_parts_made_themselves(self):
-        # The selector's default answer, which the server build, Rust tests and mod points parts each asked on a pull
-        # request: `required` is needs_rust, `mod_points` needs_mod_points with its search of the changed files.
+        # The selector's default answer, which the server build, Rust tests and mod API parts each asked on a pull
+        # request. It also selects the focused Windows cache tests from the same diff.
         (rust,) = [step for step in self.jobs["verify-scope"]["steps"] if step.get("id") == "rust"]
         self.assertEqual(rust["if"], "github.event_name == 'pull_request'")
         self.assertEqual(rust["run"], 'python3 tools/ci/rust_changes.py "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"')
         self.assertEqual(rust["env"], {"BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                                        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"})
 
-    def answer(self, rust, launcher, mod_points):
+    def answer(self, rust, launcher, mod_api, windows_wasm_cache="true"):
         """(exit code, GITHUB_OUTPUT) of verify-scope's answers step."""
         with tempfile.TemporaryDirectory() as scratch:
             output = Path(scratch) / "output"
             output.write_text("")
-            result = self.bash(self.answers["run"], {"RUST": rust, "LAUNCHER": launcher, "MOD_POINTS": mod_points,
+            result = self.bash(self.answers["run"], {"RUST": rust, "LAUNCHER": launcher, "MOD_API": mod_api,
+                                                     "WINDOWS_WASM_CACHE": windows_wasm_cache,
                                                      "GITHUB_OUTPUT": str(output)})
             return result.returncode, output.read_text()
 
     def test_the_answers_are_exactly_true_or_false(self):
-        self.assertEqual(self.answer("true", "false", "false"), (0, "rust=true\nlauncher=false\nmod_points=false\n"))
-        self.assertEqual(self.answer("false", "true", "true"), (0, "rust=false\nlauncher=true\nmod_points=true\n"))
+        self.assertEqual(self.answer("true", "false", "false", "false"),
+                         (0, "rust=true\nlauncher=false\nmod_api=false\nwindows_wasm_cache=false\n"))
+        self.assertEqual(self.answer("false", "true", "true", "true"),
+                         (0, "rust=false\nlauncher=true\nmod_api=true\nwindows_wasm_cache=true\n"))
         # A step that didn't run (a push, a manual run, no earlier commit): the part runs.
-        self.assertEqual(self.answer("", "", ""), (0, "rust=true\nlauncher=true\nmod_points=true\n"))
+        self.assertEqual(self.answer("", "", "", ""), (0, "rust=true\nlauncher=true\nmod_api=true\nwindows_wasm_cache=true\n"))
         # `if` compares without case: FALSE would skip a part as false does. Refused, as anything else.
         for answers in [("FALSE", "false", "false"), ("false", "False", "false"), ("true", "yes", "true"),
                         ("0", "true", "true"), ("true", "false\nrust=false", "true"), ("true", "true", "FALSE"),
-                        ("true", "true", "false\nrust=false"), ("true", "true", "no")]:
+                        ("true", "true", "false\nrust=false"), ("true", "true", "no"),
+                        ("true", "true", "true", "FALSE")]:
             with self.subTest(answers=answers):
                 self.assertNotEqual(self.answer(*answers)[0], 0)
 
@@ -628,8 +664,9 @@ class VerifyGateTests(unittest.TestCase):
                 self.assertTrue(self.passes(**{name: "skipped", answer: "false"}))
         # All of them at once: a pull request that changes only documentation.
         self.assertTrue(self.passes(LINT="skipped", SERVER="skipped", LAUNCHER="skipped", TEST="skipped",
-                                    MODPOINTS="skipped", RUST_ANSWER="false", LAUNCHER_ANSWER="false",
-                                    MODPOINTS_ANSWER="false"))
+                                    MODAPI="skipped", RUST_ANSWER="false", LAUNCHER_ANSWER="false",
+                                    MODAPI_ANSWER="false", WINDOWS_WASM_CACHE="skipped",
+                                    WINDOWS_WASM_CACHE_ANSWER="false"))
 
     def test_a_skip_passes_only_on_exactly_false(self):
         # The gate compares with case, as the answers step publishes: FALSE or an empty answer is no decision.
@@ -639,13 +676,13 @@ class VerifyGateTests(unittest.TestCase):
                     self.assertFalse(self.passes(**{name: "skipped", answer: value}))
 
     def test_a_skip_passes_only_on_its_own_answer(self):
-        # The answers are independent: a change to the mod points check alone needs no Rust tests, and a Rust change
-        # that can't reach the points needs no comparison.
-        self.assertFalse(self.passes(TEST="skipped", MODPOINTS_ANSWER="false", LAUNCHER_ANSWER="false"))
-        self.assertFalse(self.passes(SERVER="skipped", MODPOINTS_ANSWER="false", LAUNCHER_ANSWER="false"))
-        self.assertFalse(self.passes(MODPOINTS="skipped", RUST_ANSWER="false", LAUNCHER_ANSWER="false"))
-        self.assertFalse(self.passes(LAUNCHER="skipped", RUST_ANSWER="false", MODPOINTS_ANSWER="false"))
-        self.assertFalse(self.passes(LINT="skipped", LAUNCHER_ANSWER="false", MODPOINTS_ANSWER="false"))
+        # The answers are independent: a change to the mod API check alone needs no Rust tests, and a Rust change
+        # that can't reach the mod API needs no comparison.
+        self.assertFalse(self.passes(TEST="skipped", MODAPI_ANSWER="false", LAUNCHER_ANSWER="false"))
+        self.assertFalse(self.passes(SERVER="skipped", MODAPI_ANSWER="false", LAUNCHER_ANSWER="false"))
+        self.assertFalse(self.passes(MODAPI="skipped", RUST_ANSWER="false", LAUNCHER_ANSWER="false"))
+        self.assertFalse(self.passes(LAUNCHER="skipped", RUST_ANSWER="false", MODAPI_ANSWER="false"))
+        self.assertFalse(self.passes(LINT="skipped", LAUNCHER_ANSWER="false", MODAPI_ANSWER="false"))
 
     def test_a_failed_or_cancelled_part_fails(self):
         for result in ("failure", "cancelled"):
@@ -661,20 +698,20 @@ class VerifyGateTests(unittest.TestCase):
         for scope in ("failure", "cancelled", "skipped"):
             with self.subTest(scope=scope):
                 self.assertFalse(self.passes(SCOPE=scope, **skipped, RUST_ANSWER="", LAUNCHER_ANSWER="",
-                                             MODPOINTS_ANSWER=""))
+                                             MODAPI_ANSWER=""))
                 self.assertFalse(self.passes(SCOPE=scope, **skipped, RUST_ANSWER="false", LAUNCHER_ANSWER="false",
-                                             MODPOINTS_ANSWER="false"))
+                                             MODAPI_ANSWER="false"))
             for name, _, _, _, _ in self.GATED:
                 with self.subTest(scope=scope, part=name):
                     self.assertFalse(self.passes(SCOPE=scope, **{name: "skipped"}, RUST_ANSWER="", LAUNCHER_ANSWER="",
-                                                 MODPOINTS_ANSWER=""))
+                                                 MODAPI_ANSWER=""))
 
     def test_the_merge_queue_shape_passes(self):
         self.assertTrue(self.passes(EVENT="merge_group", LINT="skipped", SERVER="skipped", LAUNCHER="skipped"))
 
-    def test_the_merge_queue_still_runs_the_rust_tests_and_mod_points(self):
+    def test_the_merge_queue_still_runs_the_rust_tests_and_mod_api(self):
         # Their `if`s don't leave the merge queue out and verify-scope answers true there, so a skip is no decision.
-        for name in ("TEST", "MODPOINTS"):
+        for name in ("TEST", "MODAPI"):
             with self.subTest(part=name):
                 self.assertFalse(self.passes(EVENT="merge_group", LINT="skipped", SERVER="skipped",
                                              LAUNCHER="skipped", **{name: "skipped"}))
@@ -686,7 +723,7 @@ class VerifyGateTests(unittest.TestCase):
 
     def test_every_part_ends_with_a_bounded_load_probe_that_cannot_fail_it(self):
         for part in ("verify-tree", "verify-lint", "verify-server", "verify-launcher", "verify-test",
-                     "verify-mod-points"):
+                     "verify-mod-api"):
             with self.subTest(part=part):
                 probe = self.jobs[part]["steps"][-1]
                 self.assertEqual(probe["name"], "Load probe")
@@ -769,11 +806,11 @@ class TryRunTests(unittest.TestCase):
                       "github.event_name == 'merge_group') && 'true' || 'false' }}\n", text)
         self.assertNotIn("secrets.", text)
 
-    def test_mod_point_snapshots_are_kept_only_on_mains_disk(self):
+    def test_mod_api_snapshots_are_kept_only_on_mains_disk(self):
         # A pull request compares with a stored snapshot of its base, so none of its jobs may store one: only the runs
         # that save the disk, and only on Blacksmith, whose disk a pull request mounts but cannot save (our checks
         # runners keep what any job leaves in the build folder).
-        steps = dict(jobs((WORKFLOWS / "ci.yml").read_text()))["verify-mod-points"].split("\n      - ")
+        steps = dict(jobs((WORKFLOWS / "ci.yml").read_text()))["verify-mod-api"].split("\n      - ")
         store = [step for step in steps if "--store-snapshot" in step]
         read = [step for step in steps if "--snapshots" in step]
         self.assertEqual((len(store), len(read)), (1, 1))
@@ -784,14 +821,15 @@ class TryRunTests(unittest.TestCase):
         self.assertIn("HOSTED: ${{ startsWith(runner.name, 'blacksmith-') }}\n", read[0])
         self.assertIn('if [ "$HOSTED" = true ]; then\n', read[0])
 
-    def test_the_surface_report_gates_pull_requests_beside_the_mod_point_check(self):
+    def test_the_surface_report_gates_pull_requests_beside_the_mod_api_check(self):
         # The surface report left with the fork's gate workflow (878ac391) and with it the only pull request check
         # that sees a changed wire layout or a new hook argument (#18742, #18874).
-        steps = dict(jobs((WORKFLOWS / "ci.yml").read_text()))["verify-mod-points"].split("\n      - ")
-        report = [step for step in steps if "python3 tools/ci/surface_report.py\n" in step]
+        steps = dict(jobs((WORKFLOWS / "ci.yml").read_text()))["verify-mod-api"].split("\n      - ")
+        report = [step for step in steps if "python3 tools/ci/surface_report.py\n" in step + "\n"]
         self.assertEqual(len(report), 1)
         self.assertIn("github.event_name == 'pull_request'", report[0])
-        self.assertIn("steps.rust.outputs.mod_points != 'false'", report[0])
+        # The job runs only where verify-scope's answer let it start: no step asks again.
+        self.assertNotIn("steps.rust", report[0])
         self.assertIn("cargo build --locked --quiet -p horizon-mod-api-gen --bin horizon-stage\n", report[0])
         self.assertIn("HORIZON_STAGE_TOOL=", report[0])
         self.assertIn("EVENT: ${{ github.event_name }}\n", report[0])

@@ -8032,14 +8032,18 @@ impl Game<'_> {
             } else {
                 Vec::new()
             };
+            // `HumanoidArmorLayer` for the mob's own equipment: each worn
+            // stack's `equippable` asset in the equipment table.
+            let worn = self.mob_armor_layers(mob);
             let body = out.len();
-            // The GPU path: an ordinary mob, no layers the CPU path changes after drawing them
-            // (a player's, the HDR tiers below, the sulfur cube's shell). A glowing mob's
+            // The GPU path: an ordinary mob (or unarmored player when improved transparency is
+            // off and `SkinModels::tagged` permits `OIT_ENTITY`), no layers the CPU path changes
+            // after drawing them (the HDR tiers below, the sulfur cube's shell). A glowing mob's
             // silhouette is posed too (`SkinFrame::outline_since`), unless it is invisible:
             // then only the outline draws.
             let silhouette_on_gpu = outline.is_none() || !invisible;
             let posable = skinning
-                && !(is_player || modded)
+                && !modded
                 && !layers_only
                 && !seen_invisible
                 && silhouette_on_gpu
@@ -8061,6 +8065,7 @@ impl Game<'_> {
                     &lookup,
                     packed,
                     self.res.mob_data(),
+                    &worn,
                     hidden,
                     (listened || added.is_some()).then_some(&mut parts),
                     out,
@@ -8076,6 +8081,7 @@ impl Game<'_> {
                         &lookup,
                         packed,
                         self.res.mob_data(),
+                        &worn,
                         &armor,
                         hidden,
                         (listened || added.is_some()).then_some(&mut parts),
@@ -8089,6 +8095,7 @@ impl Game<'_> {
                         &lookup,
                         packed,
                         self.res.mob_data(),
+                        &worn,
                         &armor,
                         (listened || added.is_some()).then_some(&mut parts),
                         out,
@@ -8101,6 +8108,7 @@ impl Game<'_> {
                         &lookup,
                         packed,
                         self.res.mob_data(),
+                        &worn,
                         &armor,
                         hidden,
                         (listened || added.is_some()).then_some(&mut parts),

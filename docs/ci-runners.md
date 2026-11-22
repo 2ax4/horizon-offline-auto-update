@@ -53,12 +53,13 @@ per part, side by side, each on a size that fits it:
 | `verify (server build lint)` (`verify-server`), when `verify-scope` finds a Rust change | 4 vCPU: its clippy keeps about two cores busy | no |
 | `verify (launcher)` (`verify-launcher`), when `verify-scope` (`rust_changes.py --launcher`) says the change reaches it | 8 vCPU | no |
 | `verify (Rust tests)` (`verify-test`), when `verify-scope` finds a Rust change | 16 vCPU: a cold build folder compiles the workspace | yes |
-| `verify (mod points)` (`verify-mod-points`), when `verify-scope` says the change can reach the points: the comparison runs on pull requests only; elsewhere it builds the generator to warm its disk | 8 vCPU: the generator and the comparison use one core; only its compiles use more | yes |
+| `verify (mod API)` (`verify-mod-api`), when `verify-scope` says the change can reach the mod API: the comparison and the surface report run on pull requests only; elsewhere it builds the generator to warm its disk | 4 vCPU: the generator and the comparison use one core; only its compiles use more (8 vCPU ran at ~13%) | yes |
+| `verify (Windows Wasm cache)` (`verify-windows-wasm-cache`), on pull requests changing `crates/horizon-mod-wasm/`, workspace Cargo configuration, the Rust toolchain pin, the workflow, or the selector | GitHub's `windows-latest`, x64 MSVC | no |
 
-Only `verify`, which waits for them all, is a required check; `tests/test_ci_runners.py` pins that the parts share one
-`runs-on` choice. `SELF_HOSTED_CI=all` sends them all to our checks runners. `verify` passes a skipped part only where
-its own `if` left it out: `verify-scope`'s answer for it exactly `false`, or the merge queue for the lint, server build
-and launcher parts. A failed or cancelled `verify-scope` fails `verify`. Each part ends with a `load probe:` line
+Only `verify` is required, and it waits for all the parts. `SELF_HOSTED_CI=all` sends the Linux parts to our checks
+runners. The Windows part runs just the `horizon-mod-wasm` `module_cache` tests on a fresh GitHub runner without a
+build cache. `verify` accepts a skipped part when `verify-scope` answers exactly `false` or the event excludes that
+part. A failed or cancelled `verify-scope` fails `verify`. The Linux build parts end with a `load probe:` line
 (`tools/ci/load_probe.sh`: cores, load, CPU and memory use, seconds) for choosing runner sizes; its `peak` is the job's
 cgroup peak, file cache included, so it reads higher than the memory the processes held.
 
@@ -67,7 +68,7 @@ minute's price (Blacksmith bills by vCPU, 2 vCPU and 8 GB at a time; 4 vCPU has 
 compiles in a part slow down on fewer cores. The sticky disks' keys don't name the size, so a resized part keeps its
 build folder.
 
-Each Rust job keeps its Cargo build folder between runs on a Blacksmith sticky disk, as the VPS keeps its own
+Each Linux Rust job keeps its Cargo build folder between runs on a Blacksmith sticky disk, as the VPS keeps its own
 (`tools/ci/build_folder.sh`): one disk per job, so jobs that ran side by side don't replace each other's build. A
 checkout dates every file now; the script gives each file whose Git object is the one the disk's last job saw that
 job's date back (`tools/ci/source_mtimes.py`), so Cargo rebuilds only what changed, and empties a disk past 50 GB
@@ -80,9 +81,10 @@ branch than main ("... is not the default branch"), the merge queue's excepted: 
 fork's copy of the workflow cannot write this repository's disks. Forks' pull requests mount main's disks as well:
 until 2026-11-17 they had a set of their own that nothing could save, so each built the whole workspace (7-10 minutes
 per Rust part, against ~2 for a branch here).
-Because no pull request can save a disk, `verify (mod points)` keeps there what pull requests trust: each saved run's
-mod points snapshot of its commit (`mod-points-snapshots`, the newest 30), which a pull request whose `HEAD^1` is stored
-compares with instead of building the base (`tools/check_mod_points_unchanged.py --snapshots`).
+Because no pull request can save a disk, `verify (mod API)` keeps there what pull requests trust: each saved run's
+mod API snapshot of its commit (`mod-points-snapshots`, the newest 30, a name kept from the job's earlier name), which a
+pull request whose `HEAD^1` is stored compares with instead of building the base
+(`tools/check_mod_api_unchanged.py --snapshots`).
 
 ## Try runs
 
@@ -100,7 +102,7 @@ git push origin --delete try/<name>                           # when done
 ```
 
 - **Linux**: verify's parts on Blacksmith, as for a push to main: the whole workspace's tests, clippy, the server build,
-  the launcher, the Python tests and the whole history's tree check. Not the mod points comparison (pull requests only).
+  the launcher, the Python tests and the whole history's tree check. Not the mod API comparison (pull requests only).
   They mount main's disks and never save them, so a branch near main takes about as long as a pull request: 7 minutes
   on 2026-11-19, the tree check of the whole history the slowest part. The Windows job took 48: 28 for the game, 4 for
   the folder, 15 for the launcher's tests.
@@ -108,17 +110,38 @@ git push origin --delete try/<name>                           # when done
   `game-build.yml` builds it, uploaded as the artifact `horizon-windows-x64` (kept 3 days): `horizon-client.exe`,
   `horizon-ctl.exe`, `horizon-prepare.exe`, `horizon-server.exe`, `horizon-wasm-std.wasm` and DXC. No exporters (they
   are compiled from Minecraft's jars on the Mac mini), so point it at resources an installed Horizon already prepared
-  (`--resources`). Then the launcher's tests. It builds from scratch, with no Rust cache read or saved. The repository
-  is public: anyone signed in to GitHub can download the artifact for its 3 days, so a try run is no private channel.
+  (`--resources`). Then the Wasm cache and launcher tests run. It builds from scratch, with no Rust cache read or
+  saved. The repository is public: anyone signed in to GitHub can download the artifact for its 3 days, so a try run
+  is no private channel.
 - `-f arm64=true` adds the Windows ARM64 job (about 90 minutes) and `-f jfr=true` the JFR analysis on the Linux game
   runner; every hand-started run ran both before the inputs existed.
 - No job of a try run holds a secret; verify's parts and the Windows x64 job save no disk or cache
   (`tests/test_ci_runners.py`). Runs of one commit share a concurrency group: a second waits for the first.
 - A try run reports `verify` on the branch's commit, as a pull request's run of that commit does. It is no proof for
-  a pull request: it skips the mod points comparison, and the merge queue still needs its own green `verify` on the
+  a pull request: it skips the mod API comparison, and the merge queue still needs its own green `verify` on the
   queue's commit, which a try run cannot give.
 - The run uses the branch's own copy of `ci.yml`: a branch from before 2026-11-19 has no inputs and always starts the
   ARM64 and JFR jobs. Rebase it on main first.
+
+## Testbox
+
+`testbox.yml` gives a maintainer a Blacksmith runner for building, linting and testing local changes before pushing:
+`blacksmith testbox warmup testbox.yml --ref testbox/<name> --idle-timeout 5`. The CLI syncs unpushed code to the
+runner and runs commands there over SSH, so the job runs code nobody reviewed. It therefore runs only on `testbox/*`
+branches and fails on any other ref: on main or a tag it could write Actions cache entries that release builds
+restore, and on a branch another workflow builds (`launcher-*`) entries that a build holding a secret restores.
+Cargo's settings (the build folder, mold, `HORIZON_NO_AUDIO`, `HORIZON_TELEMETRY_URL=off`) are in the runner's
+`~/.cargo/config.toml`, so they reach only processes Cargo starts. The build folder is a sticky disk of its own
+(`-testbox-target`) that is never saved, so each session builds from scratch and stays fast after that: a saved disk
+would restore the dates of the checkout over files a session had edited, and the next session could reuse what
+someone else's unpushed code built.
+
+A session ends after its idle timeout or at the job's 120-minute limit, whichever comes first. The idle timeout
+(`--idle-timeout`) counts minutes with neither a `testbox run` nor an open SSH connection to the runner: a command
+still running, a copy over SSH or a forgotten interactive session keeps the session alive, and billed, until the limit.
+Billing stops with the session, so the limit costs nothing in normal use and only caps a session that keeps running.
+It is 120 rather than 60 because a new session starts with an empty build folder: a cold release build
+of the game, the server and the bots took 9 minutes on 2026-11-22, and comparing a branch with its base builds twice.
 
 ## Hosted parity
 

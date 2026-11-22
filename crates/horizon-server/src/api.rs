@@ -381,6 +381,8 @@ pub struct Shared {
     pub event_added: std::sync::Condvar,
     /// The management protocol's connections, which its notifications go to (management.rs).
     pub management: crate::management::Clients,
+    /// `[proxy]`'s listener, when it is on (proxy/mod.rs).
+    pub proxy: Mutex<Option<crate::proxy::Proxy>>,
 }
 
 impl Shared {
@@ -413,7 +415,15 @@ impl Shared {
             events: Mutex::default(),
             event_added: std::sync::Condvar::new(),
             management: crate::management::Clients::default(),
+            proxy: Mutex::new(None),
         })
+    }
+
+    /// What `[proxy]` is told as the game starts, stops and ends (proxy/mod.rs); nothing when it is off.
+    pub fn proxy(&self, tell: impl FnOnce(&crate::proxy::Proxy)) {
+        if let Some(proxy) = self.proxy.lock().unwrap().as_ref() {
+            tell(proxy);
+        }
     }
 
     /// Ends an update or rollback: its outcome, in the log and in `status`.

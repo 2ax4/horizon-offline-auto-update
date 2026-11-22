@@ -53,21 +53,16 @@ refuse the manifest. Native mods may declare top-level `internals`, an array of 
 | `mixins` | string | the exact horizon-mixins commit, 40 lowercase hex characters |
 | `module` | array of tables | optional support modules, written as `[[native.module]]` |
 
-API points use top-level declarations.
-API function listeners use top-level `[[inject]]`: `id`, `at`, lowercase `kind`, `with`, and optional `hash`,
-with optional `priority` (default 0). `head`, `return` and `replace` are supported.
-The `access` key is refused by name. Use `[[native.mixin]]` for game internals.
-Unknown fields are refused by the schema. API function declarations use only `[[inject]]`.
-See [Injections](../concepts/injections.md) for the fields and point injections, and
-[Named hook points](../how-to/entities/named-hook-points.md) for the named hook contracts.
+Unknown fields are refused by the schema. Top-level `[[inject]]` was removed (#19576): a manifest that declares it
+is refused with `[[inject]] was removed`. Listen through a typed hook, or change the function with
+`[[native.mixin]]`. See [Named hook points](../how-to/entities/named-hook-points.md) for the named hook contracts.
 
-A module has a unique, nonempty `id` (one id space with the injections), a `file` naming the game source
+A module has a unique, nonempty `id` (one id space with the other native rows), a `file` naming the game source
 file that receives it, a `name` that is a Rust module identifier, and a `source` payload file under
 `src/`, holding the module's items without an outer wrapper. An optional `visibility` is exactly
 `"pub"` or `"pub(crate)"`, the default. See [Support modules](../concepts/native-route/5-support-modules.md).
 
-`[[inject]]` only fills compiled slots and never compiles game code. Native source edits
-use `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper` and the other
+Native source edits use `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper` and the other
 horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). `[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route; `[[native.state]]` is refused. See [The native route](../concepts/native-route.md) for every table, its fields and its refusals.
 
 Set `world_control` in the `[native]` section (default off) to let the mod ask to open one of its player's worlds from
@@ -85,6 +80,16 @@ changes nothing. Only an existing save opens: a folder that is not one plain nam
 refused with `InvalidRequest`, and nothing is created. The call answers a code (`NativeWorldResult`), not a message. Only
 the calling mod's own declaration grants it, and the question names that mod; a request whose caller is unidentified is
 refused with `NotPermitted`. Creating a world, and level create, unload or delete, are not part of it.
+
+Set `level_reset` in the `[native]` section (default off) to let the mod regenerate the Overworld, the Nether and the End
+with `RuntimeLevels::reset_vanilla`:
+
+```toml
+[native]
+level_reset = true
+```
+
+Without it, `reset_vanilla` is refused with `NotPermitted`, whatever other mods declare.
 
 A wasm mod adds `[wasm]` instead, written by `cargo horizon-mod build --wasm`
 ([Building to `mod.wasm`](../how-to/wasm-mods.md)):

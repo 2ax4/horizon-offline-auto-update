@@ -448,6 +448,14 @@
     "rationale": "Existing separately supplied input HORIZON_WASM_FIXTURE in tools/ci/ignored-tests/stat-award-wasm.txt; its dedicated workflow/harness must supply this input, which ordinary prepared resources do not contain. needs HORIZON_TEST_RESOURCES, HORIZON_WASM_FIXTURE and HORIZON_WASM_STD; build with horizon-mod-wasm/listener-fixture"
   },
   {
+    "package": "horizon-client",
+    "target": "lib",
+    "test": "game::interaction_click_parity_tests::a_click_on_a_server_interaction_consumes_like_vanilla",
+    "path": "crates/horizon-client/src/game/items/interaction_click_parity_tests.rs",
+    "reason": "parity harness: tools/test_interaction_click_parity.py runs it",
+    "rationale": "The Rust side of the interaction-click parity harness, run by its own driver: python tools/test_interaction_click_parity.py compiles the vanilla oracle, runs it, then exact-selects this test with --ignored --exact and HORIZON_INTERACTION_CLICK_TRACE pointing at its trace file, and compares the two JSON outputs case by case. The test writes no trace and asserts nothing without that variable, so daily shards have nothing to run here; the driver runs it wherever the harness runs (the parity job, which a maintainer starts on a fork's pull request, and main's own parity run)."
+  },
+  {
     "package": "horizon-client-core",
     "target": "lib",
     "test": "lang::tests::every_lang_file_of_a_pack_reads",
@@ -946,14 +954,6 @@
   {
     "package": "horizon-mod-api-gen",
     "target": "lib",
-    "test": "interface_cache_tests::cached_points_match_full_generation_across_source_changes",
-    "path": "crates/horizon-mod-api-gen/src/interface_cache_tests.rs",
-    "reason": "full source-tree generation equivalence; run explicitly when changing the cache",
-    "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-mod-api-gen.txt: full source-tree generation equivalence; run explicitly when changing the cache. Not selected by daily shards."
-  },
-  {
-    "package": "horizon-mod-api-gen",
-    "target": "lib",
     "test": "patch::census::refusal_census",
     "path": "crates/horizon-mod-api-gen/src/patch.rs",
     "reason": "measurement: prints the census",
@@ -1110,14 +1110,6 @@
     "path": "crates/horizon-mod-wasm/tests/strict_math.rs",
     "reason": "requires HORIZON_WASM_FIXTURE and HORIZON_WASM_STD built from this tree",
     "rationale": "Explicit by-hand runner in tools/ci/ignored-tests/manual-horizon-mod-wasm.txt: requires HORIZON_WASM_FIXTURE and HORIZON_WASM_STD built locally from this tree. Not selected by daily shards."
-  },
-  {
-    "package": "horizon-mod-wasm",
-    "target": "test:unstaged",
-    "test": "real_guest_point_is_refused_without_staging",
-    "path": "crates/horizon-mod-wasm/tests/unstaged.rs",
-    "reason": "needs HORIZON_WASM_FIXTURE and HORIZON_WASM_STD, built by wasm-mods",
-    "rationale": "Explicit by-hand runner in tools/ci/ignored-tests/manual-horizon-mod-wasm.txt: supply locally built HORIZON_WASM_FIXTURE and HORIZON_WASM_STD. The fork's wasm-mods workflow is not adopted. Not selected by daily shards."
   },
   {
     "package": "horizon-perf",

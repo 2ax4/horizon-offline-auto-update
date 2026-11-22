@@ -1,0 +1,35 @@
+# Game internals a native mod could declare (internals.json) that a pull request removed on purpose, checked by
+# tools/check_mod_api_unchanged.py. A removal passes only when its path is listed here; a listed path the game still
+# has fails, so a line goes when its internal comes back.
+#
+# One line per path: the path as internals.json writes it, then the issue, as `path  #issue`. A line for some of a
+# path's entries names their kind, their cfg or both: `path  kind=field  #issue`, `path  kind=fn  cfg=unix  #issue`
+# (`cfg=` alone: the unconditional ones). Lines starting with # are comments.
+horizon_client::game::dispenser::section_order  #19368
+horizon_client::game::native_replay::DEVICE_NAMES  #19310
+horizon_client::game::native_replay::MAX_RECORDING_ID  #19310
+horizon_client::game::native_replay::reparse_point  #19310
+horizon_client::game::native_replay::valid_id  #19310
+horizon_mod_package::manifest::inject::Inject  #19576
+horizon_mod_package::manifest::inject::Kind  #19576
+horizon_client::game::Game<'_>::lod_blue_map  kind=field  #19554
+horizon_client_render::bluemap::BlueMap  kind=struct  #19554
+horizon_client_render::bluemap::Candidate  kind=struct  #19554
+horizon_client_render::bluemap::Change  kind=struct  #19554
+horizon_client_render::bluemap::Columns  kind=type  #19554
+horizon_client_render::bluemap::Inner  kind=struct  #19554
+horizon_client_render::bluemap::Key  kind=type  #19554
+horizon_client_render::bluemap::Lowres  kind=struct  #19554
+horizon_client_render::bluemap::MapInfo  kind=struct  #19554
+horizon_client_render::bluemap::Palette  kind=struct  #19554
+horizon_client_render::bluemap::Pixel  kind=struct  #19554
+horizon_client_render::bluemap::Server  kind=struct  #19554
+horizon_client_render::bluemap::Settings  kind=struct  #19554
+horizon_client_render::bluemap::Slot  kind=enum  #19554
+horizon_client_render::bluemap::State  kind=struct  #19554
+horizon_client_render::bluemap::Tile  kind=struct  #19554
+horizon_client::game::points  #19576
+horizon_client::game::points::host_side  #19576
+horizon_client::game::points::mirror_in  #19576
+horizon_client::game::points::mirror_out  #19576
+horizon_client::game::points::unconverted  #19576

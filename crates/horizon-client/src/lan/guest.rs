@@ -189,6 +189,7 @@ pub struct Guest {
     pub center_sent: Option<(i32, i32)>,
     /// Why the connection closed (the console's "lost connection").
     pub left_reason: String,
+    pub(super) logout_guard: Option<Arc<()>>,
     /// A validated movement report the mods have not ruled on yet (`player_move`).
     pub pending_move: Option<super::hub::PendingMove>,
     /// Validated movement packets waiting to be told to `player_move_packet`, oldest first, and
@@ -204,6 +205,12 @@ pub struct Guest {
     /// A mod's personal sidebar is on this client (`Game::native_sidebar`); it is gone with the
     /// connection.
     pub personal_sidebar: bool,
+    /// A mod's one-shot sidebar objective is on this client (`Game::native_send_sidebar`),
+    /// apart from the personal one; it is gone with the connection.
+    pub sent_sidebar_exists: bool,
+    /// The one-shot sidebar uses slot 1 or is waiting for the managed sidebar to clear.
+    /// A world write to slot 1 ends that claim without removing the objective.
+    pub sent_sidebar_claims_slot: bool,
     pub uuid: u128,
     pub name: String,
     /// The properties the player logged in with (`ServerPlayer.getGameProfile`).
@@ -666,6 +673,11 @@ impl Guest {
         true
     }
 
+    /// Keep the pending logout registered while this guest is temporarily back in the hub.
+    pub fn take_logout_guard(&mut self) -> Option<Arc<()>> {
+        self.logout_guard.take()
+    }
+
     pub fn participates_online(&self) -> bool {
         self.kind == GuestKind::Network
     }
@@ -730,10 +742,13 @@ impl Guest {
             move_packets_told: (0, 0),
             center_sent: None,
             left_reason: String::new(),
+            logout_guard: None,
             pending_move: None,
             disconnect_pending: false,
             leaving: false,
             personal_sidebar: false,
+            sent_sidebar_exists: false,
+            sent_sidebar_claims_slot: false,
             uuid: j.uuid,
             name: j.name,
             properties: j.properties,
@@ -910,6 +925,28 @@ impl Guest {
     /// `ServerPlayer.onUpdateAbilities`: the guest's abilities, speeds included.
     pub fn abilities_packet(&self) -> play::Clientbound {
         play::Clientbound::PlayerAbilities(self.abilities.packet())
+    }
+    /// [`Self::send`] of a packet whose body was encoded once for every receiver.
+    pub fn send_shared(&self, packet: &play::Clientbound, body: &super::Body) {
+        if !self.participates_online() {
+            return;
+        }
+        if self.record.is_some() {
+            self.note_change(packet);
+        }
+        self.sender.send_many([body.clone()]);
+    }
+    /// Waypoint packets for this guest, in order, as [`Self::send`] and [`Self::send_shared`] each,
+    /// under one lock of its connection: a crowd's locator bar sends this guest hundreds a tick.
+    pub fn send_waypoints(&self, run: &[(u32, super::waypoints::Sent)]) {
+        if !self.participates_online() {
+            return;
+        }
+        if self.record.is_some() {
+            run.iter().for_each(|(_, s)| self.note_change(s.packet()));
+        }
+        self.sender
+            .send_many(run.iter().filter_map(|(_, s)| s.body()));
     }
     pub fn send(&self, packet: &play::Clientbound) {
         if !self.participates_online() {

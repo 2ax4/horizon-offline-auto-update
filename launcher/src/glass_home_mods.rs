@@ -250,7 +250,10 @@ impl Launcher {
             Some(match busy {
                 true => chip.opacity(0.4).cursor_default(),
                 false => chip.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods_install(source, id.clone(), None);
+                    this.mods_install(crate::mods_page::InstallRequest::Installed(
+                        source,
+                        id.clone(),
+                    ));
                     cx.notify();
                 })),
             })
@@ -609,7 +612,7 @@ impl Launcher {
                         Some(Err(tr("Wait for the current operation to finish.").into()));
                     return;
                 };
-                github_mods::remove(&home, &n.id).map(|_| ())
+                github_mods::remove_installed(&home, n)
             }
             (None, Some(e)) => {
                 // `mods_remove` says what it did itself.

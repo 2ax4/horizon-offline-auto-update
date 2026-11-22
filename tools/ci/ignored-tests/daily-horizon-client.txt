@@ -45,8 +45,19 @@ horizon-client game::fishing::impact::tests::misses_water_and_the_closed_gate_em
 horizon-client game::fishing::impact::tests::removing_a_bobber_in_its_impact_clears_the_line_without_rewards lib daily resources
 horizon-client game::gui_clips::dispatch_tests::a_hook_call_clips_what_its_mod_draws_and_closes_what_it_leaves_open lib daily resources
 horizon-client game::gui_entity::tests::a_screen_draws_a_mob_by_type_once_and_refuses_what_it_cant_draw lib daily game-boot
+horizon-client game::item_entities::orb_pickup_tests::a_player_picks_a_random_orb_not_the_first lib daily resources
+horizon-client game::lan_actions::pickup_xp_tests::a_guest_picks_an_orb_with_their_own_random lib daily resources
+horizon-client game::lan_entities::tests::glowing_display_metadata_reaches_the_model_silhouettes lib daily resources
 horizon-client game::launch_api::tests::developer_offline_never_consumes_inherited_sessions lib daily child-process
 horizon-client game::levels::tests::a_level_keeps_its_portal_palettes_while_another_ticks lib daily resources
+horizon-client game::levels::tests::a_ticket_while_an_idle_close_waits_keeps_the_level lib daily resources
+horizon-client game::levels::tests::a_write_after_a_close_is_listed_keeps_the_level lib daily resources
+horizon-client game::levels::tests::a_write_while_an_idle_close_waits_keeps_the_level_for_its_save lib daily resources
+horizon-client game::levels::tests::an_idle_close_keeps_the_level_until_its_save_is_on_disk lib daily resources
+horizon-client game::machines::brewing_fuel_transfer_tests::a_hopper_catches_an_item_on_its_outer_rim lib daily resources
+horizon-client game::machines::brewing_fuel_transfer_tests::a_rising_item_clears_the_hoppers_cell_before_crossing_its_edge lib daily resources
+horizon-client game::machines::brewing_fuel_transfer_tests::a_westbound_item_between_hoppers_goes_into_the_east_hopper lib daily resources
+horizon-client game::machines::brewing_fuel_transfer_tests::an_enabled_hopper_catches_an_item_overlapping_a_disabled_hopper lib daily resources
 horizon-client game::maps::tests::map_on_banner_in_adventure_mode_honours_can_place_on lib daily game-boot
 horizon-client game::mods::tests::a_shared_missing_jar_stops_native_load_and_refuses_each_content_mod_row lib daily child-process
 horizon-client game::mods::tests::content_overlay_validates_dependencies_and_orders_layers lib daily child-process
@@ -130,6 +141,7 @@ horizon-client game::native_player_ender_chest_tests::a_write_while_the_local_en
 horizon-client game::native_player_ender_chest_tests::a_written_slot_is_what_the_open_ender_chest_menu_shows_and_clicks lib daily resources
 horizon-client game::native_player_ender_chest_tests::each_ender_chest_refusal_has_its_own_name_and_writes_nothing lib daily resources
 horizon-client game::native_player_ender_chest_tests::ender_chest_slots_are_read_and_written lib daily resources
+horizon-client game::native_player_ender_chest_tests::an_ender_chest_open_is_heard_and_a_chest_open_is_not lib daily resources
 horizon-client game::native_player_inventory_tests::a_written_slot_is_what_the_open_inventory_menu_shows_and_clicks lib daily resources
 horizon-client game::native_player_inventory_tests::data_write_aborts lib daily resources
 horizon-client game::native_player_inventory_tests::each_inventory_refusal_has_its_own_name_and_writes_nothing lib daily resources
@@ -158,6 +170,7 @@ horizon-client game::persist::completion_tests::nested_tree_transfer_keeps_uuid_
 horizon-client game::persist::completion_tests::nosave_riders_transfer_live_without_becoming_saved lib daily resources
 horizon-client game::persist::completion_tests::registered_nosave_riders_are_live_but_not_serialized_or_vehicles lib daily resources
 horizon-client game::persist::completion_tests::valid_nonmob_rider_is_live_and_merge_does_not_adopt_passengers lib daily resources
+horizon-client game::persist::lookup_order_tests::orbs_keep_their_section_entry_order_after_reload lib daily resources
 horizon-client game::rectangular_recipe_remainder_tests::rectangular_recipe_for_preserves_two_custom_remainder_cells lib daily resources
 horizon-client game::remote::interaction_event_tests::mapping_press_tests::a_callback_click_survives_until_the_next_tick lib daily resources
 horizon-client game::remote::interaction_event_tests::mapping_press_tests::a_screen_drops_the_clicks_and_holds_nothing lib daily resources

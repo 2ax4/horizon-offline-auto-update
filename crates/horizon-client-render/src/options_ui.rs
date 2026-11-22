@@ -1132,6 +1132,8 @@ impl Opt {
                     (at + 1) % count
                 }];
                 s.horizon.api = api;
+                s.horizon.watchdog_api = None;
+                s.horizon.watchdog_driver = None;
                 s.file.set_name(
                     "preferredGraphicsBackend",
                     match api {
@@ -5348,10 +5350,8 @@ mod tests {
         }
     }
 
-    /// The Mods page is NeoForge's list screen: no switches, a footer of folder and
-    /// Back, and Config on the selected native mod. Positions are the layout at 480x240:
-    /// 150 px buttons 4 px apart, centred 27 px above the bottom; the sidebar at x 41 with its
-    /// list at y 32 and 28 px rows; the panel at x 188 with its buttons at y 182, 84 px apart.
+    /// At 480x240, the list starts at (38, 32) and each row is 28 px tall.
+    /// The panel buttons start at (190, 182), 84 px apart. The footer starts at y 213.
     #[test]
     fn the_mods_page_opens_the_folder_and_a_native_mods_settings() {
         let atlas = atlas();

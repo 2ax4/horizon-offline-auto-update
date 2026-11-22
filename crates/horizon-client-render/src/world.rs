@@ -39,6 +39,21 @@ impl DirtySections {
                 .get(&(x, z))
                 .is_some_and(|m| m.contains(sy as usize))
     }
+    /// Remove a single section index, pruning its column entry if empty.
+    pub fn remove(&mut self, (x, sy, z): (i32, i32, i32)) -> bool {
+        if !(0..SectionMask::CAPACITY as i32).contains(&sy) {
+            return false;
+        }
+        let Some(mask) = self.columns.get_mut(&(x, z)) else {
+            return false;
+        };
+        let had = mask.contains(sy as usize);
+        mask.remove(sy as usize);
+        if mask.is_empty() {
+            self.columns.remove(&(x, z));
+        }
+        had
+    }
     /// The dirty section indexes of column (x, z), removed.
     pub fn take_column(&mut self, x: i32, z: i32) -> SectionMask {
         self.columns.remove(&(x, z)).unwrap_or_default()
@@ -91,6 +106,13 @@ pub struct World {
     pub air: BlockStateId,
     /// Sections whose geometry changed and need remeshing.
     pub dirty_sections: DirtySections,
+    /// Sections dirtied by individual block edits (`World::set_block`),
+    /// rebuilt synchronously before the frame draws (`SectionRenderDispatcher.rebuildSectionSync`)
+    /// so a placed or broken block appears on the same frame as its selection outline.
+    pub immediate_sections: DirtySections,
+    /// Nesting depth of active local player block-edit scopes; only writes made while `> 0`
+    /// are recorded in `immediate_sections`.
+    player_edit_depth: u32,
     /// Chunks whose light must be recomputed.
     pub dirty_light: crate::fast_hash::FxHashSet<(i32, i32)>,
     /// Edits on lit chunks (position, old state, new state), relit
@@ -320,6 +342,8 @@ impl World {
             air,
             fast_lava: false,
             dirty_sections: Default::default(),
+            immediate_sections: Default::default(),
+            player_edit_depth: 0,
             dirty_light: Default::default(),
             light_edits: Vec::new(),
             light_checks: Default::default(),
@@ -431,9 +455,10 @@ impl World {
     /// cell above or below the level reads its top or bottom cells, not the cells the chunks'
     /// widened column holds there (vanilla's Nether and End save none, and read back they
     /// hold the table's first biome). `None` where the chunk isn't loaded.
+    #[inline]
     pub fn noise_biome(&self, x: i32, y: i32, z: i32) -> Option<u16> {
         let y = y.clamp(self.shape.min_y, self.shape.max_y() - 1);
-        Some(self.chunks.get(&(x >> 4, z >> 4))?.biome(x, y, z))
+        Some(self.chunks.get_chunk(x >> 4, z >> 4)?.biome(x, y, z))
     }
     /// One above the highest block Y the level's chunks hold.
     pub fn top_y(&self) -> i32 {
@@ -444,14 +469,56 @@ impl World {
     /// write, which `set` makes real at the root commit or which this takes back on an abort,
     /// so nothing outside sees it. False outside the resident chunks or the world's height.
     pub fn set_stored(&mut self, x: i32, y: i32, z: i32, state: BlockStateId) -> bool {
-        let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) else {
-            return false;
-        };
-        if chunk.section_index(y).is_none() {
-            return false;
+        self.chunks
+            .mutate_chunk((x >> 4, z >> 4), |chunk| {
+                if chunk.section_index(y).is_none() {
+                    return false;
+                }
+                Arc::make_mut(chunk).set(x & 15, y, z & 15, state.0);
+                true
+            })
+            .unwrap_or(false)
+    }
+    /// Enter a local player block-edit scope so writes mark `immediate_sections`.
+    pub fn begin_player_edit(&mut self) {
+        self.player_edit_depth = self.player_edit_depth.saturating_add(1);
+    }
+    /// Leave a local player block-edit scope.
+    pub fn end_player_edit(&mut self) {
+        self.player_edit_depth = self.player_edit_depth.saturating_sub(1);
+    }
+    /// Copy dirty sections whose center is within `max_dist_sq` of `camera_block` into
+    /// `immediate_sections` (vanilla `PrioritizeChunkUpdates.NEARBY`, 768.0 squared blocks),
+    /// stopping once `immediate_sections.len() > limit`.
+    pub fn mark_nearby_dirty_immediate(
+        &mut self,
+        camera_block: [i32; 3],
+        max_dist_sq: f64,
+        limit: usize,
+    ) {
+        let bottom_y = self.bottom_y();
+        let (cx0, cy0, cz0) = (
+            f64::from(camera_block[0]),
+            f64::from(camera_block[1]),
+            f64::from(camera_block[2]),
+        );
+        for ((cx, cz), sections) in self.dirty_sections.columns() {
+            let sx = f64::from(cx * 16 + 8) - cx0;
+            let sz = f64::from(cz * 16 + 8) - cz0;
+            let horiz = sx * sx + sz * sz;
+            if horiz > max_dist_sq {
+                continue;
+            }
+            for sy in sections.iter().map(|s| s as i32) {
+                let sy_d = f64::from(bottom_y + sy * 16 + 8) - cy0;
+                if horiz + sy_d * sy_d <= max_dist_sq {
+                    self.immediate_sections.insert((cx, sy, cz));
+                    if self.immediate_sections.len() > limit {
+                        return;
+                    }
+                }
+            }
         }
-        Arc::make_mut(chunk).set(x & 15, y, z & 15, state.0);
-        true
     }
     /// Resident storage write; marks the touched sections (and neighbours on
     /// section borders) for remeshing and the surrounding chunks for relighting.
@@ -468,14 +535,19 @@ impl World {
         state: BlockStateId,
         notify: bool,
     ) -> crate::Result<()> {
-        let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) else {
+        let Some(write) = self.chunks.mutate_chunk((x >> 4, z >> 4), |chunk| {
+            let min_y = chunk.min_y();
+            let sections = chunk.sections.len() as i32;
+            if chunk.section_index(y).is_none() {
+                return Err("write outside world height");
+            }
+            let lit = chunk.lit;
+            let previous = Arc::make_mut(chunk).set(x & 15, y, z & 15, state.0);
+            Ok((min_y, sections, lit, previous))
+        }) else {
             return Err("write outside resident chunks".into());
         };
-        let (min_y, sections) = (chunk.min_y(), chunk.sections.len() as i32);
-        if chunk.section_index(y).is_none() {
-            return Err("write outside world height".into());
-        }
-        let previous = Arc::make_mut(chunk).set(x & 15, y, z & 15, state.0);
+        let (min_y, sections, lit, previous) = write?;
         if previous != state.0 {
             self.block_entities
                 .state_changed((x, y, z), previous, state.0);
@@ -500,35 +572,64 @@ impl World {
             // border (the diagonal only where both borders meet).
             let sy = (y - min_y) >> 4;
             let local_y = y & 15;
-            let mark = |dirty: &mut DirtySections, bx: i32, bz: i32| {
-                dirty.insert((bx >> 4, sy, bz >> 4));
-                if local_y == 0 && sy > 0 {
-                    dirty.insert((bx >> 4, sy - 1, bz >> 4));
-                }
-                if local_y == 15 && sy + 1 < sections {
-                    dirty.insert((bx >> 4, sy + 1, bz >> 4));
-                }
-            };
+            let record_immediate = self.player_edit_depth > 0;
+            let mark =
+                |dirty: &mut DirtySections, immediate: &mut DirtySections, bx: i32, bz: i32| {
+                    let mut insert = |section: (i32, i32, i32)| {
+                        dirty.insert(section);
+                        if record_immediate {
+                            immediate.insert(section);
+                        }
+                    };
+                    insert((bx >> 4, sy, bz >> 4));
+                    if local_y == 0 && sy > 0 {
+                        insert((bx >> 4, sy - 1, bz >> 4));
+                    }
+                    if local_y == 15 && sy + 1 < sections {
+                        insert((bx >> 4, sy + 1, bz >> 4));
+                    }
+                };
             let (bx, bz) = (x & 15, z & 15);
-            mark(&mut self.dirty_sections, x, z);
+            mark(&mut self.dirty_sections, &mut self.immediate_sections, x, z);
             if bx == 0 {
-                mark(&mut self.dirty_sections, x - 1, z);
+                mark(
+                    &mut self.dirty_sections,
+                    &mut self.immediate_sections,
+                    x - 1,
+                    z,
+                );
             } else if bx == 15 {
-                mark(&mut self.dirty_sections, x + 1, z);
+                mark(
+                    &mut self.dirty_sections,
+                    &mut self.immediate_sections,
+                    x + 1,
+                    z,
+                );
             }
             if bz == 0 {
-                mark(&mut self.dirty_sections, x, z - 1);
+                mark(
+                    &mut self.dirty_sections,
+                    &mut self.immediate_sections,
+                    x,
+                    z - 1,
+                );
             } else if bz == 15 {
-                mark(&mut self.dirty_sections, x, z + 1);
+                mark(
+                    &mut self.dirty_sections,
+                    &mut self.immediate_sections,
+                    x,
+                    z + 1,
+                );
             }
             if (bx == 0 || bx == 15) && (bz == 0 || bz == 15) {
                 mark(
                     &mut self.dirty_sections,
+                    &mut self.immediate_sections,
                     if bx == 0 { x - 1 } else { x + 1 },
                     if bz == 0 { z - 1 } else { z + 1 },
                 );
             }
-            if self.chunks.get(&(x >> 4, z >> 4)).is_some_and(|c| c.lit) {
+            if lit {
                 self.light_edits.push(((x, y, z), previous, state.0));
             } else {
                 for dz in -1..=1 {
@@ -543,26 +644,33 @@ impl World {
     /// `getHeight(Heightmap.Types.WORLD_SURFACE, x, z)`: one above the highest
     /// block that isn't `air`, or the column's minimum Y (also where the chunk
     /// isn't loaded).
+    #[inline]
     pub fn world_surface(&self, x: i32, z: i32, air: impl Fn(BlockStateId) -> bool) -> i32 {
         let bottom = self.layout().min_y();
-        self.chunks.get(&(x >> 4, z >> 4)).map_or(bottom, |chunk| {
-            chunk.world_surface(x, z, |v| air(BlockStateId(v)))
-        })
+        self.chunks
+            .get_chunk(x >> 4, z >> 4)
+            .map_or(bottom, |chunk| {
+                chunk.world_surface(x, z, |v| air(BlockStateId(v)))
+            })
     }
     /// `getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)`: one above the
     /// highest block where `blocks` (motion blocking or holding a fluid),
     /// or the column's minimum Y (also where the chunk isn't loaded).
+    #[inline]
     pub fn motion_blocking(&self, x: i32, z: i32, blocks: impl Fn(BlockStateId) -> bool) -> i32 {
         let bottom = self.layout().min_y();
-        self.chunks.get(&(x >> 4, z >> 4)).map_or(bottom, |chunk| {
-            chunk.motion_blocking(x & 15, z & 15, |v| blocks(BlockStateId(v)))
-        })
-    }
-    #[inline]
-    pub fn block(&self, x: i32, y: i32, z: i32) -> BlockStateId {
         self.chunks
-            .get(&(x >> 4, z >> 4))
-            .map_or(self.air, |chunk| chunk.block(x & 15, y, z & 15))
+            .get_chunk(x >> 4, z >> 4)
+            .map_or(bottom, |chunk| {
+                chunk.motion_blocking(x & 15, z & 15, |v| blocks(BlockStateId(v)))
+            })
+    }
+    #[inline(always)]
+    pub fn block(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+        match self.chunks.get_chunk(x >> 4, z >> 4) {
+            Some(chunk) => chunk.block(x & 15, y, z & 15),
+            None => self.air,
+        }
     }
     /// Whether a block of the box `lo..=hi` may match, from the palettes of
     /// the sections it reaches (a palette of the whole registry may hold
@@ -583,7 +691,7 @@ impl World {
         let sections = (lo[1].max(bottom) - bottom) >> 4..=(hi[1].min(top) - bottom) >> 4;
         for cx in lo[0] >> 4..=hi[0] >> 4 {
             for cz in lo[2] >> 4..=hi[2] >> 4 {
-                let Some(chunk) = self.chunks.get(&(cx, cz)) else {
+                let Some(chunk) = self.chunks.get_chunk(cx, cz) else {
                     if matches(self.air) {
                         return true;
                     }
@@ -606,19 +714,23 @@ impl World {
         let (chunks, air) = (&self.chunks, self.air);
         self.block_entities.tickers(|(x, y, z)| {
             chunks
-                .get(&(x >> 4, z >> 4))
+                .get_chunk(x >> 4, z >> 4)
                 .map_or(air, |chunk| chunk.block(x & 15, y, z & 15))
                 .0
         })
     }
+    #[inline(always)]
     pub fn light(&self, x: i32, y: i32, z: i32) -> u8 {
-        self.chunks
-            .get(&(x >> 4, z >> 4))
-            .map_or(0xF0, |chunk| chunk.light(x & 15, y, z & 15))
+        match self.chunks.get_chunk(x >> 4, z >> 4) {
+            Some(chunk) => chunk.light(x & 15, y, z & 15),
+            None => 0xF0,
+        }
     }
+    #[inline(always)]
     pub fn is_air(&self, state: BlockStateId) -> bool {
         state == self.air
     }
+    #[inline(always)]
     pub fn loaded(&self, x: i32, z: i32) -> bool {
         self.chunks.contains_key(&(x >> 4, z >> 4))
     }
@@ -630,13 +742,14 @@ impl World {
     }
     /// `Level.isLoaded`: `y` is inside the build height and the chunk of `(x, z)` is loaded.
     /// Never loads a chunk.
+    #[inline(always)]
     pub fn is_loaded_at(&self, x: i32, y: i32, z: i32) -> bool {
         self.shape.contains_y(y) && self.loaded(x, z)
     }
     /// Persisted container capacity override; absence preserves vanilla capacity.
     pub fn container_stack_limit(&self, key: (i32, i32, i32)) -> Option<u32> {
         self.chunks
-            .get(&(key.0 >> 4, key.2 >> 4))
+            .get_chunk(key.0 >> 4, key.2 >> 4)
             .and_then(|c| c.container_stack_limits.get(&key).copied())
     }
     /// Store with the authoritative saved block entity fields.
@@ -662,7 +775,7 @@ impl World {
     /// model holds no field for it).
     pub fn block_lock(&self, key: (i32, i32, i32)) -> Option<&horizon_core::nbt::Tag> {
         self.chunks
-            .get(&(key.0 >> 4, key.2 >> 4))?
+            .get_chunk(key.0 >> 4, key.2 >> 4)?
             .saved
             .as_ref()?
             .block_entity_sources
@@ -716,7 +829,7 @@ impl World {
     pub fn block_entity_extras(&self, key: (i32, i32, i32)) -> BlockEntityExtras {
         let saved = self
             .chunks
-            .get(&(key.0 >> 4, key.2 >> 4))
+            .get_chunk(key.0 >> 4, key.2 >> 4)
             .and_then(|chunk| chunk.saved.as_ref());
         BlockEntityExtras {
             source: saved.and_then(|s| {
@@ -758,35 +871,39 @@ impl World {
         f: impl FnOnce(&mut crate::chunk::ChunkExtras),
     ) {
         let chunk_key = (key.0 >> 4, key.2 >> 4);
-        let Some(chunk) = self.chunks.get_mut(&chunk_key) else {
-            return;
-        };
-        let chunk = Arc::make_mut(chunk);
-        let mut extras = chunk
-            .saved
-            .take()
-            .map(Arc::unwrap_or_clone)
-            .unwrap_or_default();
-        f(&mut extras);
-        let limit = extras
-            .block_entity_sources
-            .iter()
-            .find(|(p, _)| *p == key)
-            .and_then(|(_, tag)| tag.get("horizon:stack_limit"))
-            .and_then(|tag| match tag {
-                horizon_core::nbt::Tag::Int(n) if (1..=99).contains(n) => Some(*n as u32),
-                _ => None,
-            });
-        match limit {
-            Some(limit) => {
-                chunk.container_stack_limits.insert(key, limit);
-            }
-            None => {
-                chunk.container_stack_limits.remove(&key);
-            }
+        if self
+            .chunks
+            .mutate_chunk(chunk_key, |chunk| {
+                let chunk = Arc::make_mut(chunk);
+                let mut extras = chunk
+                    .saved
+                    .take()
+                    .map(Arc::unwrap_or_clone)
+                    .unwrap_or_default();
+                f(&mut extras);
+                let limit = extras
+                    .block_entity_sources
+                    .iter()
+                    .find(|(p, _)| *p == key)
+                    .and_then(|(_, tag)| tag.get("horizon:stack_limit"))
+                    .and_then(|tag| match tag {
+                        horizon_core::nbt::Tag::Int(n) if (1..=99).contains(n) => Some(*n as u32),
+                        _ => None,
+                    });
+                match limit {
+                    Some(limit) => {
+                        chunk.container_stack_limits.insert(key, limit);
+                    }
+                    None => {
+                        chunk.container_stack_limits.remove(&key);
+                    }
+                }
+                chunk.saved = Some(Arc::new(extras));
+            })
+            .is_some()
+        {
+            self.modified.insert(chunk_key);
         }
-        chunk.saved = Some(Arc::new(extras));
-        self.modified.insert(chunk_key);
     }
 }
 

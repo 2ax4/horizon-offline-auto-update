@@ -58,6 +58,9 @@ pub fn sound_source(event: &str) -> usize {
     if e == "block.potent_sulfur.noxious_gas" {
         // PotentSulfurBlock.animateTick, its only caller, plays it as AMBIENT.
         index("ambient")
+    } else if e == "item.llama_carpet.unequip" {
+        // Equippable.shearingSound, played by Mob.playSound on the llama's NEUTRAL.
+        index("neutral")
     } else if e.starts_with("music_disc.") {
         index("record")
     } else if e.starts_with("item.goat_horn.") {
@@ -67,6 +70,9 @@ pub fn sound_source(event: &str) -> usize {
         index("music")
     } else if e.starts_with("weather.") || e.starts_with("entity.lightning_bolt") {
         index("weather")
+    } else if e.starts_with("block.note_block.") {
+        // NoteBlock.triggerEvent plays every instrument on RECORDS.
+        index("record")
     } else if e.starts_with("block.") {
         index("block")
     } else if e.starts_with("ambient.") {
@@ -968,11 +974,26 @@ mod tests {
             horizon_narrator::Status::Off
         );
     }
+    /// `Equippable.shearingSound` for a llama carpet is played by `Mob.playSound`
+    /// on the llama's NEUTRAL source, not on PLAYER like most `item.*` ids.
+    #[test]
+    fn llama_carpet_unequip_keeps_neutral_category() {
+        assert_eq!(
+            super::sound_source("minecraft:item.llama_carpet.unequip"),
+            6
+        );
+        assert_eq!(super::sound_source("item.llama_carpet.unequip"), 6);
+        assert_eq!(super::sound_source("minecraft:item.book.page_turn"), 7);
+    }
+
     /// `Monster.getSoundSource`: the verified families and inherited common sounds.
     #[test]
     fn hostile_families_keep_their_sound_category() {
         for (event, source) in [
             ("entity.zombie.hurt", 5),
+            ("block.note_block.harp", 2),
+            ("block.note_block.imitate.creeper", 2),
+            ("block.note_block.trumpet_exposed", 2),
             ("entity.cow.hurt", 6),
             ("block.stone.break", 4),
             ("entity.player.hurt", 7),

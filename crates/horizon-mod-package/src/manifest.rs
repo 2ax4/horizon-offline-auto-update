@@ -2,7 +2,6 @@
 //!
 //! Raw injection schema adapted from horizon-mixins (Copyright (c) 2026 levzzz),
 //! MIT licensed; see `HORIZON_MIXINS_LICENSE` and `THIRD_PARTY_NOTICES.md`.
-pub mod inject;
 mod jar;
 pub mod loops;
 pub mod mixin;
@@ -109,12 +108,14 @@ pub struct Manifest {
     /// Game internals used by this mod, fingerprinted against its pinned build.
     #[serde(default)]
     pub internals: Vec<Internal>,
-    #[serde(default, deserialize_with = "inject::rows")]
-    pub inject: Vec<inject::Inject>,
     /// Free-form values other mods read through `PackageInfo::property`.
     #[serde(default)]
     pub properties: std::collections::BTreeMap<String, Property>,
 }
+
+/// Why a manifest that declares `[[inject]]` is refused.
+pub const INJECT_REMOVED: &str = "[[inject]] was removed (#19576): listen through a typed hook in mod_api, \
+     or change the function with [[native.mixin]]; remove the [[inject]] tables";
 
 /// The most `[properties]` keys a manifest may declare.
 pub const MAX_PROPERTIES: usize = 64;
@@ -249,6 +250,9 @@ pub struct Native {
     /// caller is unidentified is refused with `NotPermitted`, whatever other mods declare.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub world_control: bool,
+    /// Whether the mod may regenerate the vanilla levels with `RuntimeLevels::reset_vanilla`; default off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub level_reset: bool,
 }
 
 /// One declared game internal, as listed in the pinned game's `internals.json`.
@@ -389,20 +393,9 @@ impl Manifest {
         };
         let m: Manifest = toml::from_str(text).map_err(|e| {
             // Serde knows the rejected field; this owning boundary supplies its provenance.
-            if let Ok(table) = toml::from_str::<toml::Table>(text)
-                && let Some(rows) = table.get("inject").and_then(toml::Value::as_array)
-            {
-                for row in rows {
-                    if let Some(Err(error)) = row.as_table().cloned().map(inject::row) {
-                        let field = |key| row.get(key).and_then(toml::Value::as_str).unwrap_or("?");
-                        let id = table.get("id").and_then(toml::Value::as_str).unwrap_or("?");
-                        return format!(
-                            "{MANIFEST}: {id}:{}: {}: {error}",
-                            field("id"),
-                            field("at")
-                        );
-                    }
-                }
+            // `inject` is an unknown field now; a manifest that has it is told why.
+            if toml::from_str::<toml::Table>(text).is_ok_and(|table| table.contains_key("inject")) {
+                return format!("{MANIFEST}: {INJECT_REMOVED}");
             }
             let native_alone = toml::from_str::<toml::Table>(text).is_ok_and(|mut table| {
                 table.contains_key("wasm")
@@ -415,19 +408,6 @@ impl Manifest {
                 format!("{MANIFEST}: {e}")
             }
         })?;
-        inject::Inject::check_all(&m.inject, &m.id, m.native.is_some() || m.wasm.is_some())
-            .map_err(|e| e.to_string())?;
-        for entry in &m.inject {
-            if m.dependencies
-                .keys()
-                .any(|id| entry.at.split("::").next() == Some(id.replace('-', "_").as_str()))
-            {
-                return Err(format!(
-                    "{}: target {} is another mod's function; use the library mod's own hooks and functions",
-                    entry.id, entry.at
-                ));
-            }
-        }
         Internal::check_all(&m.internals)?;
         if !m.internals.is_empty() && m.native.is_none() && m.wasm.is_none() {
             return Err(format!(
@@ -534,8 +514,7 @@ impl Manifest {
         }
         if let Some(native) = &m.native {
             // Native source edits share one id space.
-            let mut ids: std::collections::HashSet<_> =
-                m.inject.iter().map(|entry| &entry.id).collect();
+            let mut ids = std::collections::HashSet::new();
             for id in native
                 .mixin
                 .iter()
@@ -909,9 +888,7 @@ impl Package {
             return Err("archive I/O is unavailable on wasm32".into());
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-                let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-                return Self::read_zip(&mut zip);
+                return Self::read_stream(std::fs::File::open(path).map_err(|e| e.to_string())?);
             }
         };
         let mut package = Self::from_parts(&toml, icon, has_cargo, has_source, has_wasm)?;
@@ -928,6 +905,22 @@ impl Package {
             wasm.check(&bytes).map_err(|e| e.to_string())?;
         }
         Ok(package)
+    }
+
+    /// Read and validate an archive from bytes the caller has already opened: the same rule
+    /// [`read_zip`](Self::read_zip) applies, so what a caller mounts is what these checks read
+    /// rather than a pathname that may hold another package by the time it is opened again.
+    pub fn read_stream<R: Read + std::io::Seek>(reader: R) -> Result<Self, String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = reader;
+            Err("archive I/O is unavailable on wasm32".into())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut zip = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
+            Self::read_zip(&mut zip)
+        }
     }
 
     /// Read and validate an archive, including all selected source and resource entries.
@@ -1425,15 +1418,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn injections_at_dependency_functions_are_refused_by_name() {
-        let text = format!(
-            "{EXAMPLE}[native]\ngame='26.3'\nmixins='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'\nhorizon='0123456789012345678901234567890123456789'\n[dependencies]\nchemlib='1'\n[[inject]]\nid='listen'\nat='chemlib::transfer'\nkind='head'\nwith='listen'\n"
-        );
-        let error = Manifest::parse(&text).unwrap_err();
-        assert!(
-            error.contains("chemlib::transfer") && error.contains("own hooks and functions"),
-            "{error}"
-        );
+    fn a_declared_inject_is_refused_as_removed() {
+        for inject in [
+            "[[inject]]\nid='listen'\nat='game::tick'\nkind='head'\nwith='listen'\n",
+            "inject=[]\n",
+        ] {
+            let error = Manifest::parse(&format!("{EXAMPLE}{inject}")).unwrap_err();
+            assert_eq!(error, format!("{MANIFEST}: {INJECT_REMOVED}"));
+        }
     }
 
     #[test]

@@ -43,6 +43,36 @@ pub trait PlayersServerHost {
     #[access(WorldOnly)]
     fn server_set_max_players(&mut self, max_players: u32) -> Result<(), PlayerLimitRefusal>;
     /// Side: server.
+    /// The text of the mod command whose `run_mod_command` listeners are running, as
+    /// submitted and without its leading slash; for `execute … run` and `return run`,
+    /// the leaf command after `run`. Whitespace is kept as typed. This is untrusted
+    /// input: read validated values from `CommandInvocation`'s typed arguments. None
+    /// outside a `run_mod_command` listener.
+    #[access(WorldOnly)]
+    fn mod_command_raw(&self) -> Option<String>;
+    /// Side: server.
+    /// Read a real player's inventory by UUID. Reads live slots when they are online,
+    /// or the existing player file after pending saves finish. Refuses while the
+    /// player is joining, dead or swapped out.
+    #[access(WorldOnly)]
+    fn server_player_inventory(
+        &mut self,
+        uuid: u128,
+        kind: PlayerInventoryKind,
+    ) -> Result<PlayerInventorySnapshot, PlayerInventoryError>;
+    /// Side: server.
+    /// Move the exact stack an inventory snapshot showed. Fills matching stacks before
+    /// empty slots; a player inventory receives into its 36 main slots. The move can
+    /// change one existing saved player file and a live player, or two live inventories.
+    /// A move within one saved player can change both of their inventories in one write.
+    /// Refuses with no change if the stack no longer matches, it cannot fit whole,
+    /// or a required file write fails. Call outside a transaction and a player swap.
+    #[access(WorldOnly)]
+    fn server_move_inventory_stack(
+        &mut self,
+        request: &PlayerInventoryMove,
+    ) -> Result<(), PlayerInventoryError>;
+    /// Side: server.
     /// Define or replace a view owned by the calling mod. Its ID is local to that mod.
     /// An identical definition does nothing. Replacing rules refreshes every selection of that ID.
     #[access(WorldOnly)]
@@ -708,6 +738,21 @@ pub trait PlayersBackendMut {
         sidebar: Option<Sidebar>,
     ) -> Result<bool, TextFormError>;
     /// Side: server.
+    /// Sends a one-shot sidebar to the player's sidebar slot, with the same checks and
+    /// refusals as `player_set_sidebar`. The world's scoreboard can later replace the
+    /// slot, and a team's sidebar slot still wins on the client. The one-shot sidebar
+    /// has its own objective. A managed sidebar installed by `player_set_sidebar`
+    /// defers the one-shot display write until `player_set_sidebar` clears it with
+    /// `None`, even if the world has already taken slot 1. A world update to slot 1
+    /// after the one-shot send cancels the deferred write. `None` removes the one-shot
+    /// objective and restores the world's sidebar if the one-shot sidebar still owns the slot.
+    #[access(WorldOnly)]
+    fn player_send_sidebar(
+        &mut self,
+        player: PlayerRef,
+        sidebar: Option<Sidebar>,
+    ) -> Result<bool, TextFormError>;
+    /// Side: server.
     /// Shows `name` for that player in everyone's Tab list (Paper's `Player.playerListName`,
     /// NeoForge's `ServerPlayer.refreshTabListName`), colours and all; None shows the name the
     /// game would (their nickname or real name). The `player_tab_list_name_format` hook still
@@ -721,6 +766,26 @@ pub trait PlayersBackendMut {
         player: PlayerRef,
         name: Option<Text>,
     ) -> Result<bool, TextFormError>;
+    /// Side: server.
+    /// Spawns a client-only entity of `kind` (a type such as `minecraft:shulker` or
+    /// `minecraft:block_display`) at `pos` for `viewer`'s client alone: an `AddEntity` to that one
+    /// client. The entity is not in the level, no other player sees it, and it is gone when the
+    /// viewer leaves; it has no metadata beyond the type's defaults, and the mod moves and removes it
+    /// with `viewer_entity_move` and `viewer_entity_remove`. Returns its id, which the level never
+    /// gives out to another entity. None when the viewer has no client, `kind` is not an entity
+    /// type, `pos` is not finite, or the entity ids are used up.
+    #[access(WorldOnly)]
+    fn viewer_entity_spawn(&mut self, viewer: PlayerRef, kind: &str, pos: [f64; 3]) -> Option<u32>;
+    /// Side: server.
+    /// Moves a client-only entity made by `viewer_entity_spawn` to `pos`, in `viewer`'s client only
+    /// (`TeleportEntity`). False when the viewer has no such entity or no client, or `pos` is not finite.
+    #[access(WorldOnly)]
+    fn viewer_entity_move(&mut self, viewer: PlayerRef, id: u32, pos: [f64; 3]) -> bool;
+    /// Side: server.
+    /// Removes a client-only entity made by `viewer_entity_spawn` from `viewer`'s client
+    /// (`RemoveEntities`). False when the viewer has no such entity or no client.
+    #[access(WorldOnly)]
+    fn viewer_entity_remove(&mut self, viewer: PlayerRef, id: u32) -> bool;
     /// Side: server.
     /// Hides that player (a vanish) from the players below permission
     /// `level`, or shows them again (None): from the next tick those players

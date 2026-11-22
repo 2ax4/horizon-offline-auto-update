@@ -76,6 +76,9 @@ pub(super) trait Entity: EntityRules {
     fn id(&self) -> u32;
     fn position(&self) -> Vec3;
     fn position_mut(&mut self) -> &mut Vec3;
+    fn set_position(&mut self, position: Vec3) {
+        *self.position_mut() = position;
+    }
     /// Where it stood when the last tick began (`Entity.lastKnownPosition`'s
     /// reading): `position - previous_position` is `computeSpeed`.
     fn previous_position(&self) -> Vec3;
@@ -270,6 +273,21 @@ pub(super) trait Entity: EntityRules {
     /// vanilla).
     fn portal_size(&self) -> Option<(f32, f32)> {
         None
+    }
+    /// The box a portal sweep follows at `position` (`Entity.getBoundingBox`).
+    /// The default is the box [`Self::portal_size`] describes; a kind whose
+    /// real box differs from its dimensions (an open shulker) overrides it.
+    fn portal_bounds(&self, position: Vec3) -> Option<Aabb> {
+        let (width, height) = self.portal_size()?;
+        let half = f64::from(width) / 2.0;
+        Some(Aabb::new(
+            Vec3::new(position.x - half, position.y, position.z - half),
+            Vec3::new(
+                position.x + half,
+                position.y + f64::from(height),
+                position.z + half,
+            ),
+        ))
     }
     /// Whether [`Self::portal_size`] is Some, without working the size out (a
     /// mob's depends on its age, scale and pose).
@@ -944,7 +962,7 @@ impl Game<'_> {
         entity_boxes: &[Aabb],
         client: bool,
         splash: &mut impl FnMut(horizon_client::entities::ItemSplash),
-    ) -> (bool, bool, super::ahead::Landed) {
+    ) -> (bool, bool, super::ahead::Landed, Option<Vec3>) {
         let no_physics = escape_speed.is_some();
         let (step, landed) = self
             .item_tables()
@@ -984,13 +1002,13 @@ impl Game<'_> {
                 }
             }
             if discarded || item.stack.count == 0 {
-                return (false, true, landed);
+                return (false, true, landed, step.original_movement());
             }
         }
         let alive = self
             .item_tables()
             .settle_item(item, no_physics, step, splash);
-        (alive, false, landed)
+        (alive, false, landed, step.original_movement())
     }
 }
 
@@ -1616,6 +1634,9 @@ impl Entity for Mob {
     fn portal_size(&self) -> Option<(f32, f32)> {
         Some((self.width(), self.height()))
     }
+    fn portal_bounds(&self, position: Vec3) -> Option<Aabb> {
+        Some(self.bounds_at(position))
+    }
     fn sweeps_portals(&self) -> bool {
         true
     }
@@ -1781,6 +1802,10 @@ impl Entity for ItemEntity {
 }
 
 impl Entity for ExperienceOrb {
+    fn set_position(&mut self, position: Vec3) {
+        ExperienceOrb::set_position(self, position);
+    }
+
     fn reset_fall_distance(&mut self) {
         // An orb keeps no fall distance here.
     }
@@ -1788,8 +1813,7 @@ impl Entity for ExperienceOrb {
         if gate.skipped() {
             return;
         }
-        let position = self.position_mut();
-        *position = position.add_vector(movement);
+        self.set_position(self.position.add_vector(movement));
     }
 
     fn set_on_ground(&mut self, on_ground: bool) {
@@ -2776,6 +2800,83 @@ mod no_gravity_stand_tests {
 }
 
 #[cfg(test)]
+mod portal_bounds_tests {
+    use super::Entity as _;
+    use crate::mobs::{Anim, Brain, Flags, Mob, MobType, Part, Species, shulker::PEEK};
+    use horizon_core::geometry::Vec3;
+    use std::sync::Arc;
+
+    /// A shulker's type, without the resource tables a `Game` fixture needs.
+    fn shulker_kind() -> Arc<MobType> {
+        Arc::new(MobType {
+            shadow: None,
+            id: "minecraft:shulker".into(),
+            species: Species::Shulker,
+            width: 1.0,
+            height: 1.0,
+            eye_height: 0.5,
+            category: "creature".into(),
+            max_health: 30.0,
+            speed: 0.0,
+            flying_speed: 0.0,
+            attack_damage: 0.0,
+            attack_knockback: 0.0,
+            follow_range: 16.0,
+            step_height: 0.5,
+            armor: 0.0,
+            armor_toughness: 0.0,
+            knockback_resistance: 0.0,
+            jump_strength: 0.42,
+            attributes: Arc::default(),
+            item_stack_limits: Default::default(),
+            attribute_bounds: Default::default(),
+            gravity: 0.08,
+            safe_fall_distance: 3.0,
+            fall_damage_multiplier: 1.0,
+            water_efficiency: 0.0,
+            water_slowdown: 0.8,
+            air_speed: 0.02,
+            baby_scale: 0.5,
+            head_rot_speed: 10.0,
+            max_head_x_rot: 40.0,
+            max_head_y_rot: 180.0,
+            ambient_interval: 120,
+            flags: Flags::default(),
+            model: Arc::new(Part {
+                name: "root".into(),
+                pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                polygons: Vec::new(),
+                children: Vec::new(),
+            }),
+            layers: Default::default(),
+            texture: String::new(),
+            brain: Brain::Passive,
+            anim: Anim::Rabbit,
+            sounds: [""; 3],
+            sound_overrides: Default::default(),
+            food: Arc::default(),
+            tempt: Arc::default(),
+            passenger_attachments: Vec::new(),
+        })
+    }
+
+    /// F3+B and the portal sweep follow `Entity.getBoundingBox`: an open
+    /// shulker's lid box, not the fixed 1x1x1 its width and height describe.
+    #[test]
+    fn an_open_lid_is_in_the_debug_and_portal_box() {
+        for face in 0..6u8 {
+            let mut m = Mob::new(1, shulker_kind(), Vec3::new(0.5, 4.0, 0.5), 0.0);
+            m.extra.variant3 = face;
+            m.anim.v[PEEK] = 1.0;
+            let bounds = m.bounds();
+            let portal = m.portal_bounds(m.position).unwrap();
+            assert_eq!(portal.min_position(), bounds.min_position(), "face {face}");
+            assert_eq!(portal.max_position(), bounds.max_position(), "face {face}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod load_claim_tests {
     /// `Mob` is first in `entity_lists!` and claims every id in `mob_types`;
     /// the old load tried every other kind first. Both agree only while no
@@ -2989,6 +3090,7 @@ mod set_rotation_tests {
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             join: Default::default(),
+            section_order: 0,
             no_gravity: false,
             id: 0,
             position: horizon_core::geometry::Vec3::ZERO,
