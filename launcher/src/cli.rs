@@ -3847,6 +3847,7 @@ mod tests {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args([
+                    "--include-ignored",
                     "--exact",
                     "cli::tests::attached_status_actor",
                     "--nocapture",
@@ -3907,6 +3908,7 @@ mod tests {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
+                "--include-ignored",
                 "--exact",
                 "cli::tests::attached_status_actor",
                 "--nocapture",
