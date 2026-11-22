@@ -281,6 +281,7 @@ struct MeshSettings {
     cutout_leaves: bool,
     opaque_ice: bool,
     translucent_layers: Arc<[bool]>,
+    block_layers: Arc<crate::mesher::BlockLayerTable>,
     leaf_culling: LeafCullingMode,
 }
 enum Job {
@@ -701,6 +702,8 @@ pub struct Streaming {
     /// Sprite layers a shader pack draws in the translucent pass (`[[materials]]
     /// translucent`), by layer; empty without one.
     pub translucent_layers: Arc<[bool]>,
+    /// Per-state shader-pack model/fluid layer overrides; empty without a pack.
+    pub block_layers: Arc<crate::mesher::BlockLayerTable>,
     /// What the mesher does with leaf faces inside a canopy (`LeafCullingMode`).
     pub leaf_culling: LeafCullingMode,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
@@ -1308,6 +1311,7 @@ impl Streaming {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: Arc::from([]),
+            block_layers: Arc::default(),
             leaf_culling: LeafCullingMode::Off,
             light_tables,
             light_log: Vec::new(),
@@ -2767,6 +2771,18 @@ impl Streaming {
             }
         }
     }
+    /// Make a column resident for an immediate read.
+    /// The temporary request serves the same purpose as `ServerChunkCache.getChunk(FULL)`.
+    pub fn load_full_chunk(&mut self, world: &mut World, key: (i32, i32)) {
+        if world.chunks.contains_key(&key) {
+            return;
+        }
+        self.rank_full_task(key.0, key.1);
+        // Full columns finish out to radius + 1. This request is for one column.
+        self.extra.push((key, -1));
+        self.wait_for_full_chunk(world, key);
+        self.extra.pop();
+    }
     pub fn band(&self) -> Option<Band> {
         self.band
     }
@@ -2782,29 +2798,34 @@ impl Streaming {
     pub fn set_forced_loaded(&mut self, world: &mut World, x: i32, z: i32, forced: bool) -> bool {
         let changed = self.set_forced(x, z, forced);
         if forced && changed {
-            while !world.chunks.contains_key(&(x, z)) {
-                assert!(!self.paused, "forced chunk load before streaming started");
-                assert!(
-                    !self
-                        .shared
-                        .aborted
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    "forced chunk load after generation stopped"
-                );
-                // Pump the existing generation queue. Keep unloads for the
-                // normal owner update, which saves entities and notifies mods.
-                let mut plan = self.plan_update(world);
-                plan.sweep = false;
-                plan.far.clear();
-                let (meshes, unloaded) = self.finish_update(world, plan);
-                debug_assert!(unloaded.is_empty());
-                self.free(meshes);
-                if !world.chunks.contains_key(&(x, z)) {
-                    self.wait(std::time::Duration::from_millis(5));
-                }
-            }
+            self.wait_for_full_chunk(world, (x, z));
         }
         changed
+    }
+
+    /// Pump Horizon's generation and disk reads for a requested column.
+    fn wait_for_full_chunk(&mut self, world: &mut World, key: (i32, i32)) {
+        while !world.chunks.contains_key(&key) {
+            assert!(!self.paused, "chunk load before streaming started");
+            assert!(
+                !self
+                    .shared
+                    .aborted
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "chunk load after generation stopped"
+            );
+            // Pump the existing generation queue. Keep unloads for the
+            // normal owner update, which saves entities and notifies mods.
+            let mut plan = self.plan_update(world);
+            plan.sweep = false;
+            plan.far.clear();
+            let (meshes, unloaded) = self.finish_update(world, plan);
+            debug_assert!(unloaded.is_empty());
+            self.free(meshes);
+            if !world.chunks.contains_key(&key) {
+                self.wait(std::time::Duration::from_millis(5));
+            }
+        }
     }
 
     /// Release every `/forceload`ed chunk (`/forceload remove all`, a game-test
@@ -4462,6 +4483,7 @@ mod tests {
             cutout_leaves: true,
             opaque_ice: false,
             translucent_layers: Arc::from([]),
+            block_layers: Arc::default(),
             leaf_culling: LeafCullingMode::Off,
         };
         let mut meshed = FxHashSet::default();
