@@ -167,7 +167,7 @@ diff --git a/launcher/src/launcher_setup.rs b/launcher/src/launcher_setup.rs
 index 3f54d6c5f2..368a433691 100644
 --- a/launcher/src/launcher_setup.rs
 +++ b/launcher/src/launcher_setup.rs
-@@ -24,30 +24,6 @@ impl Launcher {
+@@ -24,33 +24,9 @@ impl Launcher {
              }
          })
          .detach();
@@ -196,6 +196,9 @@ index 3f54d6c5f2..368a433691 100644
 -        })
 -        .detach();
          let mut settings = Settings::load();
+         if migration_error.is_some() {
+             settings.instance_versions_migrated = false;
+         }
          i18n::set(settings.language());
          if settings.minecraft_dir.is_none() {
 diff --git a/launcher/src/main.rs b/launcher/src/main.rs
