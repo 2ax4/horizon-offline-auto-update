@@ -94,7 +94,9 @@ the frame stores gamma (`[frame] blend`, below).
 - **`[[lights]]` and `[[particle_lights]]` colours** are written in vanilla's gamma, and Horizon decodes
   them: `block_light_color` and `colored_light` are linear. `block_light_colors` holds them as written; read it through
   `block_light_color`.
-- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored.
+- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored, but for one with
+  an `output`: its target keeps the alpha, so a pack can keep data there (a target of the pack's own is
+  `rgba16float`; a kept texture keeps the channels its format has, none of them alpha in `r32float`).
 
 ## Room to grow
 
@@ -161,6 +163,19 @@ point, so a pack's copy may round a step apart on large faces. Mixing the linear
 scatters, a little denser in the middle tones. A post pass fogs what the stages don't draw from `scene_depth`
 (`vanilla_fog(view_position(uv, depth))`), and traced hits from `hit.position`, which Horizon never fogs.
 `[material] fog`, from before, is gone: the check refuses it and names `[frame] fog`.
+
+## `[frame] jitter`
+
+`jitter = false` (the default): while the pack's `[[post]]` chain draws the frame, the world's projection stands still
+(Anti-aliasing, below). With `jitter = true` Horizon moves it every frame by TAA's sub-pixel offset, a Halton (2, 3)
+sequence over 8 frames at the size the world draws at, and says it in `frame.jitter` and `frame.previous_jitter`, so
+that a temporal pass in `[[post]]` gathers what falls between pixels. `jitter = \"<option>\"` does that while the option
+is not 0 (a bool on, a number other than 0), so the offset stops with the pack's own pass. Horizon adds no resolve,
+history or upscaling of its own: a pack that turns it on without a pass that undoes it shows the world shaking by half
+a pixel. Rebuild points from `scene_depth` with `vec4<f32>(ndc.xy - frame.jitter, depth, 1.0)` (the post prelude's
+`view_position` leaves the offset in, half a pixel at most), and reproject with `frame.previous_jitter`. Motion vectors
+stay unjittered. Under a pack the renderer resolves (no `[[post]]`, gamma light) the key changes nothing: the player's
+TAA jitters the world already.
 
 ";
 
@@ -283,8 +298,9 @@ fn ray_tracing() -> String {
          In the material stage only `material` traces: `displacement` and the vertex stage's `vertex`, whose files share\n\
          its module, run in vertex shaders, and the check refuses a pack where either reaches a trace function.\n\
          A ray in `material` is paid for every terrain fragment drawn, overdraw included; a ray in a post pass once a\n\
-         pixel. But a post pass knows only the solid terrain's surface (`surface_at` isn't `present` behind water,\n\
-         glass or entities) and has no albedo, so direct light that must be right there is traced in `material`. With\n\
+         pixel. But a post pass knows only the solid terrain's surface (`surface_at` isn't `present` behind water or\n\
+         glass, nor on entities without `[entity] surface = true`) and has no albedo, so direct light that must be\n\
+         right there is traced in `material`. With\n\
          `[material] reads`, a pack can also trace in a compute or `[[before_world]]` pass and apply the result in\n\
          `material`.\n\n\
          In the entity stage `entity` traces as `material` does, in the world's colour pass only (the shadow map's\n\
@@ -422,6 +438,18 @@ dissolve masks, back-face culling and the rest of Horizon's cuts stay Horizon's.
 ignored, and `entity`, and every function it calls, may not `discard`: the check refuses it. A pack that cuts or
 fades entities itself sets `coverage = \"pack\"`: the returned alpha is then cut below 0.1 and blends, and the stage
 may `discard`. Horizon's own cuts run under either.
+
+## `[entity] surface`
+
+What the post stage's `surface_at` reads is solid terrain's alone unless the pack asks for entities too. Under
+`surface = true` the entity stage gets `set_surface` (the same helper as `material`'s), and every point of an entity
+the stage draws stores the normal, smoothness and data it last set there, or the normal its triangle faces and 0, 0
+where it set none; `surface_at` then reads that point as `present` where it is the frontmost thing, like terrain. A
+translucent entity stores its frontmost point; the quads Horizon draws itself (beacon beams, End portals) and the
+models mods prepare store none. In a frame where a mod draws prepared models, Horizon draws the other entities and
+the moving block entities with its own pipeline too (the entity stage doesn't run for them), so of all that only the
+block entities at rest that the block entity cache keeps store a surface. Without the key (the default) nothing
+changes: `set_surface` isn't in the entity prelude and entities read as not `present`.
 
 ";
 
@@ -573,6 +601,9 @@ pub fn markdown() -> String {
         }
         if kind == StageKind::Post {
             out += "- `fn depth_at(uv: vec2<f32>) -> f32`: the world's depth at `uv`.\n\
+                    - `fn horizon_view_direction(uv: vec2<f32>) -> vec3<f32>`: the outward unit ray through `uv`, in\n  \
+                    world axes, including view rotations but not their translations. It works at sky pixels and\n  \
+                    doesn't sample depth. No conflict with a pack's own `view_direction`.\n\
                     - `fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32>`: the camera-relative position, in blocks, of\n  \
                     the point at `uv` and `depth`. With view bob or nausea spin active, the ray through this point need not\n  \
                     pass through `(0, 0, 0)`. Get its direction from two positions at the same `uv` and different depths;\n  \
@@ -592,8 +623,9 @@ pub fn markdown() -> String {
 \n  \
                     An orthographic projection has no finite optical origin (`optical_h.w == 0.0`); do not divide by zero.\n\
                     - `fn surface_at(texel: vec2<i32>) -> SurfaceData`: the solid terrain's surface at a pixel, as the \
-                    material stage's `set_surface` left it: `present` (false where the sky, an entity, water, glass or a \
-                    particle shows instead), `normal` (world axes), `smoothness` and `data`.\n";
+                    material stage's `set_surface` left it, and under `[entity] surface = true` an entity's, as the entity \
+                    stage's left it: `present` (false where the sky, water, glass, a particle or an entity without the key \
+                    shows instead), `normal` (world axes), `smoothness` and `data`.\n";
         }
         if kind == StageKind::Material {
             out += "- `fn block_texture(uv: vec2<f32>) -> vec4<f32>`: the surface's block texture at `uv`, anywhere on \
@@ -616,6 +648,10 @@ pub fn markdown() -> String {
         if kind == StageKind::Entity {
             out += "- `fn block_light_color(position: vec3<f32>) -> vec4<f32>`: the colour of the block light at the \
                     camera-relative `position` (rgb) and how strongly it reaches it (a), as the material stage's.\n";
+            out += "- `fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32)`, under `[entity] surface = true` \
+                    only: what the post stage's `surface_at` reads for this point of an entity, as the material stage's \
+                    (`data` the pack's own; the normal the triangle faces and 0, 0 unset). Its translucent entities store \
+                    their frontmost point; the quads Horizon draws itself (beacon beams, End portals) store none.\n";
         }
         if kind != StageKind::Sky {
             out += "- `fn shadow_position(position: vec3<f32>) -> vec3<f32>`: where the camera-relative point `position` is\n  \
@@ -627,6 +663,16 @@ pub fn markdown() -> String {
                     world's size (1, 0.5 or 0.25), instead of the next pass's `previous`; the prelude of every pass declares\n\
                     `var <name>: texture_2d<f32>` (group 3 from binding 32), which holds last frame's until written again (a\n\
                     pass reads a blank one in place of the target it writes).\n\n";
+            out += "With `post_opaque = true` at the manifest root, raster and compute `[[post]]` passes may also read:\n\n";
+            out += &format!(
+                "- `opaque_depth` (binding {}), a `texture_depth_2d`: reversed depth before translucent terrain.\n\
+                 - `opaque_color` (binding {}), a `texture_2d<f32>`: the sky and opaque scene at the same point, in linear light.\n\n",
+                crate::stages::POST_OPAQUE_DEPTH_BINDING,
+                crate::stages::POST_OPAQUE_COLOR_BINDING,
+            );
+            out += "Both are at the world's render size. Use the pass's UV and the texture's dimensions when the pass runs\n\
+                    at a different size. The engine captures them only when a stage reads them. `scene_color` and\n\
+                    `scene_depth` still contain the scene after translucency.\n\n";
             out += &ray_tracing();
             out += &kept();
             out += &MOTION_NOTES.replace("{binding}", &MOTION_BINDING.to_string());
@@ -638,13 +684,14 @@ pub fn markdown() -> String {
     out += &table(&Frame::WGSL, Some(Frame::OFFSETS));
     out += "## Anti-aliasing\n\n\
             While a pack's `[[post]]` chain draws the frame, the player's anti-aliasing settings do not run: `taa`, `fxaa`\n\
-            and `upscaling` in `horizon-graphics.txt` have no effect, and the frame's projection is never jittered, because the\n\
-            last post pass draws the picture itself and Horizon's own resolve, which does TAA, FXAA and TAA upscaling, is the\n\
-            step it replaces. The world is still rendered at `resolutionScale` before the pack reads it.\n\n\
+            and `upscaling` in `horizon-graphics.txt` have no effect, and the frame's projection is not jittered unless the\n\
+            pack asks (`[frame] jitter`), because the last post pass draws the picture itself and Horizon's own resolve, which\n\
+            does TAA, FXAA and TAA upscaling, is the step it replaces. The world is still rendered at `resolutionScale` before the pack reads it.\n\n\
             A pack that wants smooth edges draws them itself, in a post pass: a spatial filter (FXAA, SMAA and the like) works on\n\
             `previous` as it is. A temporal pass cannot do what TAA does here, even though a kept resource and\n\
             `frame.previous_view_projection` give it the last frame: nothing moves the camera by a fraction of a texel from one\n\
-            frame to the next, so a still camera gives it the same picture twice and there is no sub-pixel detail to gather.\n\n\
+            frame to the next, so a still camera gives it the same picture twice and there is no sub-pixel detail to gather.\n\
+            `[frame] jitter` gives it that motion: TAA's offset, in `frame.jitter`.\n\n\
             A pack without `[[post]]` whose frame holds gamma light (not `blend = \"linear\"` on the float frame) gets the\n\
             player's FXAA or TAA: with `fxaa` or `taa` on, Horizon anti-aliases the world, FXAA at its size, in the frame's\n\
             encoding, before the pack's `[tonemap]` (or Horizon's curve) reads it. TAA jitters the world's projection by\n\

@@ -325,8 +325,26 @@ impl Game<'_> {
     /// spear's 4.5 blocks), with the item the keys select (attribute
     /// swapping a spear's reach onto a mace).
     pub(super) fn pick_tick_targets(&mut self) {
-        self.tick_hit.set(Some(self.pick()));
+        let hit = self.pick();
+        self.tick_hit.set(Some(hit));
         self.tick_mob = None;
+        // GameRenderer.pick: the entity ray runs to the block hit (out to the larger range), and
+        // filterHitResult turns an entity past the entity range into a miss. An entity between
+        // the crosshair and a block in reach but out of reach itself hides that block: the
+        // click neither uses nor mines it.
+        if hit.is_some() && self.block_reach > self.entity_reach {
+            let reach = self.entity_reach;
+            self.entity_reach = self.block_reach;
+            let far = [true, false]
+                .into_iter()
+                .filter_map(|attacking| self.crosshair_entity(attacking))
+                .map(|p| p.distance)
+                .reduce(f64::min);
+            self.entity_reach = reach;
+            if far.is_some_and(|d| d > reach) {
+                self.tick_hit.set(Some(None));
+            }
+        }
         let mob = match self.active_attack_range() {
             Some(range) => self.attack_range_pick(&range),
             None => None,
@@ -610,24 +628,15 @@ impl Game<'_> {
         if let Some(entity) = self.targeting().entity {
             return self.targeting_entity_hit(entity).is_some();
         }
+        // An entity out of entity reach but in front of the block hides it too
+        // (`GameRenderer.pick`'s ray runs to the block hit at the larger range).
+        let far = self.block_reach.max(self.entity_reach);
         let before = |d: Option<f64>| d.is_some_and(|d| self.before_block(d));
-        before(self.painting_hit().map(|h| h.1))
-            || before(self.frame_hit().map(|h| h.1))
-            || before(self.armor_stand_hit().map(|h| h.1))
-            || before(self.cushion_hit().map(|h| h.1))
-            || before(self.boat_hit().map(|h| h.1))
-            || before(self.cart_hit().map(|h| h.1))
-            || before(self.interaction_hit().map(|h| h.1))
+        self.crosshair_entity(true).is_some()
+            // The local world's dragon (`dragon_hit`) is not among the server's entities.
             || before(self.dragon_hit().map(|h| h.1))
-            || before(
-                self.primed_tnt_hit(self.block_reach.max(self.entity_reach))
-                    .map(|(_, d)| d),
-            )
-            || before(
-                self.mob_hit_within(self.block_reach.max(self.entity_reach))
-                    .map(|h| h.1),
-            )
-            || before(self.redirectable_hit().map(|h| h.1))
+            || before(self.primed_tnt_hit(far).map(|(_, d)| d))
+            || before(self.mob_hit_within(far).map(|h| h.1))
     }
     /// `LocalPlayer.isHandsBusy`: paddling a boat this player controls
     /// (`getControlledVehicle`: its first passenger, on a server's client).
@@ -737,19 +746,27 @@ impl Game<'_> {
         if visible.0 == held.0 && visible.1.as_ref() == Some(stack) {
             return;
         }
-        if !mod_api::__private::item_listens(
+        let hand = if h == 0 { Hand::Main } else { Hand::Off };
+        let slot = if h == 0 { "mainhand" } else { "offhand" };
+        let slot_changed = h == 0 && visible.0 != held.0;
+        let mut reequip = !*same;
+        if mod_api::__private::item_listens(
             mod_api::HookId::ShouldCauseReequipAnimation,
             &stack.item,
         ) {
-            return;
+            self.native_should_cause_reequip_animation(
+                stack,
+                visible.1.as_ref(),
+                hand,
+                slot_changed,
+                &mut reequip,
+            );
         }
-        let hand = if h == 0 { Hand::Main } else { Hand::Off };
-        let slot_changed = h == 0 && visible.0 != held.0;
-        let mut reequip = !*same;
-        self.native_should_cause_reequip_animation(
+        self.native_should_cause_reequip_animation_in_slot(
             stack,
             visible.1.as_ref(),
             hand,
+            slot,
             slot_changed,
             &mut reequip,
         );

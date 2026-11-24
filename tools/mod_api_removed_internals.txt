@@ -36,3 +36,25 @@ horizon_client::game::points::unconverted  #19576
 horizon_client_render::ui::NINE_SLICE  #13220
 horizon_client_render::ui::draw_sprite  #13220
 horizon_client_render::ui::nine_slice_metadata  #13220
+horizon_client::game::interactions::Game<'_>::interaction_hit  #15412
+horizon_client_render::font::TrueType::ids  kind=field  #20187
+horizon_client::game::Game<'_>::hud  #20196
+horizon_client::game::Game<'_>::hud_layers  #20196
+horizon_client::game::reused_hud_vertices  #20196
+horizon_client::game::store_hud_vertices  #20196
+horizon_client::game::functions::FnState::next_seq  kind=field  #20401
+horizon_client::game::functions::Scheduled  kind=struct  #20401
+horizon_client::game::functions::Scheduled::id  kind=field  #20401
+horizon_client::game::functions::Scheduled::seq  kind=field  #20401
+horizon_client::game::functions::Scheduled::time  kind=field  #20401
+horizon_client::game::banners::Game<'_>::banner_layers_at  #20193
+horizon_client::game::banners::layer_textures  #20193
+horizon_client::game::item_draw::Game<'_>::item_level  kind=method  #20192
+horizon_client::game::native_shaders::manifest_refused  #20601
+horizon_client::game::shader_packs::block_id_table  #20601
+horizon_client_render::gfx::Renderer::pack_atlas  #20466
+horizon_client_render::gfx::Renderer::pack_material_atlases  #20466
+horizon_client::game::creatures::mob_group::Group<M>::deferred  kind=field  #18420
+horizon_client::game::creatures::mob_islands::Foreign<'_>::defers  kind=field  #18420
+horizon_client::game::creatures::mob_islands::defers  kind=fn  #18420
+horizon_client::game::spear::Game<'_>::remote_sync_look  #16850

@@ -218,7 +218,7 @@ const POST_RESOURCES: [Resource; 11] = [
         binding: 11,
         name: "scene_surface",
         ty: "var scene_surface: texture_2d<u32>",
-        doc: "What the material stage's `set_surface` stored for the solid terrain at each pixel, unfiltered (`textureLoad`; its texels are the bits of floats, so `bitcast<vec4<f32>>` them): read it through the prelude's `surface_at`, which knows its layout and where it no longer shows. Blank without a material stage that calls `set_surface`.",
+        doc: "What the material stage's `set_surface` stored for the solid terrain at each pixel (and under `[entity] surface = true` the entity stage's for entities), unfiltered (`textureLoad`; its texels are the bits of floats, so `bitcast<vec4<f32>>` them): read it through the prelude's `surface_at`, which knows its layout and where it no longer shows. Blank without a material stage that calls `set_surface` or `[entity] surface = true`.",
     },
 ];
 
@@ -306,6 +306,19 @@ fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 }
 ";
 
+const POST_VIEW_DIRECTION: &str = "\
+// The normalized world-space ray through this screen UV, unaffected by view translations.
+fn horizon_view_direction(uv: vec2<f32>) -> vec3<f32> {
+    let projection_inverse = frame.projection_inverse;
+    let far = projection_inverse * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    // At reversed depth 1, near = far + depth_axis. Form far.xyz * near.w -
+    // near.xyz * far.w: translation cancels, including when far.w is zero.
+    let depth_axis = projection_inverse[2];
+    let direction = far.xyz * depth_axis.w - depth_axis.xyz * far.w;
+    return normalize((frame.view_inverse * vec4<f32>(direction, 0.0)).xyz);
+}
+";
+
 /// `block_light_color` of the material and entity preludes: the argument is the sampler the
 /// stage has for it. The `[[lights]]` colours are decoded.
 macro_rules! block_light_color {
@@ -331,6 +344,36 @@ fn block_light_color(position: vec3<f32>) -> vec4<f32> {
     };
 }
 
+/// `set_surface` and the value it leaves, for the material prelude and, under `[entity] surface`,
+/// the entity prelude: the post stage's `surface_at` decodes it (`POST_SURFACE`).
+macro_rules! set_surface {
+    () => {
+        "\
+var<private> horizon_surface: vec4<f32>;
+fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32) {
+    // Octahedral, y up: the upper half folds onto xz, the lower half unfolds around it.
+    let n = normal / (abs(normal.x) + abs(normal.y) + abs(normal.z));
+    var e = n.xz;
+    if n.y < 0.0 {
+        e = (1.0 - abs(n.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xz >= vec2<f32>(0.0));
+    }
+    horizon_surface = vec4<f32>(bitcast<f32>(pack2x16snorm(e)), smoothness, data, 1.0);
+}
+"
+    };
+}
+
+/// The entity prelude's `set_surface`, under `[entity] surface = true`.
+const ENTITY_SURFACE: &str = concat!(
+    "\
+// What the post stage's `surface_at` reads for this point of an entity: its `normal` (a unit
+// vector in world axes), `smoothness` (0..1, say for reflections) and `data`, a value of the
+// pack's own passed through. Unset, the point keeps the normal its triangle faces and 0 for
+// both; translucent entities store their frontmost point.
+",
+    set_surface!()
+);
+
 /// The entity prelude's helpers: the coloured-light grid, and the normal its entries give.
 const ENTITY_HELPERS: &str = concat!(
     block_light_color!("block_light_sampler"),
@@ -355,16 +398,9 @@ const MATERIAL_HELPERS: &str = concat!(
 // unit vector in world axes), `smoothness` (0..1, say for reflections) and `data`, a value of
 // the pack's own passed through. Unset, the point keeps the face's own normal and 0 for both;
 // translucent terrain stores none.
-var<private> horizon_surface: vec4<f32>;
-fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32) {
-    // Octahedral, y up: the upper half folds onto xz, the lower half unfolds around it.
-    let n = normal / (abs(normal.x) + abs(normal.y) + abs(normal.z));
-    var e = n.xz;
-    if n.y < 0.0 {
-        e = (1.0 - abs(n.zx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xz >= vec2<f32>(0.0));
-    }
-    horizon_surface = vec4<f32>(bitcast<f32>(pack2x16snorm(e)), smoothness, data, 1.0);
-}
+",
+    set_surface!(),
+    "\
 // The point being shaded: its sprite's layer and mip level (the entries set them).
 var<private> horizon_block_layer: u32;
 var<private> horizon_block_lod: f32;
@@ -470,8 +506,10 @@ fn surface_at(texel: vec2<i32>) -> SurfaceData {
     let s = bitcast<vec4<f32>>(textureLoad(scene_surface, t, 0));
     let depth_size = vec2<i32>(textureDimensions(scene_depth));
     let depth = textureLoad(scene_depth, clamp(texel, vec2<i32>(0), depth_size - 1), 0);
-    // The terrain's own depth is stored with it: anything drawn nearer since hides it.
-    let present = s.w > 0.0 && abs(s.w - depth) <= s.w * 1e-5;
+    // The terrain's own depth is stored with it: anything drawn nearer since hides it. The
+    // tolerance holds the entity pipeline's depth bias (128 steps of a 24-bit mantissa, up to
+    // 2^-16 of the depth), which the depth buffer keeps and the stored depth may not.
+    let present = s.w > 0.0 && abs(s.w - depth) <= s.w * 2e-5;
     let e = unpack2x16snorm(bitcast<u32>(s.x));
     var n = vec3<f32>(e.x, 1.0 - abs(e.x) - abs(e.y), e.y);
     if n.y < 0.0 {
@@ -1529,7 +1567,7 @@ struct HorizonPostOut {
 
 /// The post stage's entry points, as the renderer builds them: a full-screen triangle, and a
 /// fragment that calls the pack's `post` for each pixel. The chain's targets hold linear light,
-/// so nothing converts, and the pass's alpha is ignored.
+/// so nothing converts, and the alpha of a pass that draws the next `previous` is ignored.
 const POST_ENTRIES: &str = concat!(
     post_vertex!(),
     "\
@@ -1540,9 +1578,9 @@ const POST_ENTRIES: &str = concat!(
 "
 );
 
-/// A post pass whose `output` is a kept texture: the texture holds data, so the pass's alpha
-/// stays.
-const POST_ENTRIES_KEPT: &str = concat!(
+/// A post pass with an `output`, a target of the pack's own or a kept texture: the texture holds
+/// data the pack reads back, so the pass's alpha stays.
+const POST_ENTRIES_OUTPUT: &str = concat!(
     post_vertex!(),
     "\
 @fragment fn horizon_fs_post(in: HorizonPostOut) -> @location(0) vec4<f32> {
@@ -1927,6 +1965,10 @@ pub fn post_target_declarations(manifest: &crate::manifest::Manifest) -> String 
 
 /// The motion guide's binding in group 3, in the 0.2 post passes of a pack with `[motion]`.
 pub const MOTION_BINDING: u32 = 14;
+
+/// The opaque scene's reversed depth and linear color, available to opted-in post passes.
+pub const POST_OPAQUE_DEPTH_BINDING: u32 = 8;
+pub const POST_OPAQUE_COLOR_BINDING: u32 = 15;
 
 /// The motion guide's declarations, at `MOTION_BINDING`. The raw texture holds the engine's
 /// objects (`frame_gen/motion.wgsl`): z 1 a matched one with xy its delta, w 1 one with nothing
@@ -2459,9 +2501,26 @@ pub(crate) fn compose_traced(
     ) + &texture_declarations(&pack.manifest.textures);
     if matches!(kind, StageKind::Post | StageKind::Compute) {
         prelude += &post_target_declarations(&pack.manifest);
+        if m.post_opaque {
+            prelude += &format!(
+                "@group({GROUP}) @binding({POST_OPAQUE_DEPTH_BINDING}) var opaque_depth: texture_depth_2d;\n\
+                 @group({GROUP}) @binding({POST_OPAQUE_COLOR_BINDING}) var opaque_color: texture_2d<f32>;\n"
+            );
+        }
+        // `horizon_` is reserved. Unchanged stages that don't use the helper keep the old WGSL.
+        if files
+            .iter()
+            .map(source)
+            .any(|text| text.contains("horizon_view_direction"))
+        {
+            prelude += POST_VIEW_DIRECTION;
+        }
     }
     if kind == StageKind::Post && pack.manifest.motion.is_some() {
         prelude += MOTION;
+    }
+    if kind == StageKind::Entity && pack.manifest.entity_surface {
+        prelude += ENTITY_SURFACE;
     }
     if let Some(stage) = stage {
         prelude += &kept_declarations(m, stage);
@@ -2482,11 +2541,8 @@ pub(crate) fn compose_traced(
         );
     } else if let (StageKind::Compute | StageKind::BeforeWorld, Some(stage)) = (kind, stage) {
         push("<entries>", &compute_entries(stage));
-    } else if kind == StageKind::Post
-        && let Some(output) = stage.and_then(|s| s.output.as_ref())
-        && m.kept.resources.iter().any(|r| r.name == *output)
-    {
-        push("<entries>", POST_ENTRIES_KEPT);
+    } else if kind == StageKind::Post && stage.is_some_and(|s| s.output.is_some()) {
+        push("<entries>", POST_ENTRIES_OUTPUT);
     } else {
         push("<entries>", &entries(kind.entries()));
     }

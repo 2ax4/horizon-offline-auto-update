@@ -118,7 +118,10 @@ horizon-server init --eula --world survival --seed 12345 --port 25565 --whitelis
 
 `--no-whitelist` turns the whitelist off, and `--offline` turns online mode off (see "Before you start").
 The players you add are looked up as Minecraft accounts in online mode, and get offline UUIDs on an offline
-server, as vanilla does.
+server, as vanilla does. A lookup Mojang's services don't answer (they rate-limit busy addresses, often a host's,
+with HTTP 429) is tried three times, 750 ms apart, as vanilla's bulk lookup does; if it still fails, `init` says
+so ("Couldn't look up Alex: Mojang's services are rate-limiting this address...") rather than that the player
+doesn't exist. The same goes for `op`, `whitelist add` and `ban` while the server is stopped.
 
 Start the server in the foreground, with the console on your terminal (Ctrl-C stops it cleanly):
 
@@ -528,7 +531,8 @@ so, with an Update button that runs `horizon-server update` (section 5), and sho
 horizon-server panel
 ```
 
-prints a login link that works once, for 10 minutes. The panel listens on `127.0.0.1:8130`, this computer
+prints a login link that works once, for 10 minutes. A sign-in lasts for its browser tab, until it goes 12
+hours unused or for 7 days at most; then make a new link. The panel listens on `127.0.0.1:8130`, this computer
 only. To reach it from your other devices:
 
 - put your tailnet address in `[panel] bind` (for example `bind = "100.101.102.103:8130"`), or

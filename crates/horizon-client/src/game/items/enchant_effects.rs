@@ -1039,10 +1039,14 @@ impl Game<'_> {
             if repaired == 0 {
                 return amount;
             }
-            stack.damage -= repaired;
+            // The XP vanilla spends on this repair. A listener can change how
+            // much durability is restored and how much of the orb is consumed;
+            // with no listener both values arrive unchanged, so the result is
+            // vanilla's. The event runs before the write so its answer is used.
+            let spent = amount.saturating_sub(remaining);
             let item = stack.item.to_string();
-            *self.player_slot_mut(slot) = Some(stack);
-
+            let mut repair = repaired;
+            let mut experience = amount;
             if let Some(player) = player
                 && let Some(name) = self
                     .native_server_players()
@@ -1050,12 +1054,20 @@ impl Game<'_> {
                     .find(|p| p.uuid() == player)
                     .and_then(|p| self.player_name(p))
             {
-                self.native_player_item_mend(player, &name, &item, repaired, amount);
+                self.native_player_item_mend(player, &name, &item, &mut repair, &mut experience);
             }
-            if remaining == 0 {
+            stack.damage = stack.damage.saturating_sub(repair);
+            *self.player_slot_mut(slot) = Some(stack);
+            let left = experience.saturating_sub(spent);
+            // A listener can refuse the repair without spending XP. Nothing
+            // changed, so trying the same stack again would loop forever.
+            if repair == 0 && left >= amount {
+                return left;
+            }
+            if left == 0 {
                 return 0;
             }
-            amount = remaining;
+            amount = left;
         }
     }
     /// The repair Mending gives `stack` for `experience` points: `vanilla`
@@ -1272,6 +1284,16 @@ impl Game<'_> {
     /// for an armor stand: run location effects before travel (including a
     /// piston push), on landing, and for newly equipped items.
     pub(super) fn armor_stand_location_effects(&mut self, index: usize, landed: bool) {
+        // Nothing to tell: read without a `&mut`, which the list would count as a touch.
+        {
+            let stand = &self.armor_stands[index];
+            if !landed
+                && stand.enchantment_block == Some(BlockPos::containing(stand.position))
+                && (0..8).all(|i| stand.equipment[i] == stand.enchantment_equipment[i])
+            {
+                return;
+            }
+        }
         let stand = &mut self.armor_stands[index];
         let block = BlockPos::containing(stand.position);
         let moved = !landed && stand.enchantment_block.replace(block) != Some(block);

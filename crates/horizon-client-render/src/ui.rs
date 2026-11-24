@@ -638,13 +638,7 @@ pub fn action_button(
     active: bool,
     hover: bool,
 ) {
-    crate::widgets::declare_action(action, [x, y, w, h], active);
-    let room = if active {
-        crate::widgets::action_glyph_room()
-    } else {
-        0.0
-    };
-    button_with_room(
+    focused_button(
         batch,
         atlas,
         [x, y, w, h],
@@ -652,8 +646,8 @@ pub fn action_button(
         active,
         hover,
         false,
-        room,
-        |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
+        Some(action),
+        None,
     );
 }
 /// A [`button`] that vanilla narrates as another widget (a `CycleButton`, a
@@ -681,13 +675,14 @@ pub fn button_as(
         hover,
         false,
         0.0,
+        None,
         narration,
     );
 }
-/// An options button whose focus highlights it without changing the mouse cursor.
+/// A button with optional keyboard focus, controller action and agent-facing id.
 /// `AbstractWidget.handleCursor` tests hover, not `isHoveredOrFocused`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn focused_button(
+pub fn focused_button(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
     rect: [f32; 4],
@@ -696,6 +691,7 @@ pub(crate) fn focused_button(
     hover: bool,
     focused: bool,
     action: Option<crate::widgets::Action>,
+    id: Option<&'static str>,
 ) {
     let room = if let Some(action) = action {
         crate::widgets::declare_action(action, rect, active);
@@ -716,6 +712,7 @@ pub(crate) fn focused_button(
         hover,
         focused,
         room,
+        id,
         |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
     );
 }
@@ -730,10 +727,17 @@ fn button_with_room(
     hover: bool,
     focused: bool,
     room: f32,
+    id: Option<&'static str>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
     let plain = label.plain();
-    crate::widgets::record(&plain, [x, y, w, h], active);
+    crate::widgets::record_with_id(
+        id,
+        &plain,
+        [x, y, w, h],
+        active,
+        crate::widgets::Kind::Button,
+    );
     // An icon button has no label to record, and A presses it all the same.
     if active && plain.trim().is_empty() {
         crate::widgets::target([x, y, w, h]);
@@ -782,7 +786,7 @@ pub fn slider(
     dragging: bool,
 ) {
     slider_ext(
-        batch, atlas, x, y, w, label, value, hover, false, false, active, dragging,
+        batch, atlas, x, y, w, label, value, hover, false, false, active, dragging, None,
     );
 }
 
@@ -801,13 +805,14 @@ pub fn slider_ext(
     can_change_value: bool,
     active: bool,
     dragging: bool,
+    id: Option<&'static str>,
 ) {
     let kind = crate::widgets::Kind::Slider {
         value,
         track: [x + 4.0, w - 8.0],
     };
     // The control socket's widget tree (`ui`): its label and value.
-    crate::widgets::record_as(&label.plain(), [x, y, w, 20.0], active, kind);
+    crate::widgets::record_with_id(id, &label.plain(), [x, y, w, 20.0], active, kind);
     crate::widgets::narratable(|| {
         crate::widgets::Narratable::slider(label.plain(), [x, y, w, 20.0], active).hovered(hover)
     });
@@ -899,7 +904,16 @@ pub fn menu_background(
         "gui/menu_background"
     };
     if atlas.sprites.contains_key(sprite) {
-        tiled(batch, atlas, sprite, x, y, w, h, 32.0, u32::MAX);
+        // Screen.extractMenuBackgroundTexture: u and v 0.
+        batch.pack_blit(
+            atlas,
+            sprite,
+            [x, y, w, h],
+            [0.0, 0.0, w, h],
+            [32.0, 32.0],
+            u32::MAX,
+            |batch| tiled(batch, atlas, sprite, x, y, w, h, 32.0, u32::MAX),
+        );
     } else {
         batch.fill(atlas, x, y, w, h, rgba(0, 0, 0, 160));
     }
@@ -921,28 +935,18 @@ pub fn separators(
         ("gui/header_separator", "gui/footer_separator")
     };
     let w = batch.width;
-    tiled_sized(
-        batch,
-        atlas,
-        header,
-        0.0,
-        header_bottom - 2.0,
-        w,
-        2.0,
-        [32.0, 2.0],
-        u32::MAX,
-    );
-    tiled_sized(
-        batch,
-        atlas,
-        footer,
-        0.0,
-        footer_top,
-        w,
-        2.0,
-        [32.0, 2.0],
-        u32::MAX,
-    );
+    // AbstractSelectionList.extractListSeparators: u and v 0, a 32 x 2 texture.
+    for (sprite, y) in [(header, header_bottom - 2.0), (footer, footer_top)] {
+        batch.pack_blit(
+            atlas,
+            sprite,
+            [0.0, y, w, 2.0],
+            [0.0, 0.0, w, 2.0],
+            [32.0, 2.0],
+            u32::MAX,
+            |batch| tiled_sized(batch, atlas, sprite, 0.0, y, w, 2.0, [32.0, 2.0], u32::MAX),
+        );
+    }
 }
 /// List background between the separators.
 pub fn list_background(
@@ -957,16 +961,17 @@ pub fn list_background(
     } else {
         "gui/menu_list_background"
     };
-    tiled(
-        batch,
+    let (w, h) = (batch.width, bottom - top);
+    // AbstractSelectionList.extractListBackground: u the list's right edge, v its bottom plus the
+    // scroll amount, which these lists don't pass (their native tiles start at 0 too).
+    batch.pack_blit(
         atlas,
         sprite,
-        0.0,
-        top,
-        batch.width,
-        bottom - top,
-        32.0,
+        [0.0, top, w, h],
+        [w, bottom, w, h],
+        [32.0, 32.0],
         u32::MAX,
+        |batch| tiled(batch, atlas, sprite, 0.0, top, w, h, 32.0, u32::MAX),
     );
 }
 /// `AbstractScrollArea.scrollerHeight`: `Mth.clamp((height * height) / content, 32, height - 8)`.
@@ -3081,5 +3086,78 @@ mod tests {
         assert!(scroll.press((0.0, 10.0), 0.0, 10.0, 30.0, 40.0));
         scroll.drag(20.0, 10.0, 30.0, 40.0);
         assert_eq!(scroll.amount, 20.0);
+    }
+
+    /// With a pack's `position_tex_color`, the menu background is vanilla's one blit over the
+    /// whole area (`blit(GUI_TEXTURED, ..., 0, 0, w, h, 32, 32)`) after its native tiles.
+    #[test]
+    fn a_packs_position_tex_color_gets_the_menu_background_as_one_quad() {
+        let root = tempfile::tempdir().unwrap();
+        let gui = root.path().join("assets/minecraft/textures/gui");
+        std::fs::create_dir_all(&gui).unwrap();
+        let mut png = png::Encoder::new(
+            std::fs::File::create(gui.join("menu_background.png")).unwrap(),
+            1,
+            1,
+        );
+        png.set_color(png::ColorType::Rgba);
+        png.set_depth(png::BitDepth::Eight);
+        png.write_header()
+            .unwrap()
+            .write_image_data(&[1, 2, 3, 255])
+            .unwrap();
+        let mut atlas = HudAtlas::build(
+            &horizon_assets::resource_source::ResourceSource::directory(root.path().to_owned()),
+        )
+        .unwrap();
+        let draw = |atlas: &HudAtlas| {
+            let mut batch = HudBatch::scratch([160, 80]);
+            menu_background(&mut batch, atlas, 0.0, 0.0, 80.0, 40.0, false);
+            batch
+        };
+        let native = draw(&atlas);
+        assert!(native.blends.is_empty());
+        let mut tiles = HudBatch::scratch([160, 80]);
+        tiled(
+            &mut tiles,
+            &atlas,
+            "gui/menu_background",
+            0.0,
+            0.0,
+            80.0,
+            40.0,
+            32.0,
+            u32::MAX,
+        );
+        let corners =
+            |b: &HudBatch| -> Vec<_> { b.vertices.iter().map(|v| (v.pos, v.uv)).collect() };
+        assert_eq!(
+            corners(&native),
+            corners(&tiles),
+            "without the shader nothing changes"
+        );
+        let program = crate::core_shader::CoreProgram {
+            vertex: naga::Module::default(),
+            fragment: naga::Module::default(),
+            other: Vec::new(),
+        };
+        atlas.blit_shader = Some(std::sync::Arc::new(program));
+        let pack = draw(&atlas);
+        let tiles = native.vertices.len() as u32;
+        use crate::hud::Blend;
+        let Some((_, Blend::PackBlit(id))) = pack.blends.last().cloned() else {
+            panic!("{:?}", pack.blends);
+        };
+        assert_eq!(
+            pack.blends,
+            [
+                (0..tiles, Blend::PackBlitNative(id)),
+                (tiles..tiles + 6, Blend::PackBlit(id))
+            ]
+        );
+        let quad = &pack.vertices[tiles as usize..];
+        let corners: Vec<_> = quad.iter().map(|v| (v.pos, v.uv)).collect();
+        assert!(corners.contains(&([0.0, 0.0], [0.0, 0.0])));
+        assert!(corners.contains(&([80.0, 40.0], [2.5, 1.25])));
     }
 }

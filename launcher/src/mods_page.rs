@@ -17,7 +17,7 @@ use horizon_launcher::native_status;
 use horizon_port_pack::check::Check;
 use java_instance::Target;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The kinds, as the Mods page's tabs: name and icon.
 const KINDS: [(PackKind, &str, &str); 5] = [
@@ -30,6 +30,7 @@ const KINDS: [(PackKind, &str, &str); 5] = [
 /// Java mods checked at once.
 const CHECKING: usize = 2;
 const PAGE: usize = 20;
+const DEFAULT_SCAN_PAGES: usize = 3;
 const SOURCES: [(SourceId, &str); 2] = [
     (SourceId::Horizon, "Horizon"),
     (SourceId::Modrinth, "Modrinth"),
@@ -40,7 +41,7 @@ mod glass_mods;
 
 pub(super) enum Event {
     /// A search's answer, for the search it was (stale answers are dropped) at that offset.
-    Found(u64, usize, Result<Vec<Project>, String>),
+    Found(u64, usize, Result<browser::SearchPage, String>),
     Progress(String, f32),
     Done(Result<String, String>, bool),
     ConfirmPack {
@@ -97,6 +98,35 @@ fn confirm_pack(tx: &Sender<Event>, title: String, reason: &str, action: &'stati
         && answer.recv().unwrap_or(false)
 }
 
+/// The save folder distinguishes worlds with the same in-game name.
+fn world_picker_folder(path: &Path) -> String {
+    let folder = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    trf("Folder: {folder}", &[("folder", &folder)])
+}
+
+fn world_picker_text(name: &str, folder: &str, t: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .child(
+            text(theme::LABEL)
+                .text_color(t.ink)
+                .truncate()
+                .child(name.to_owned()),
+        )
+        .child(
+            text(theme::CAPTION)
+                .text_color(t.muted)
+                .truncate()
+                .child(folder.to_owned()),
+        )
+}
+
 /// Where a Java mod's check is.
 pub(super) enum Checking {
     Running,
@@ -128,13 +158,15 @@ pub(super) struct Mods {
     pub(super) everything: bool,
     /// Which search is the current one; answers for older ones are dropped.
     search: u64,
+    /// The submitted page, including filters and offset, for More and Try again.
+    submitted: Option<Query>,
     searching: bool,
     searched: bool,
     results: Vec<Project>,
     results_list: cull::Cull,
     installed_list: cull::Cull,
     pub(super) report_list: cull::Cull,
-    more: bool,
+    next_offset: Option<usize>,
     error: Option<String>,
     /// The failed search's own words are shown under its plain message.
     pub(super) error_details: bool,
@@ -156,6 +188,7 @@ pub(super) struct Mods {
     /// Its worlds (folder, name), the last played first, and the one data packs go into.
     worlds: Vec<(PathBuf, String)>,
     world: Option<PathBuf>,
+    world_picker_open: bool,
     /// The project being installed, and the line and fraction of its download.
     pub(super) busy: Option<(String, String, f32)>,
     pub(super) message: Option<Result<String, String>>,
@@ -170,8 +203,7 @@ pub(super) struct Mods {
     /// The selected instance's native build state, the mods it would build again
     /// (`native_status::unbuilt`), and the `native_status::fingerprint` they were read for: read
     /// again only when that changes.
-    pub(super) native_state:
-        std::cell::RefCell<Option<(String, native_status::State, Vec<String>)>>,
+    pub(super) native_state: std::cell::RefCell<Option<crate::build_mode::NativeStateMemo>>,
     /// Native routes read by a worker for this instance's files, consent and game version.
     pub(super) native_routes: std::cell::RefCell<Option<crate::build_mode::RouteMemo>>,
     /// What updating the native mods to a newer installed game would do, read in the background.
@@ -233,6 +265,11 @@ impl Mods {
         }
     }
 
+    fn selected_world(&self) -> Option<&(PathBuf, String)> {
+        let selected = self.world.as_ref()?;
+        self.worlds.iter().find(|(path, _)| path == selected)
+    }
+
     /// Whether the Modpacks tab is open (the sidebar marks the pack shown there).
     pub(super) fn on_modpacks(&self) -> bool {
         self.kind == PackKind::Modpack
@@ -256,13 +293,14 @@ impl Mods {
             focused: false,
             everything: false,
             search: 0,
+            submitted: None,
             searching: false,
             searched: false,
             results: Vec::new(),
             results_list: cull::Cull::default(),
             installed_list: cull::Cull::default(),
             report_list: cull::Cull::default(),
-            more: false,
+            next_offset: None,
             error: None,
             error_details: false,
             installed: Vec::new(),
@@ -275,6 +313,7 @@ impl Mods {
             java: None,
             worlds: Vec::new(),
             world: None,
+            world_picker_open: false,
             busy: None,
             message: None,
             native_state: Default::default(),
@@ -336,18 +375,65 @@ impl Mods {
         }
     }
 
+    fn new_query(&self) -> Query {
+        let everything = self.everything && self.source() != SourceId::Horizon;
+        match self.java_for(self.kind) {
+            Some(target) => Query {
+                offset: 0,
+                limit: PAGE,
+                ..target.search(self.text.text(), self.kind, &self.browse.filters)
+            },
+            None => Query {
+                everything,
+                offset: 0,
+                limit: PAGE,
+                filters: self.browse.filters.clone(),
+                ..Query::new(self.text.text(), self.kind)
+            },
+        }
+    }
+
+    fn begin_page(&mut self, offset: usize) -> Option<Query> {
+        let query = self.submitted.as_mut()?;
+        query.offset = offset;
+        self.asked = true;
+        self.search += 1;
+        self.searching = true;
+        self.error = None;
+        Some(query.clone())
+    }
+
+    /// Only the filtered default pack browser may advance on its own.
+    fn filtered_pack_defaults(&self) -> bool {
+        self.can_show_everything()
+            && self
+                .submitted
+                .as_ref()
+                .is_some_and(|query| query.text.is_empty() && !query.everything)
+    }
+
+    fn next_default_page(&self) -> Option<usize> {
+        let offset = self.next_offset?;
+        (offset < PAGE * DEFAULT_SCAN_PAGES
+            && self.filtered_pack_defaults()
+            && self.shown().is_empty())
+        .then_some(offset)
+    }
+
     fn reset_browse_context(&mut self) {
         self.asked = false;
         self.everything = false;
         self.browse.filters = Default::default();
         self.browse.open = None;
+        self.world_picker_open = false;
         self.picked = None;
         self.shown = None;
         self.search += 1;
+        self.submitted = None;
         self.searching = false;
         self.searched = false;
         self.error = None;
-        self.more = false;
+        self.next_offset = None;
         self.results.clear();
         self.results_list.reset();
     }
@@ -398,6 +484,7 @@ impl Mods {
         }
         self.shown.clone().filter(|p| {
             self.searched
+                && !self.filtered_pack_defaults()
                 && !self.searching
                 && self.error.is_none()
                 && p.kind == self.kind
@@ -572,6 +659,7 @@ impl Launcher {
         cx: &mut Context<Self>,
     ) -> bool {
         let mut changed = false;
+        let mut next_page = None;
         let mut to_check = Vec::new();
         let mut loaded = Vec::new();
         let mut done = false;
@@ -588,20 +676,22 @@ impl Launcher {
                     m.searching = false;
                     m.searched = true;
                     match result {
-                        Ok(found) => {
-                            m.more = found.len() == PAGE;
-                            m.results.truncate(offset);
+                        Ok(page) => {
+                            let found = page.projects;
+                            m.next_offset = page.next_offset;
                             if offset == 0 {
+                                m.results.clear();
                                 m.results_list.reset();
                             }
                             m.results.extend(found.iter().cloned());
                             m.error = None;
+                            next_page = m.next_default_page();
                             to_check.extend(found);
                         }
                         Err(e) => {
                             if offset == 0 {
                                 m.results.clear();
-                                m.more = false;
+                                m.next_offset = None;
                                 m.results_list.reset();
                             }
                             m.error = Some(e);
@@ -715,6 +805,9 @@ impl Launcher {
                 }
             }
         }
+        if let Some(offset) = next_page {
+            self.fetch_mods_page(offset);
+        }
         self.mods_check(to_check);
         if done {
             // A data pack put into a world shows in its list on Home.
@@ -733,43 +826,40 @@ impl Launcher {
     /// Searches; with `keep`, the rows already listed stay on screen until the new ones arrive,
     /// so the page doesn't shrink (and the scroll doesn't jump to the top) while it waits.
     pub(super) fn mods_search_keeping(&mut self, offset: usize, keep: bool) {
+        if offset == 0 {
+            let query = self.mods.new_query();
+            if !keep {
+                self.mods.results.clear();
+                self.mods.next_offset = None;
+                self.mods.results_list.reset();
+            }
+            self.mods.installed_list.reset();
+            self.mods.submitted = Some(query);
+        }
+        self.fetch_mods_page(offset);
+    }
+
+    fn retry_mods_page(&mut self) {
+        if let Some(query) = &self.mods.submitted {
+            self.fetch_mods_page(query.offset);
+        }
+    }
+
+    fn fetch_mods_page(&mut self, offset: usize) {
         let m = &mut self.mods;
         let source = m.source();
-        let everything = m.everything && source != SourceId::Horizon;
-        m.asked = true;
-        m.search += 1;
-        m.searching = true;
-        if offset == 0 {
-            if !keep {
-                m.results.clear();
-                m.more = false;
-                m.results_list.reset();
-            }
-            m.installed_list.reset();
-        }
-        let query = match m.java_for(m.kind) {
-            Some(target) => Query {
-                offset,
-                limit: PAGE,
-                ..target.search(m.text.text(), m.kind, &m.browse.filters)
-            },
-            None => Query {
-                everything,
-                offset,
-                limit: PAGE,
-                filters: m.browse.filters.clone(),
-                ..Query::new(m.text.text(), m.kind)
-            },
+        let Some(query) = m.begin_page(offset) else {
+            return;
         };
         let (tx, search) = (m.tx.clone(), m.search);
         std::thread::spawn(move || {
             let result = browser::source(source)
                 .ok_or_else(|| trf("{source} isn't set up.", &[("source", source.label())]))
-                .and_then(|s| s.search(&query));
+                .and_then(|s| s.search_page(&query));
             let about: HashMap<String, Vec<String>> = match (&result, source) {
-                (Ok(found), SourceId::Horizon) => {
+                (Ok(page), SourceId::Horizon) => {
                     let instance = horizon_launcher::instances::selected();
-                    found
+                    page.projects
                         .iter()
                         .map(|p| {
                             let lines = horizon::trust_and_capabilities(&p.id, Some(&instance));
@@ -1199,10 +1289,7 @@ impl Launcher {
         let instance = self
             .selected_instance()
             .map_or_else(|| "Horizon".to_string(), |i| i.name.clone());
-        let world = self.mods.world.clone().and_then(|path| {
-            let (_, name) = self.mods.worlds.iter().find(|(p, _)| *p == path)?;
-            Some((path, name.clone()))
-        });
+        let world = self.mods.selected_world().cloned();
         std::thread::spawn(move || {
             let last = std::cell::Cell::new(-1);
             let progress = |line: &str, f: f32| {
@@ -1396,8 +1483,15 @@ impl Launcher {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let had_text = !this.mods.text.text().trim().is_empty();
                 match line_edit::handle(&mut this.mods.text, ev, cx) {
                     Key::Enter => this.mods_search(0),
+                    _ if had_text
+                        && this.mods.text.text().trim().is_empty()
+                        && this.mods.source() == SourceId::Modrinth =>
+                    {
+                        this.mods_search(0)
+                    }
                     Key::Escape => window.blur(cx),
                     Key::Pass => return,
                     _ => {}
@@ -1667,7 +1761,7 @@ impl Launcher {
     fn mods_target_line(&self, cx: &mut Context<Self>) -> Option<Div> {
         let instance = self.selected_instance()?;
         if self.mods.kind == PackKind::DataPack {
-            return Some(self.mods_world_picker(&instance.name.clone(), cx));
+            return Some(self.mods_world_picker(&instance.name, cx));
         }
         // The glass page's heading already says where installs go.
         if self.mods.kind == PackKind::Modpack || self.theme.glass {
@@ -1690,39 +1784,100 @@ impl Launcher {
     fn mods_world_picker(&self, instance: &str, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let caption = |s: String| text(theme::CAPTION).text_color(t.muted).child(s);
-        if self.mods.worlds.is_empty() {
+        let Some((path, name)) = self.mods.selected_world() else {
             return div().child(caption(trf(
                 "A data pack goes into a world, and {instance} has none yet: create one in the game, then come back.",
                 &[("instance", instance)],
             )));
-        }
-        let mut chips = div().flex().flex_wrap().items_center().gap(px(6.));
-        for (i, (path, name)) in self.mods.worlds.iter().enumerate() {
-            let on = self.mods.world.as_ref() == Some(path);
-            let path = path.clone();
-            chips = chips.child(
-                button(
-                    SharedString::from(format!("mods-world-{i}")),
-                    name.clone(),
-                    if on { Kind::Secondary } else { Kind::Ghost },
-                    &t,
-                )
-                .when(on, |b| b.border_color(t.accent))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods.world = Some(path.clone());
-                    cx.notify();
-                })),
-            );
-        }
-        div()
+        };
+        let open = self.mods.world_picker_open;
+        let folder = world_picker_folder(path);
+        let rounding = if t.glass {
+            horizon_theme::glass::radius::ROW
+        } else {
+            theme::RADIUS
+        };
+        let trigger = keyboard(div().id("mods-world-picker"), &t)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .h(px(48.))
+            .px(px(12.))
+            .rounded(px(rounding))
+            .bg(t.plate_soft)
+            .hover(move |s| s.bg(t.plate))
+            .cursor_pointer()
+            .child(world_picker_text(name, &folder, &t))
+            .tooltip(crate::glass_ui::tip(folder))
+            .child(
+                blocks::icon("chevron-down", 16., t.muted).with_transformation(
+                    gpui::Transformation::rotate(gpui::radians(if open {
+                        std::f32::consts::PI
+                    } else {
+                        0.
+                    })),
+                ),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.mods.world_picker_open = !this.mods.world_picker_open;
+                cx.notify();
+            }));
+        let mut picker = div()
+            .id("mods-world-picker-wrap")
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .child(caption(trf(
-                "Installs into a world of {instance}; the game turns the pack on when the world opens.",
-                &[("instance", instance)],
-            )))
-            .child(chips)
+            .gap(px(6.))
+            .w_full()
+            .max_w(px(360.))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.mods.world_picker_open {
+                    this.mods.world_picker_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(caption(tr("Install data packs into this world").into()))
+            .child(trigger);
+        if open {
+            let mut choices = div()
+                .id("mods-world-choices")
+                .flex()
+                .flex_col()
+                .max_h(px(242.))
+                .overflow_y_scroll()
+                .on_scroll(|_, _, cx| cx.stop_propagation())
+                .p(px(4.))
+                .rounded(px(rounding))
+                .bg(t.plate_soft);
+            for (i, (path, name)) in self.mods.worlds.iter().enumerate() {
+                let selected = self.mods.world.as_ref() == Some(path);
+                let folder = world_picker_folder(path);
+                let row = keyboard(div().id(("mods-world", i)), &t)
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(12.))
+                    .h(px(46.))
+                    .px(px(8.))
+                    .rounded(px(rounding))
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(t.plate))
+                    .hover(move |s| s.bg(t.plate))
+                    .child(world_picker_text(name, &folder, &t))
+                    .tooltip(crate::glass_ui::tip(folder))
+                    .when(selected, |d| d.child(blocks::icon("check", 16., t.accent)));
+                let path = path.clone();
+                choices = choices.child(row.on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.mods.world = Some(path.clone());
+                        this.mods.world_picker_open = false;
+                        cx.notify();
+                    },
+                )));
+            }
+            picker = picker.child(choices);
+        }
+        div().child(picker)
     }
 
     /// The install under way and the last install's answer.
@@ -2090,20 +2245,31 @@ impl Launcher {
         )
     }
 
+    fn mods_retry_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        button("mods-retry", "Try again", Kind::Secondary, &self.theme).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.retry_mods_page();
+                cx.notify();
+            },
+        ))
+    }
+
     fn mods_results(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let m = &self.mods;
         if let Some(e) = &m.error {
-            return div().child(notice(e.clone(), &t));
+            return div()
+                .child(notice(e.clone(), &t))
+                .child(self.mods_retry_button(cx));
         }
         let shown = m.shown();
         if shown.is_empty() {
             let line = if m.kind == PackKind::Shader && m.java.is_some() {
                 tr("Shader packs for Java instances aren't supported yet.")
-            } else if !m.results.is_empty() {
-                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
             } else if m.searching || !m.searched {
                 tr("Searching…")
+            } else if !m.results.is_empty() {
+                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
             } else if let Some(target) = m.java_for(m.kind) {
                 return centered(
                     &trf(
@@ -2245,12 +2411,11 @@ impl Launcher {
     fn mods_more(&self, mut out: Div, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let m = &self.mods;
-        if m.more {
+        if let Some(offset) = m.next_offset {
             let mut more = button("mods-more", "More", Kind::Ghost, &t);
             if m.searching {
                 more = disabled(more);
             } else {
-                let offset = m.results.len();
                 more = more.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.mods_search(offset);
                     cx.notify();
@@ -2348,6 +2513,26 @@ fn reviews_resource_pack(kind: PackKind, source: SourceId, java: Option<&Target>
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn same_named_worlds_keep_distinct_data_pack_destinations(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut mods = Mods::new(cx);
+            let first = Path::new("saves").join("New World");
+            let second = Path::new("saves").join("New World (1)");
+            mods.worlds = vec![
+                (first.clone(), "New World".into()),
+                (second.clone(), "New World".into()),
+            ];
+
+            mods.world = Some(second.clone());
+            let (path, name) = mods.selected_world().expect("selected world");
+            assert_eq!(path, &second);
+            assert_eq!(name, "New World");
+            assert_ne!(world_picker_folder(&first), world_picker_folder(path));
+            assert!(world_picker_folder(path).contains("New World (1)"));
+        });
+    }
+
     #[test]
     fn stale_discovery_keeps_only_offers_for_the_still_installed_versions() {
         let entries = ["updated", "unchanged"].map(|id| serde_json::json!({
@@ -2400,6 +2585,82 @@ mod tests {
             loaders: Vec::new(),
             blocked: None,
         }
+    }
+
+    #[gpui::test]
+    fn cleared_resource_pack_search_scans_with_the_submitted_filters(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut mods = Mods::new(cx);
+            mods.set_kind(PackKind::ResourcePack);
+            assert_eq!(mods.source(), SourceId::Modrinth);
+            mods.text.set("stone".into());
+            mods.browse.filters.categories.push("realistic".into());
+            mods.submitted = Some(mods.new_query());
+            let mut rejected = project(mods.kind, mods.source());
+            rejected.blocked = Some("Incompatible".into());
+            mods.results = vec![rejected.clone(); PAGE];
+            mods.next_offset = Some(PAGE);
+            assert_eq!(mods.next_default_page(), None);
+
+            mods.text.set(String::new());
+            mods.submitted = Some(mods.new_query());
+            assert_eq!(mods.next_default_page(), Some(PAGE));
+            let submitted = mods.begin_page(PAGE).unwrap();
+            mods.text.set("unsubmitted edit".into());
+            mods.error = Some("connection interrupted".into());
+            let offset = mods.submitted.as_ref().unwrap().offset;
+            assert_eq!(mods.begin_page(offset), Some(submitted.clone()));
+            assert!(submitted.text.is_empty());
+            assert_eq!(submitted.filters.categories, ["realistic"]);
+            assert!(mods.error.is_none() && mods.searching);
+
+            mods.results.resize(2 * PAGE, rejected.clone());
+            mods.next_offset = Some(2 * PAGE);
+            assert_eq!(mods.next_default_page(), Some(2 * PAGE));
+            mods.results.resize(DEFAULT_SCAN_PAGES * PAGE, rejected);
+            mods.next_offset = Some(DEFAULT_SCAN_PAGES * PAGE);
+            assert_eq!(mods.next_default_page(), None);
+            assert_eq!(mods.next_offset, Some(DEFAULT_SCAN_PAGES * PAGE));
+            mods.results.truncate(PAGE);
+            mods.next_offset = Some(2 * PAGE);
+            mods.results.push(project(mods.kind, mods.source()));
+            assert_eq!(mods.next_default_page(), None);
+            mods.reset_browse_context();
+            assert!(mods.begin_page(PAGE).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn pack_scan_respects_show_everything_and_instance_routing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut mods = Mods::new(cx);
+            for kind in [PackKind::DataPack, PackKind::ResourcePack] {
+                mods.set_kind(kind);
+                mods.submitted = Some(mods.new_query());
+                assert!(mods.filtered_pack_defaults());
+                mods.toggle_everything();
+                mods.submitted = Some(mods.new_query());
+                assert!(!mods.filtered_pack_defaults());
+            }
+            for kind in [PackKind::Mod, PackKind::Shader, PackKind::Modpack] {
+                mods.set_kind(kind);
+                mods.submitted = Some(mods.new_query());
+                assert!(!mods.filtered_pack_defaults());
+            }
+            mods.set_kind(PackKind::ResourcePack);
+            mods.set_target(
+                Some("java".into()),
+                None,
+                Some(Target {
+                    minecraft: "1.21.1".into(),
+                    loader: Some("fabric".into()),
+                }),
+            );
+            mods.submitted = Some(mods.new_query());
+            assert!(!mods.filtered_pack_defaults());
+        });
     }
 
     #[gpui::test]

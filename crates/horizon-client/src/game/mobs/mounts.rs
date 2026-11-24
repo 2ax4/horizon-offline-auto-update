@@ -130,8 +130,9 @@ impl Game<'_> {
         self.mobs.iter().position(|m| m.id == id)
     }
     /// `Entity.interact` / `Mob.canShearEquipment` / `Mob.attemptToShearEquipment`
-    /// / `Mob.shearItem`: the saddle of a `#can_equip_saddle` mob comes off
-    /// before its mobInteract can ride it, with the saddle's shearing sound.
+    /// / `Mob.shearItem`: the horse or nautilus armor of a `#can_equip_saddle`
+    /// mob, else its saddle, comes off before its mobInteract can ride it,
+    /// with the item's shearing sound.
     /// An occupied mount is not sheared: its mobInteract runs instead.
     pub(super) fn shear_saddle(&mut self, index: usize, item: &str) -> Option<bool> {
         let m = &self.mobs[index];
@@ -170,39 +171,72 @@ impl Game<'_> {
         if self.keys.held(Action::Sneak) {
             return None;
         }
-        // attemptToShearEquipment takes the body slot before the saddle: horse
-        // and nautilus armor come off first (not modelled here).
-        if m.extra
-            .body_id()
-            .is_some_and(|b| b.ends_with("_horse_armor") || b.ends_with("_nautilus_armor"))
-        {
-            return None;
-        }
-        let saddle = m.saddle_item()?;
-        if &*saddle.item != "minecraft:saddle" {
-            return None;
-        }
-        let silent = m.silent;
-        let at = m.position;
-        let offset = horizon_client::mobs::riders::passenger_attachment(m)[1];
+        // attemptToShearEquipment: the first shearable slot in EquipmentSlot
+        // order, so horse and nautilus armor (BODY) come off before the saddle.
+        let armor = m.extra.body_stack().and_then(|b| {
+            let sound = if b.item.ends_with("_horse_armor") {
+                "minecraft:item.horse_armor.unequip"
+            } else if b.item.ends_with("_nautilus_armor") {
+                "minecraft:item.armor.unequip_nautilus"
+            } else {
+                return None;
+            };
+            (!self.kept_on(b)).then_some((horizon_items::equipment::BODY, sound))
+        });
+        let (slot, sound) = match armor {
+            Some(found) => found,
+            None => {
+                let saddle = m.saddle_item()?;
+                if &*saddle.item != "minecraft:saddle" || self.kept_on(&saddle) {
+                    return None;
+                }
+                (horizon_items::equipment::SADDLE, "minecraft:item.saddle.unequip")
+            }
+        };
+        self.shear_equipment(index, slot, sound);
+        Some(true)
+    }
+    /// `EnchantmentHelper.has(stack, PREVENT_ARMOR_CHANGE)` for a survival
+    /// player: `attemptToShearEquipment` leaves such an item on.
+    pub(super) fn kept_on(&self, stack: &ItemStack) -> bool {
+        !self.creative && world_stations!(self).enchantments.prevents_armor_change(stack)
+    }
+    /// `Mob.shearItem` on mob `index`'s `slot` (BODY or SADDLE), then
+    /// `attemptToShearEquipment`'s `playSound(equippable.shearingSound())`:
+    /// the shears take a point of damage, the slot empties, `GameEvent.SHEAR`
+    /// fires, the item drops at the mob's average passenger attachment
+    /// (unturned) and `player_sheared_equipment` triggers.
+    pub(super) fn shear_equipment(&mut self, index: usize, slot: usize, sound: &str) {
+        let m = &self.mobs[index];
+        let (id, silent, at) = (m.id, m.silent, m.position);
+        let offset = horizon_client::mobs::riders::average_attachment(m);
+        let stack = if slot == horizon_items::equipment::SADDLE {
+            m.saddle_item()
+        } else {
+            m.extra.body_stack().cloned()
+        };
+        let Some(stack) = stack else { return };
         self.damage_held_tool();
-        self.mobs[index].set_saddle(None);
+        if slot == horizon_items::equipment::SADDLE {
+            self.mobs[index].set_saddle(None);
+        } else {
+            self.mobs[index].extra.set_body_stack(None);
+        }
         let context = self.who_context(Some(Who::Player), None);
         self.post_game_event("minecraft:shear", [at.x, at.y, at.z], context);
         self.mob_equip_event(id, [at.x, at.y, at.z], false);
-        self.spawn_at_location(at, offset, saddle.clone());
+        // Entity.spawnAtLocation(level, stack, offset): with the default pickup delay.
+        self.spawn_item_own(
+            stack.clone(),
+            [at.x + offset[0], at.y + offset[1], at.z + offset[2]],
+            10,
+        );
         let target = self.mob_entity(&self.mobs[index]);
-        self.trigger_item_entity("minecraft:player_sheared_equipment", &saddle, &target);
-        // attemptToShearEquipment: playSound(equippable.shearingSound()).
+        self.trigger_item_entity("minecraft:player_sheared_equipment", &stack, &target);
+        // Entity.playSound: nothing from a silent mob.
         if !silent {
-            self.audio.play(
-                "minecraft:item.saddle.unequip",
-                Some([at.x, at.y, at.z]),
-                1.0,
-                1.0,
-            );
+            self.audio.play(sound, Some([at.x, at.y, at.z]), 1.0, 1.0);
         }
-        Some(true)
     }
     /// `Pig` / `Strider.mobInteract`: saddle an adult, or ride a saddled one.
     fn interact_steerable(&mut self, index: usize, item: &str) -> bool {
@@ -240,6 +274,10 @@ impl Game<'_> {
             return true;
         }
         let id = m.id;
+        let species = m.species();
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }
@@ -279,19 +317,53 @@ impl Game<'_> {
         self.swing_arm();
         true
     }
+    /// Passenger capacity of a mount species: 2 for camels, 4 for happy ghasts, 1 for others.
+    pub(super) fn mount_capacity(species: Species) -> usize {
+        if matches!(species, Species::Camel | Species::CamelHusk) {
+            2
+        } else if species == Species::HappyGhast {
+            4
+        } else {
+            1
+        }
+    }
+    /// Total passengers (mobs, guests, and host) aboard `vehicle`, excluding the currently acting player.
+    pub(super) fn mount_passenger_count(&self, vehicle: u32) -> usize {
+        let mob_passengers = self
+            .mobs
+            .iter()
+            .filter(|p| p.extra.mount == Some(vehicle) && !p.removed && p.alive())
+            .count();
+        let guest_passengers = self.lan.as_ref().map_or(0, |h| {
+            h.hub
+                .guests
+                .iter()
+                .filter(|g| {
+                    Some(g.conn) != self.lan_acting
+                        && self.guest_current_vehicle(g.conn) == Some(vehicle)
+                })
+                .count()
+        });
+        let host_passenger = if self.lan_acting.is_some() {
+            usize::from(self.host_current_vehicle() == Some(vehicle))
+        } else {
+            0
+        };
+        mob_passengers + guest_passengers + host_passenger
+    }
     /// `AbstractHorse.mobInteract`. Returns whether the click was used.
     pub(super) fn interact_mount(&mut self, index: usize, item: &str) -> bool {
         let held = self.held().cloned();
         let m = &self.mobs[index];
         let species = m.species();
-        // A server player rides it already (`isVehicle`: no seat, no feeding).
-        if self.ridden_by_guest(m.id) {
-            return false;
-        }
+        let id = m.id;
         if matches!(species, Species::Pig | Species::Strider) {
             return self.interact_steerable(index, item);
         }
         if horizon_client::mobs::llama::is_llama(species) {
+            if self.mount_passenger_count(id) > 0 {
+                return false;
+            }
             return self.interact_llama(index, item);
         }
         if species == Species::HappyGhast {
@@ -303,15 +375,11 @@ impl Game<'_> {
         if !equine::is_equine(species) || !m.alive() || Some(m.id) == self.riding {
             return false;
         }
-        // AbstractHorse.mobInteract: a horse a mob rides (`isVehicle`) has no
+        // AbstractHorse.mobInteract: a horse with a rider (`isVehicle`) has no
         // seat, inventory or feeding to give. Camels seat two and check their
         // passengers themselves.
-        let id = m.id;
         if !matches!(species, Species::Camel | Species::CamelHusk)
-            && self
-                .mobs
-                .iter()
-                .any(|p| p.extra.mount == Some(id) && !p.removed && p.alive())
+            && self.mount_passenger_count(id) > 0
         {
             return false;
         }
@@ -436,6 +504,9 @@ impl Game<'_> {
         // doPlayerRide: `AbstractHorse.doPlayerRide` turns the rider to the
         // horse's yaw before it seats them.
         let id = self.mobs[index].id;
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }
@@ -453,14 +524,17 @@ impl Game<'_> {
         let Some((heal, age_up, temper, love)) = eating(self.mobs[index].species(), item) else {
             return false;
         };
+        let m = &self.mobs[index];
+        let eligible = love && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0;
+        let Some((index, loved)) = self.animal_love_decision(index, eligible) else {
+            return true;
+        };
         let m = &mut self.mobs[index];
-        let mut used = false;
-        let mut loved = false;
-        if love && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0 {
+        let loved = loved && m.extra.tame;
+        let mut used = eligible;
+        if loved {
             m.extra.in_love = 600;
             m.extra.love_player = true;
-            used = true;
-            loved = true;
         }
         if m.health < m.attrs.max_health && heal > 0.0 {
             m.heal(&self.loop_context, heal);
@@ -523,7 +597,9 @@ impl Game<'_> {
             self.love_cause.insert(id, self.lan_acting);
             let kind = self.mobs[index].kind.id.clone();
             self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
-            self.mob_event_particles(id, 18);
+            if self.feeding_animal_index(index, id).is_some() {
+                self.mob_event_particles(id, 18);
+            }
         }
         self.consume_held();
         true
@@ -608,16 +684,12 @@ impl Game<'_> {
         let m = &mut self.mobs[i];
         if jump > 0.0 {
             // AbstractHorse.onPlayerJump: slide on the keys and rear (horses,
-            // donkeys and mules).
+            // donkeys and mules). The jump sound is not played here: vanilla's
+            // server plays it in `handleStartJump`, which the guest's
+            // START_RIDING_JUMP reaches (`lan_start_riding_jump`), and
+            // `playJumpSound` must not sound twice (#16360).
             if equine::is_equine(m.species()) {
                 equine::on_player_jump(m);
-            }
-            // The nautilus plays its dash sound itself.
-            if equine::is_equine(m.species()) {
-                // playJumpSound, which the server broadcasts for a guest.
-                let sound = format!("minecraft:{}", equine::jump_sound(m));
-                let at = m.center();
-                self.audio.play(&sound, Some(at), 0.4, 1.0);
             }
         }
         let m = &mut self.mobs[i];
@@ -670,7 +742,14 @@ impl Game<'_> {
             // Camel.getPassengerAttachmentPoint: the driver half a block
             // forward, at the body anchor (lower while sitting), turned with
             // the camel. Its point already carries the camel's own scale.
-            seat_of(m, horizon_client::mobs::camel::passenger_attachment(m))
+            // Camel.getPassengerAttachmentPoint uses the passenger's place
+            // in getPassengers(): the second rider sits behind the driver.
+            let seat = self.remote.as_ref().map_or(0, |r| r.passenger_index);
+            let count = self.seated_passengers(m.id).len().max(1);
+            seat_of(
+                m,
+                horizon_client::mobs::camel::passenger_attachment_at(m, seat, count, false),
+            )
         } else {
             seat_of(m, horizon_client::mobs::riders::type_attachment(m))
         };
@@ -982,10 +1061,17 @@ impl Game<'_> {
         equine::is_equine(species) || horizon_client::mobs::nautilus::is_nautilus(species)
     }
     /// `Player.jumpableVehicle`: a saddled mount that jumps (not a pig or a
-    /// strider, which a saddle only steers).
+    /// strider, which a saddle only steers), and a camel only while it moves
+    /// (`Camel.canJump` adds `!refuseToMove`).
     pub(super) fn jumpable_mount(&self) -> bool {
-        self.mount_index()
-            .is_some_and(|i| self.mobs[i].extra.saddled() && Self::jumps(self.mobs[i].species()))
+        self.remote.as_ref().is_none_or(|r| r.first_passenger)
+            && self.mount_index().is_some_and(|i| {
+                let m = &self.mobs[i];
+                m.extra.saddled()
+                    && Self::jumps(m.species())
+                    && !(crate::mobs::camel::is_camel(m.species())
+                        && crate::mobs::camel::refuse_to_move(m))
+            })
     }
     /// `willPrioritizeJumpInfo`: charging a jump or recharging.
     pub(super) fn mount_jumping(&self) -> bool {

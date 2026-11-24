@@ -228,7 +228,7 @@ The opening, then Play ([clip](docs/opening.webm)):
   keeping every field the launcher doesn't show and the servers joined with Direct Connection. The
   same from the command line: `horizon-launcher multiplayer [list|add|remove] [--instance <name>]`
   and `horizon-launcher play --server <address or name>`.
-- **Patch notes**: each release's notes, newest first, with a link to GitHub Sponsors. Quiet "Sponsor", "Discord" and "Website" links sit in the sidebar footer.
+- **Patch notes**: each release's notes, newest first, with a link to Horizon's Open Collective. Quiet "Sponsor", "Discord" and "Website" links sit in the sidebar footer.
 
 Data lives in the platform's data directory (`~/.local/share/horizon-launcher` on Linux,
 `~/Library/Application Support/horizon-launcher` on macOS, `%APPDATA%\horizon-launcher` on
@@ -284,7 +284,7 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   Without one, `HTTPS_PROXY` and `HTTP_PROXY` are used when the launcher is started with them, and
   `NO_PROXY` names the hosts to reach directly, a modpack import's jars included. A server on this
   computer never goes through it.
-- **Links**: the Discord invite, the Sponsors page and the website come from `launcher/links.json` on main
+- **Links**: the Discord invite, the Open Collective page and the website come from `launcher/links.json` on main
   (`{"discord": "...", "sponsor": "...", "website": "..."}`), so they change without a launcher release. Offline,
   the launcher uses the same values built in; an empty address hides its button. An optional `"min_launcher":
   "0.2.80"` names the oldest launcher that may stay in use, for a release known to be broken: an older one that
@@ -539,6 +539,13 @@ crashes it writes `crash-reports/crash-<date>_<time>-client.txt` beside them. Wh
 launcher started crashes, the Play page says so, with buttons to open or copy the report, open the
 logs folder and report it on Discord; Settings has the logs folder too. A crash report leaves the
 machine only if you turn on crash reports (below).
+
+On Linux and macOS, `untrusted control socket directory` is a launch refusal
+before the game starts, not a game crash. The error names the directory it
+could not trust. Check that path and have the system administrator restore its
+expected ownership or permissions. Do not make it writable to get past the
+error. A normal Linux `/` is owned by root and is not group- or world-writable;
+the sticky-bit `/tmp` directory is allowed.
 
 ## Data collection
 

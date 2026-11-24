@@ -93,6 +93,22 @@ pub trait LevelsBackend {
     /// None for a stale or unavailable level. Does not load chunks.
     #[access(WorldOnly)]
     fn level_get_sky_darken(&self, level: LevelRef) -> Option<i32>;
+    /// Side: server.
+    /// `level.environmentAttributes().getValue(attribute, pos)` for a float environment
+    /// attribute (`visual/sky_light_factor`, `gameplay/sky_light_level`; the `minecraft:`
+    /// namespace may be left out): the level's stack of dimension type, timelines on its clock
+    /// and weather, with the one biome at `pos` and no spatial interpolation (the noise biome,
+    /// or the block's biome for an attribute with full-resolution biomes). Reads an active or
+    /// parked server level and loads nothing; a biome layer of an unloaded column is skipped.
+    /// None on a client, for a stale or unavailable level, an unknown attribute and one that
+    /// isn't a float.
+    #[access(WorldOnly)]
+    fn level_environment_float(
+        &self,
+        level: LevelRef,
+        attribute: &str,
+        pos: [f64; 3],
+    ) -> Option<f32>;
     /// Side: both.
     /// `BlockGetter.getBlockFloorHeight` with the normal collision shapes and an empty
     /// entity context. The result is relative to the block: negative infinity means no floor.
@@ -685,6 +701,15 @@ pub trait LevelsBackend {
     #[access(WorldOnly)]
     fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
     /// Side: server.
+    /// `LevelReader.canSeeSkyFromBelowWater`: at or above the level's sea level (`sea_level`)
+    /// the same as `can_see_sky`; below it, whether the column sees the sky at sea level and
+    /// every block from there down to `pos` (not counted) dampens no light or is water, lava or a
+    /// bubble column. Kelp, seagrass and waterlogged blocks stop it. Natural spawning asks it
+    /// (the guardian's rule), and so do mods that tell open water from caves. None for a stale
+    /// handle, a position that isn't loaded and on a client.
+    #[access(WorldOnly)]
+    fn level_can_see_sky_from_below_water(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
+    /// Side: server.
     /// Whether nothing solid lies on the segment `from`..`to`, as
     /// `LivingEntity.hasLineOfSight` clips between two eyes (`ClipContext.Block.COLLIDER`,
     /// `ClipContext.Fluid.NONE`): `clip`'s miss. Fluids, entities and the border don't block it.
@@ -860,6 +885,24 @@ pub trait LevelsBackendMut {
     /// a stale handle or a level that isn't open.
     #[access(WorldOnly)]
     fn level_set_spawn_limits(&mut self, level: LevelRef, limits: SpawnLimits) -> bool;
+    /// Side: server.
+    /// Sets one category's natural spawning limit (a [`SpawnLimits`] field) from the next
+    /// spawn pass on, as `set_spawn_limits` does for all of them, with the same keeping and
+    /// refusals. `MobCategory::Misc` has no limit: false, with nothing set.
+    #[access(WorldOnly)]
+    fn level_set_spawn_limit(&mut self, level: LevelRef, category: MobCategory, limit: u32) -> bool;
+    /// Sets how many ticks pass between one category's natural spawn passes (Paper's
+    /// `World#setTicksPerSpawns`), from the next pass on: 1 is every tick, as monsters have it,
+    /// and vanilla gives creatures 400. Kept and refused as `set_spawn_limits`. False, with
+    /// nothing set, for `MobCategory::Misc` (it never spawns naturally), for 0, on a client
+    /// and for a stale handle or a level that isn't open.
+    #[access(WorldOnly)]
+    fn level_set_ticks_per_spawn(
+        &mut self,
+        level: LevelRef,
+        category: MobCategory,
+        ticks: u32,
+    ) -> bool;
     /// Side: server.
     /// Sets which categories the level's natural spawning may spawn
     /// ([`SpawnFlags`]), from the next spawn pass on. Kept and refused as
@@ -1043,6 +1086,28 @@ pub trait LevelsBackendMut {
     /// another length, a stale handle, a client and a map id nothing made.
     #[access(WorldOnly)]
     fn level_set_map_data(&mut self, level: LevelRef, id: i32, colors: &[u8]) -> bool;
+    /// Side: server.
+    /// `MapItemSavedData.setLocked` (Paper's `MapView#setLocked`): map `id`'s locked flag becomes
+    /// `locked`, a locked map no longer reveals the world when it is drawn. The pixels stay, the
+    /// map saves with the next save, and the players' copies get the flag with their next update
+    /// of the map, as vanilla. True also when the flag already had the value. False for a stale
+    /// handle, a client and a map id nothing made.
+    #[access(WorldOnly)]
+    fn level_set_map_locked(&mut self, level: LevelRef, id: i32, locked: bool) -> bool;
+    /// Side: server.
+    /// `Bukkit.createMap(world)` / `MapItem.create`: a new unlocked map in the level's dimension,
+    /// centred on `center` (`[x, z]`, kept as given, not snapped to the map grid as `createFresh`
+    /// snaps it), at `scale` (0 to 4) and with `colors` (128 by 128 colour ids, row by row). Its
+    /// markers are on and it saves with the next save. Returns the new map id. None for a scale
+    /// over 4, another colour length, a stale handle and a client.
+    #[access(WorldOnly)]
+    fn level_new_map(
+        &mut self,
+        level: LevelRef,
+        center: [i32; 2],
+        scale: u8,
+        colors: &[u8],
+    ) -> Option<i32>;
     /// Side: server.
     /// Run the block at `pos`'s scheduled tick now (`ServerLevel.tickBlock`): the path a due
     /// tick from the queue takes, the block's part first, else `BlockState.tick`, with the same
@@ -1281,6 +1346,23 @@ pub trait LevelsBackendMut {
         count: i32,
     ) -> bool;
     /// Side: server.
+    /// `level_send_particles` around each of `positions`, in order, in one call:
+    /// every position is checked as the single one is, and all of them are
+    /// queued or none if any would be refused. It saves the mod's calls only:
+    /// each position is still a request of its own. An empty list queues
+    /// nothing and answers true; more than 4096 positions answer false.
+    #[access(WorldOnly)]
+    fn level_send_particles_at(
+        &mut self,
+        level: LevelRef,
+        options: &ParticleOptions,
+        state: Option<BlockState>,
+        positions: &[[f64; 3]],
+        spread: [f64; 3],
+        speed: f64,
+        count: i32,
+    ) -> bool;
+    /// Side: server.
     /// Plays level event `id` at `pos` with `data` for the players near it
     /// (`Level.levelEvent(null, id, pos, data)`): `1000`s are sounds, `2000`s
     /// particles, as vanilla's `LevelEvent` numbers them (`2001` breaks a
@@ -1358,9 +1440,10 @@ pub trait LevelsBackendMut {
     /// `entity_mob_griefing`, `Trigger` only works buttons, levers, doors and
     /// the like); `fire` lights some of the air around whatever it is.
     /// `settings` holds the damage calculator, particles and sound, each
-    /// vanilla's default when `None`. There is no radius limit, as in
-    /// vanilla: a big blast costs the blocks its rays find, and one of 0 or
-    /// below finds none. Refused, with nothing exploded and no hook told, as
+    /// vanilla's default when `None`. Vanilla has no radius limit,
+    /// but a mod's blast takes at most 64 (vanilla's biggest are 6 and 7): a
+    /// big blast costs the blocks its rays find, and one of 0 or below finds
+    /// none. Refused, with nothing exploded and no hook told, as
     /// [`ExplodeError`] says.
     #[access(WorldOnly)]
     fn level_explode(
@@ -1527,7 +1610,8 @@ pub trait LevelsBackendMut {
     /// they award). True once the orbs are awarded, even if a mod keeps a new
     /// one out (`entity_join_level`). False, with no orbs, for 0, a
     /// value that isn't finite, on a client, for a stale handle or a level
-    /// not in place.
+    /// not in place. One call awards at most 1,000,000 points (about 400
+    /// orbs): a larger `amount` is cut to that, so award in several calls.
     #[access(WorldOnly)]
     fn level_award_experience(
         &mut self,
@@ -1572,6 +1656,21 @@ pub trait LevelsBackendMut {
     /// that gives `None`.
     #[access(WorldOnly)]
     fn level_set_random(&mut self, level: LevelRef, random: LegacyRandom) -> bool;
+    /// Side: server.
+    /// Place the configured feature `feature` at `pos` with the level's random, as `/place feature`
+    /// does: a vanilla tree or mushroom by its feature id (`minecraft:oak`, `minecraft:birch`,
+    /// `minecraft:huge_red_mushroom`), which is Paper's `World#generateTree` for each `TreeType`.
+    /// `Ok(true)` when it placed something, `Ok(false)` when it ran and placed nothing, or the
+    /// position is not loaded, out of the world or locked by a carrier transfer. Each refusal
+    /// queues nothing and is named by `FeatureRefusal`: `Stale`, `Client`, `NotInPlace` and
+    /// `UnknownFeature`. The changed blocks go out as the level's own writes do.
+    #[access(WorldOnly)]
+    fn level_generate_tree(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        feature: &str,
+    ) -> Result<bool, FeatureRefusal>;
     /// Side: both.
     /// Apply bone meal to the block at `pos` as a dispenser does (`BoneMealItem.growCrop`, then
     /// `growWaterPlant`), with no player and no item: the mods' `bonemeal` hook first, level event
@@ -1588,6 +1687,22 @@ pub trait LevelsBackendMut {
     /// once per column. Outside a transaction they run immediately.
     #[access(WorldOnly)]
     fn level_set_biome(&mut self, level: LevelRef, pos: [i32; 3], biome: &str) -> bool;
+    /// Side: server.
+    /// Set the biome of every 4x4x4 cell that holds a block of the half-open box `min <= pos < max`
+    /// to `biome` (`minecraft:plains`), as `/fillbiome` does, and return how many cells changed.
+    /// Each changed column is sent again (`chunk_resend`'s effect) as `level_set_biome` does, once
+    /// per commit. Reading the biomes back is `level_biome_at`. An empty box (any minimum at or
+    /// above its maximum) changes nothing. Refusals are whole and named by `BiomeFillRefusal`:
+    /// `Stale`, `Client`, `NotInPlace`, `UnknownBiome`, `NotLoaded` (a column of the box is not
+    /// loaded, or the box leaves the world's height) and `TooManyCells` (over 16,384 cells a call).
+    #[access(WorldOnly)]
+    fn level_fill_biome(
+        &mut self,
+        level: LevelRef,
+        min: [i32; 3],
+        max: [i32; 3],
+        biome: &str,
+    ) -> Result<u32, BiomeFillRefusal>;
 }
 /// The handles' client writes of the `levels` area, implemented by the game and reached through [`ClientBackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

@@ -31,11 +31,13 @@ use super::pack_uniforms::{self, FrameUniforms, PackInputs};
 mod blend_capability;
 #[cfg(test)]
 mod blend_capability_tests;
+mod executor;
 mod indirect;
 mod packed;
 mod sky;
 
 mod flip_carry;
+mod targets;
 
 #[cfg(test)]
 mod indirect_tests;
@@ -271,6 +273,31 @@ struct Sky {
     textured: Option<Pass>,
 }
 
+/// Which part of the entity passes runs at a frame step: opaque/early before deferred (`Early`),
+/// `PreWater` (`gbuffers_beaconbeam`) after deferred but before `gbuffers_water` so underwater
+/// beams are not occluded by water depth writes, and `Late` after `gbuffers_water`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntityPhase {
+    Early,
+    PreWater,
+    Late,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranslucentStep {
+    PreWaterEntities,
+    WaterTerrain,
+    LateEntities,
+}
+
+/// Production draw order inside [`PackPost::draw_translucent`]: `gbuffers_beaconbeam` runs
+/// before translucent water writes depth so underwater beams remain visible (#20345).
+const TRANSLUCENT_STEPS: [TranslucentStep; 3] = [
+    TranslucentStep::PreWaterEntities,
+    TranslucentStep::WaterTerrain,
+    TranslucentStep::LateEntities,
+];
+
 /// Entities, block entities, translucent entity parts and particles a pack draws
 /// (`pack_entities::ENTITY`... order), after terrain or, `late`, after deferred; Horizon draws
 /// the others.
@@ -473,6 +500,9 @@ struct Pass {
     /// The entity program without colour writes, for the boats' water patches
     /// (`RenderTypes.waterMask`: depth only, so no water shows inside a hull).
     water_mask: Option<Slot<wgpu::RenderPipeline>>,
+    /// The beam program without depth writes, for the beams' translucent glow
+    /// (`RenderTypes.beaconBeam(true)`); the opaque core keeps the program's own pipeline.
+    no_depth_write: Option<Slot<wgpu::RenderPipeline>>,
     layout: wgpu::BindGroupLayout,
     ubo: wgpu::Buffer,
     block: Vec<u8>,
@@ -825,6 +855,11 @@ pub struct PackPost {
     upscale: (wgpu::RenderPipeline, wgpu::BindGroupLayout),
     /// The picture `final` draws while the world's size is not the window's.
     final_target: Option<FinalTarget>,
+    /// Frames in a row given up for want of video memory (`targets.rs`).
+    given_up: u32,
+    /// What a scaled screenshot's frame made without scopes of its own (`targets.rs`): the
+    /// images (bit n: image n) and the storage buffers, dropped where its scopes failed.
+    unchecked: (u64, bool),
     screen: wgpu::TextureFormat,
     uniforms: FrameUniforms,
 }
@@ -1262,8 +1297,6 @@ pub(super) type TerrainDraw<'a> = dyn FnMut(
         Option<(u32, &wgpu::BindGroupLayout)>,
     ) + 'a;
 
-pub(super) use super::external::ShadowView;
-
 /// An arena page's key, native vertices and optional per-quad source records.
 pub(super) type TerrainPage = (u32, wgpu::Buffer, Option<wgpu::Buffer>);
 
@@ -1398,6 +1431,16 @@ impl Resources<'_> {
         }
         slot
     }
+}
+
+/// A second pipeline [`build_pass`] makes of an entity program, beside its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtraPipeline {
+    None,
+    /// `Pass::water_mask`.
+    WaterMask,
+    /// `Pass::no_depth_write`.
+    NoDepthWrite,
 }
 
 /// A pipeline, made once: `Pipeline`'s, filled by its `Job`.
@@ -1922,7 +1965,7 @@ fn build_pass(
     custom: &[(String, String)],
     draws: &wgpu::BindGroupLayout,
     pack: &Resources<'_>,
-    water_mask: bool,
+    extra: ExtraPipeline,
 ) -> Option<Pass> {
     let features = device.features();
     // The frame's uniforms, then the pack's custom ones.
@@ -2145,7 +2188,7 @@ fn build_pass(
             })
         });
         // The water patches' pipeline: the same program, depth only.
-        let water_mask = water_mask.then(|| {
+        let water_mask = (extra == ExtraPipeline::WaterMask).then(|| {
             let targets = (job.targets.iter())
                 .map(|t| {
                     t.clone().map(|t| wgpu::ColorTargetState {
@@ -2162,14 +2205,28 @@ fn build_pass(
                 },
             )
         });
+        // The beam glow's pipeline: the same program, without depth writes.
+        let no_depth_write = (extra == ExtraPipeline::NoDepthWrite).then(|| {
+            pack.render_pipeline(
+                device,
+                RenderJob {
+                    depth_stencil: job.depth_stencil.clone().map(|d| wgpu::DepthStencilState {
+                        depth_write_enabled: Some(false),
+                        ..d
+                    }),
+                    ..job.clone()
+                },
+            )
+        });
         (
             layout,
             pack.render_pipeline(device, job),
             sky_parts,
             water_mask,
+            no_depth_write,
         )
     });
-    let (layout, pipeline, sky_parts, water_mask) = match created {
+    let (layout, pipeline, sky_parts, water_mask, no_depth_write) = match created {
         Ok(created) => created,
         Err(e) => {
             notes.push(format!("{}: skipped: {e}", p.name));
@@ -2210,6 +2267,7 @@ fn build_pass(
         pipeline: Pipeline::Render(pipeline),
         sky_parts,
         water_mask,
+        no_depth_write,
         layout,
         samplers,
         writes,
@@ -2367,6 +2425,7 @@ fn build_compute(
         },
         sky_parts: None,
         water_mask: None,
+        no_depth_write: None,
         layout,
         samplers,
         writes: Vec::new(),
@@ -2415,6 +2474,18 @@ impl Refused {
     /// fault, so nothing to report to the player.
     pub fn is_cancelled(&self) -> bool {
         self.reason == Self::CANCELLED
+    }
+    /// The reason of a pack that found no room in video memory for what it makes as it loads:
+    /// not the pack's fault either, and the same files may load the next time.
+    const NO_ROOM: &str = "video memory is full";
+    pub(super) fn no_room() -> Self {
+        Self {
+            reason: Self::NO_ROOM.into(),
+            notes: Vec::new(),
+        }
+    }
+    pub fn is_no_room(&self) -> bool {
+        self.reason == Self::NO_ROOM
     }
 }
 
@@ -2658,8 +2729,9 @@ impl PackPost {
                 })
             })
             .transpose()?;
-        // The next pass built also gets a depth-only pipeline for the boats' water patches.
-        let water_mask_next = std::cell::Cell::new(false);
+        // The next pass built also gets a depth-only pipeline for the boats' water patches, or
+        // one without depth writes for the beams' glow.
+        let extra_next = std::cell::Cell::new(ExtraPipeline::None);
         let mut build = |mut p: horizon_shaders::PostProgram, geometry: Option<&Geometry<'_>>| {
             // Not wanted any more: the rest is skipped and the build refused below.
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2710,7 +2782,7 @@ impl PackPost {
                     &custom_names,
                     &draws.layout,
                     &pack,
-                    water_mask_next.get(),
+                    extra_next.get(),
                 )?
             };
             pass.compute.append(&mut computes);
@@ -2899,8 +2971,13 @@ impl PackPost {
         };
         let mut kind = 0;
         let entity_passes = programs.map(|p| {
-            // The entity program draws the boats, and their water patches (`Draw::water_mask`).
-            water_mask_next.set(kind == super::pack_entities::ENTITY);
+            // The entity program draws the boats, and their water patches (`Draw::water_mask`);
+            // the beam program the beams' cores, and their glow (`Draw::beam_glow`).
+            extra_next.set(match kind {
+                super::pack_entities::ENTITY => ExtraPipeline::WaterMask,
+                super::pack_entities::BEAM => ExtraPipeline::NoDepthWrite,
+                _ => ExtraPipeline::None,
+            });
             kind += 1;
             p.zip(entity_geometry.as_ref()).and_then(|(p, g)| {
                 if p.name == "gbuffers_damagedblock" {
@@ -2924,7 +3001,7 @@ impl PackPost {
         if entity_passes[super::pack_entities::PARTICLE_TRANSLUCENT].is_some() {
             late[super::pack_entities::PARTICLE] = false;
         }
-        water_mask_next.set(false);
+        extra_next.set(ExtraPipeline::None);
         let shadow_entities = shadow_programs.map(|p| {
             p.zip(entity_geometry.as_ref())
                 .and_then(|(p, g)| paged(build(p, Some(g))))
@@ -3575,6 +3652,8 @@ impl PackPost {
             copy,
             upscale,
             final_target: None,
+            given_up: 0,
+            unchecked: (0, false),
             screen,
             uniforms: {
                 let mut u = FrameUniforms::default();
@@ -4146,8 +4225,17 @@ impl PackPost {
         *self.terrain_slot(list, cutout) = Some(pass);
     }
 
+    fn entity_in_phase(program: usize, late: bool, phase: EntityPhase) -> bool {
+        match phase {
+            EntityPhase::Early => !late,
+            EntityPhase::PreWater => late && program == super::pack_entities::BEAM,
+            EntityPhase::Late => late && program != super::pack_entities::BEAM,
+        }
+    }
+
     /// Entities, block entities, translucent entity parts and particles with the pack's
-    /// programs, those drawn before deferred or (`late`) after: each run `prepare_entities` kept
+    /// programs, those drawn before deferred (`Early`), between deferred and translucent terrain
+    /// (`PreWater`), or after translucent terrain (`Late`): each run `prepare_entities` kept
     /// is one draw with its own `entityId` or `blockEntityId` and `entityColor`.
     fn draw_entities(
         &mut self,
@@ -4155,25 +4243,33 @@ impl PackPost {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         size: [u32; 2],
-        late: bool,
+        phase: EntityPhase,
     ) {
         let Some(mut entities) = self.entities.take() else {
             return;
         };
         let geometry = &entities.geometry;
         for (program, pass) in entities.passes.iter_mut().enumerate() {
-            let Some(pass) = pass.as_mut().filter(|_| entities.late[program] == late) else {
+            let Some(pass) = pass
+                .as_mut()
+                .filter(|_| Self::entity_in_phase(program, entities.late[program], phase))
+            else {
                 continue;
             };
             let mut draws = geometry
                 .draws
                 .iter()
-                .filter(|d| d.pack && d.program == program && !d.water_mask)
+                .filter(|d| d.pack && d.program == program && !d.water_mask && !d.beam_glow)
                 .peekable();
+            // The beams' glow after their cores, without depth writes: what lies behind it
+            // still draws later, and the core keeps its depth (`RenderTypes.beaconBeam`).
+            let glows: Vec<_> = (geometry.draws.iter())
+                .filter(|d| d.pack && d.program == program && d.beam_glow)
+                .collect();
             let masks: Vec<_> = (geometry.draws.iter())
                 .filter(|d| d.pack && d.program == program && d.water_mask)
                 .collect();
-            if draws.peek().is_none() {
+            if draws.peek().is_none() && glows.is_empty() {
                 continue;
             }
             let group = self.bind(device, queue, encoder, pass, size);
@@ -4212,6 +4308,19 @@ impl PackPost {
                         rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);
                     }
                     rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
+                }
+                if !glows.is_empty() {
+                    if on_portal {
+                        rp.set_bind_group(0, &group, &[]);
+                    }
+                    let glow = pass.no_depth_write.as_ref().and_then(|p| p.get());
+                    rp.set_pipeline(glow.unwrap_or_else(|| pass.render()));
+                    for d in &glows {
+                        if pass.draw {
+                            rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);
+                        }
+                        rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
+                    }
                 }
             }
             // The boats' water patches, depth only, into their own depth: translucent terrain
@@ -4477,7 +4586,7 @@ impl PackPost {
             self.draw_sky(device, queue, encoder, size, frame);
         }
         self.draw_terrain(device, queue, encoder, size, TerrainList::Solid, terrain);
-        self.draw_entities(device, queue, encoder, size, false);
+        self.draw_entities(device, queue, encoder, size, EntityPhase::Early);
         self.draw_lines(device, queue, encoder, size);
         self.draw_clouds(device, queue, encoder, size);
         // Only depth2 excludes the opaque first-person hand.
@@ -4555,6 +4664,11 @@ impl PackPost {
             self.mips_valid &= !pass.written;
         }
         self.hand = Some((pass, geometry));
+    }
+
+    /// The pack's `sunPathRotation` in degrees: how far it turns the sky's bodies' path.
+    pub fn sun_path_rotation(&self) -> f32 {
+        self.uniforms.shadow.sun_path_rotation
     }
 
     /// Whether the pack draws the first-person hand itself.
@@ -4654,7 +4768,8 @@ impl PackPost {
         self.cloud_draw = clouds.filter(|c| c.quads > 0);
     }
 
-    /// Translucent terrain, then the entity parts drawn after deferred.
+    /// Beacon beams (before water depth writes), translucent terrain, then the remaining late
+    /// entity parts.
     fn draw_translucent(
         &mut self,
         device: &wgpu::Device,
@@ -4663,15 +4778,26 @@ impl PackPost {
         size: [u32; 2],
         terrain: &mut TerrainDraw<'_>,
     ) {
-        self.draw_terrain(
-            device,
-            queue,
-            encoder,
-            size,
-            TerrainList::Translucent,
-            terrain,
-        );
-        self.draw_entities(device, queue, encoder, size, true);
+        for step in TRANSLUCENT_STEPS {
+            match step {
+                TranslucentStep::PreWaterEntities => {
+                    self.draw_entities(device, queue, encoder, size, EntityPhase::PreWater);
+                }
+                TranslucentStep::WaterTerrain => {
+                    self.draw_terrain(
+                        device,
+                        queue,
+                        encoder,
+                        size,
+                        TerrainList::Translucent,
+                        terrain,
+                    );
+                }
+                TranslucentStep::LateEntities => {
+                    self.draw_entities(device, queue, encoder, size, EntityPhase::Late);
+                }
+            }
+        }
         self.draw_hand_water(device, queue, encoder, size);
         self.draw_weather(device, queue, encoder, size);
     }
@@ -4812,27 +4938,6 @@ impl PackPost {
         }
     }
 
-    /// What the shadow camera draws of the terrain this frame, when the pack draws it.
-    pub fn shadow_view(&self, frame: &super::Frame) -> Option<ShadowView> {
-        if !self.has_shadow() {
-            return None;
-        }
-        let shadow = &self.uniforms.shadow;
-        Some(ShadowView {
-            cull: pack_uniforms::shadow_culling(frame, shadow),
-            light: pack_uniforms::shadow_light(frame, shadow),
-            distance: (shadow.render_mul > 0.0).then_some(shadow.distance * shadow.render_mul),
-            unculled: match self.shadow_culling {
-                horizon_shaders::ShadowCulling::On => None,
-                horizon_shaders::ShadowCulling::Off => Some(f32::INFINITY),
-                horizon_shaders::ShadowCulling::Reversed => Some(shadow.voxel_distance),
-            },
-            every_face: true,
-            view_casters: true,
-            depth_planes: false,
-        })
-    }
-
     /// Whether the buffers `pass` writes have different sizes at the current render size: then
     /// it is skipped, as one whose `size.buffer` sizes never meet is when the pack loads. Only
     /// a pass writing buffers sized relative to the render size and in pixels can.
@@ -4850,7 +4955,7 @@ impl PackPost {
         self.terrain.is_some() || self.terrain_cutout.is_some() || self.terrain_undrawn
     }
 
-    /// Whether the pack's shadow pass draws terrain (`shadow_view`).
+    /// Whether the pack's shadow pass draws terrain.
     pub fn has_shadow(&self) -> bool {
         self.shadow_targets.is_some()
             && (self.shadow_terrain.is_some() || self.shadow_water.is_some())
@@ -4883,6 +4988,42 @@ impl PackPost {
         self.passes.iter().map(|p| p.name.as_str()).collect()
     }
 
+    /// Whether a running pass can read resource-pack companion maps. Resolve this after
+    /// pipeline fallback and texture overrides, independently of whether maps exist yet.
+    pub fn needs_material_maps(&self) -> bool {
+        let entities = self
+            .entities
+            .iter()
+            .flat_map(|e| e.passes.iter().chain(&e.shadow).flatten());
+        self.passes
+            .iter()
+            .chain(
+                [
+                    &self.terrain,
+                    &self.terrain_cutout,
+                    &self.water,
+                    &self.clouds,
+                    &self.lines,
+                    &self.hand_water,
+                    &self.shadow_terrain,
+                    &self.shadow_water,
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .chain(entities)
+            .chain(self.weather.iter().flatten())
+            .chain(self.hand.iter().map(|h| &h.0))
+            .chain(&self.shadow_comp)
+            .any(|pass| {
+                (pass.material_maps || pass.paged)
+                    && pass
+                        .samplers
+                        .iter()
+                        .any(|s| matches!(s.source, Source::Normals | Source::Specular))
+            })
+    }
+
     /// Drops every pass's cached bind groups, compute stages included: they name views that
     /// were made again.
     fn forget_groups(&mut self) {
@@ -4912,198 +5053,11 @@ impl PackPost {
             .chain(&mut self.shadow_comp);
         for pass in passes {
             pass.groups.clear();
+            pass.portal_groups.clear();
             for c in &mut pass.compute {
                 c.groups.clear();
+                c.portal_groups.clear();
             }
-        }
-    }
-
-    fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
-        if pack_images::resize_images(device, &mut self.images, size) {
-            self.forget_groups();
-        }
-        self.buffers.resize(device, size);
-        if self.targets.as_ref().is_some_and(|t| t.size == size) {
-            return;
-        }
-        self.setup_pending = true;
-        self.rgb_unset = true;
-        // Free the old targets before making the new ones: a pack with large buffers can't
-        // hold both sets at once on a card it otherwise fits (a window resize ran out of video
-        // memory). The bind groups hold the old views too, and the GPU may still be using
-        // them, so wait for it; a resize is rare.
-        if self.targets.take().is_some() {
-            self.forget_groups();
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        }
-        let sizes: [[u32; 2]; BUFFERS] =
-            std::array::from_fn(|i| self.sizes[i].map_or(size, |s| s.resolve(size)));
-        let full_chain = |size: [u32; 2]| 32 - size[0].max(size[1]).max(1).leading_zeros();
-        let texture_sized = |label: &str, format, usage, levels, size: [u32; 2]| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width: size[0],
-                    height: size[1],
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: levels,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: usage | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-        };
-        let texture = |label: &str, format, usage| texture_sized(label, format, usage, 1, size);
-        let level = |t: &wgpu::Texture, level: u32| {
-            t.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: level,
-                mip_level_count: Some(1),
-                ..Default::default()
-            })
-        };
-        let mut mips: [Option<[Mips; 2]>; BUFFERS] = Default::default();
-        let color = std::array::from_fn(|i| {
-            (self.used & 1 << i != 0).then(|| {
-                let label = format!("colortex{i}");
-                let mipped = self.mipped & 1 << i != 0;
-                let levels = if mipped { full_chain(sizes[i]) } else { 1 };
-                let mut attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
-                if self.storage & 1 << i != 0 {
-                    attachment |= wgpu::TextureUsages::STORAGE_BINDING;
-                    // Atomics on a texture need it made for them (Metal ignores them otherwise).
-                    if device.features().contains(wgpu::Features::TEXTURE_ATOMIC)
-                        && matches!(
-                            self.formats[i],
-                            wgpu::TextureFormat::R32Sint | wgpu::TextureFormat::R32Uint
-                        )
-                    {
-                        attachment |= wgpu::TextureUsages::STORAGE_ATOMIC;
-                    }
-                }
-                if self.copied & 1 << i != 0 {
-                    attachment |= wgpu::TextureUsages::COPY_SRC;
-                }
-                // A buffer that isn't cleared starts each frame with B copied back to A.
-                if i != 0 && self.clears[i].is_none() {
-                    attachment |= wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
-                }
-                let side = || texture_sized(&label, self.formats[i], attachment, levels, sizes[i]);
-                let a = side();
-                let sides = [
-                    a.clone(),
-                    if self.doubled & 1 << i != 0 {
-                        side()
-                    } else {
-                        a
-                    },
-                ];
-                if mipped && let Some((_, layout)) = self.down.get(&self.formats[i]) {
-                    mips[i] = Some(sides.each_ref().map(|t| {
-                        Mips {
-                            all: t.create_view(&Default::default()),
-                            levels: (1..levels)
-                                .map(|l| {
-                                    let group =
-                                        device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                            label: Some(&label),
-                                            layout,
-                                            entries: &[
-                                                wgpu::BindGroupEntry {
-                                                    binding: 0,
-                                                    resource: wgpu::BindingResource::TextureView(
-                                                        &level(t, l - 1),
-                                                    ),
-                                                },
-                                                wgpu::BindGroupEntry {
-                                                    binding: 2,
-                                                    resource: wgpu::BindingResource::Sampler(
-                                                        &self.linear,
-                                                    ),
-                                                },
-                                            ],
-                                        });
-                                    (level(t, l), group)
-                                })
-                                .collect(),
-                        }
-                    }));
-                }
-                sides.map(|t| level(&t, 0))
-            })
-        });
-        let depth32 = wgpu::TextureFormat::Depth32Float;
-        let depth_texture = texture(
-            "depthtex0",
-            depth32,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        );
-        let depth1 = self.depth1.then(|| {
-            let t = texture("depthtex1", depth32, wgpu::TextureUsages::COPY_DST);
-            let view = t.create_view(&Default::default());
-            (t, view)
-        });
-        let depth2 = self.depth2.then(|| {
-            let t = texture("depthtex2", depth32, wgpu::TextureUsages::COPY_DST);
-            let view = t.create_view(&Default::default());
-            (t, view)
-        });
-        let water_mask = self.water_mask.then(|| {
-            let t = texture(
-                "Shader pack water patches",
-                depth32,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
-            );
-            let view = t.create_view(&Default::default());
-            (t, view)
-        });
-        self.water_mask_dirty = true;
-        let scratch = std::array::from_fn(|i| {
-            (self.copied & 1 << i != 0).then(|| {
-                // A copy also read as an image before a dispatch.
-                let image = if self.storage & 1 << i != 0 {
-                    wgpu::TextureUsages::STORAGE_BINDING
-                } else {
-                    wgpu::TextureUsages::empty()
-                };
-                texture_sized(
-                    &format!("colortex{i} copy"),
-                    self.formats[i],
-                    wgpu::TextureUsages::COPY_DST | image,
-                    1,
-                    sizes[i],
-                )
-                .create_view(&Default::default())
-            })
-        });
-        let sink = texture(
-            "Shader pack sink",
-            SINK,
-            wgpu::TextureUsages::RENDER_ATTACHMENT,
-        )
-        .create_view(&Default::default());
-        self.targets = Some(Targets {
-            size,
-            sink,
-            sizes,
-            scratch,
-            color,
-            depth: depth_texture.create_view(&Default::default()),
-            depth_texture,
-            depth1,
-            depth2,
-            water_mask,
-            mips,
-        });
-        self.forget_groups();
-        for pass in self.passes.iter().filter(|p| self.sizes_differ(p)) {
-            log::info!(
-                "shader pack: {}: writes buffers of different sizes at {}x{} (size.buffer); skipped",
-                pass.name,
-                size[0],
-                size[1]
-            );
         }
     }
 
@@ -5343,7 +5297,8 @@ impl PackPost {
     }
 
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
-    /// the result onto `screen`.
+    /// the result onto `screen`. `false` where video memory had no room for what the frame
+    /// draws into (`targets.rs`): nothing reached `screen`, and the frame is given up.
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         &mut self,
@@ -5359,8 +5314,10 @@ impl PackPost {
         window: [u32; 2],
         pages: &[TerrainPage],
         terrain: &mut TerrainDraw<'_>,
-    ) {
-        self.resize(device, size);
+    ) -> bool {
+        if !self.fit(device, queue, size, window) {
+            return false;
+        }
         // Last frame's water patches (or a new texture's zeros) out: depth 1 is no patch.
         if self.water_mask_dirty
             && let Some((_, view)) = self.targets.as_ref().and_then(|t| t.water_mask.as_ref())
@@ -5379,35 +5336,7 @@ impl PackPost {
             });
             self.water_mask_dirty = false;
         }
-        // A resolution scale leaves the picture smaller (or larger) than the window: the pack's
-        // `final` draws it at the picture's size, and one copy takes it to the window (#9291).
-        let final_view = if size != window && self.passes.iter().any(|p| p.group == Group::Final) {
-            if self.final_target.as_ref().is_none_or(|t| t.size != size) {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Shader pack final"),
-                    size: wgpu::Extent3d {
-                        width: size[0],
-                        height: size[1],
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: self.screen,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                });
-                self.final_target = Some(FinalTarget {
-                    size,
-                    view: texture.create_view(&Default::default()),
-                });
-            }
-            self.final_target.as_ref().map(|t| t.view.clone())
-        } else {
-            self.final_target = None;
-            None
-        };
+        let final_view = self.final_target.as_ref().map(|t| t.view.clone());
         if let Some((layout, ids, rects)) = &self.block_ids {
             // A page that grew has a new buffer.
             self.page_groups
@@ -5448,7 +5377,7 @@ impl PackPost {
         self.custom.world_frame(inputs.biome_known);
         self.uniforms.eval_custom(&mut self.custom);
         if self.targets.is_none() {
-            return;
+            return false;
         }
         // Images start the frame cleared, before the shadow pass writes them.
         if let Some(dump) = &mut self.dump {
@@ -5462,7 +5391,9 @@ impl PackPost {
             self.gpu.clear,
             &mut self.zeros,
         );
-        let Some(targets) = &self.targets else { return };
+        let Some(targets) = &self.targets else {
+            return false;
+        };
         // Every frame starts on A. A buffer that isn't cleared and ended the last frame on B has B
         // copied back to A, and B keeps what was last written into it: a model that fits Iris 1.11.7's
         // values in probe packs of our own (#9009), not a documented Iris rule. colortex0's A is
@@ -5855,6 +5786,7 @@ impl PackPost {
             rp.set_bind_group(0, &group, &[]);
             rp.draw(0..3, 0..1);
         }
+        true
     }
 }
 
@@ -6391,7 +6323,7 @@ mod tests {
             &[],
             &draws.layout,
             &pack,
-            false,
+            ExtraPipeline::None,
         )
         .unwrap_or_else(|| panic!("the pass builds: {notes:?}"));
         // colortex3 holds (0.75, 0.5, 0.25, 0.5) before the pass.
@@ -6584,6 +6516,256 @@ mod tests {
         assert!(source("watershadow", false, true, true) == Source::ShadowDepth(0, false));
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
+
+    #[test]
+    fn beacon_beam_draws_in_pre_water_phase() {
+        use super::super::pack_entities::{BEAM, ENTITY, PARTICLE_TRANSLUCENT};
+        // Beacon beam is scheduled after deferred (`late == true`), but must draw in `PreWater`
+        // before translucent water writes depth (#20345).
+        assert!(PackPost::entity_in_phase(BEAM, true, EntityPhase::PreWater));
+        assert!(!PackPost::entity_in_phase(BEAM, true, EntityPhase::Late));
+        assert!(!PackPost::entity_in_phase(BEAM, true, EntityPhase::Early));
+        assert!(PackPost::entity_in_phase(ENTITY, false, EntityPhase::Early));
+        assert!(PackPost::entity_in_phase(
+            PARTICLE_TRANSLUCENT,
+            true,
+            EntityPhase::Late
+        ));
+    }
+
+    #[test]
+    fn beacon_beam_pre_water_phase_remains_visible_behind_translucent_water_gpu() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((_adapter, device, queue)) = crate::gfx::test_gpu::optional_device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let wgsl = "
+            struct VsOut {
+                @builtin(position) pos: vec4<f32>,
+                @location(0) color: vec4<f32>,
+            };
+            @vertex fn vs_beam_far(@builtin(vertex_index) i: u32) -> VsOut {
+                let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                return VsOut(vec4(p[i], 0.8, 1.0), vec4(1.0, 1.0, 1.0, 1.0));
+            }
+            @vertex fn vs_water_near(@builtin(vertex_index) i: u32) -> VsOut {
+                let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                return VsOut(vec4(p[i], 0.3, 1.0), vec4(0.0, 0.25, 1.0, 0.5));
+            }
+            @vertex fn vs_glow_near(@builtin(vertex_index) i: u32) -> VsOut {
+                let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                return VsOut(vec4(p[i], 0.3, 1.0), vec4(1.0, 0.0, 0.0, 0.5));
+            }
+            @vertex fn vs_core_near(@builtin(vertex_index) i: u32) -> VsOut {
+                let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                return VsOut(vec4(p[i], 0.3, 1.0), vec4(1.0, 0.0, 0.0, 1.0));
+            }
+            @vertex fn vs_water_far(@builtin(vertex_index) i: u32) -> VsOut {
+                let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                return VsOut(vec4(p[i], 0.8, 1.0), vec4(0.0, 0.0, 1.0, 1.0));
+            }
+            @fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+                return in.color;
+            }
+        ";
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let make_pipeline = |vs: &str, depth_write: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // The beam program's own pipeline writes depth (the core); its `no_depth_write` one
+        // (the glow, `Draw::beam_glow`) does not.
+        let beam_far = make_pipeline("vs_beam_far", true);
+        let water_near = make_pipeline("vs_water_near", true);
+        let core_near = make_pipeline("vs_core_near", true);
+        let glow_near = make_pipeline("vs_glow_near", false);
+        let water_far = make_pipeline("vs_water_far", true);
+
+        let render = |steps: &[TranslucentStep],
+                      beam: &wgpu::RenderPipeline,
+                      water: &wgpu::RenderPipeline| {
+            let color = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let depth = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let color_view = color.create_view(&Default::default());
+            let depth_view = depth.create_view(&Default::default());
+            let mut enc = device.create_command_encoder(&Default::default());
+            {
+                let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                for &step in steps {
+                    match step {
+                        TranslucentStep::PreWaterEntities
+                            if PackPost::entity_in_phase(
+                                super::super::pack_entities::BEAM,
+                                true,
+                                EntityPhase::PreWater,
+                            ) =>
+                        {
+                            rp.set_pipeline(beam);
+                            rp.draw(0..3, 0..1);
+                        }
+                        TranslucentStep::LateEntities
+                            if PackPost::entity_in_phase(
+                                super::super::pack_entities::BEAM,
+                                true,
+                                EntityPhase::Late,
+                            ) =>
+                        {
+                            rp.set_pipeline(beam);
+                            rp.draw(0..3, 0..1);
+                        }
+                        TranslucentStep::WaterTerrain => {
+                            rp.set_pipeline(water);
+                            rp.draw(0..3, 0..1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            enc.copy_texture_to_buffer(
+                color.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([enc.finish()]);
+            let slice = readback.slice(..4);
+            slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let data = slice.get_mapped_range().unwrap();
+            [data[0], data[1], data[2], data[3]]
+        };
+
+        // Pre-fix order (water before beam): water depth (0.3) occludes beam (0.8), leaving R == 0.
+        let post_water = render(
+            &[
+                TranslucentStep::WaterTerrain,
+                TranslucentStep::PreWaterEntities,
+            ],
+            &beam_far,
+            &water_near,
+        );
+        assert_eq!(post_water[0], 0);
+        // Production scheduling (`TRANSLUCENT_STEPS` + `entity_in_phase`): underwater beam is visible.
+        let pre_water = render(&TRANSLUCENT_STEPS, &beam_far, &water_near);
+        assert!(
+            pre_water[0] >= 120,
+            "expected underwater beam red channel, got {pre_water:?}"
+        );
+        // Farther water (`z = 0.8`) behind the opaque core (`z = 0.3`) stays hidden: the core
+        // keeps its depth, as `RenderTypes.beaconBeam(false)` does.
+        let behind_core = render(&TRANSLUCENT_STEPS, &core_near, &water_far);
+        assert_eq!(
+            behind_core,
+            [255, 0, 0, 255],
+            "water behind the beam's core"
+        );
+        // Behind the glow it still shows: the glow writes no depth (`beaconBeam(true)`).
+        let behind_glow = render(&TRANSLUCENT_STEPS, &glow_near, &water_far);
+        assert!(
+            behind_glow[2] >= 250,
+            "expected farther water blue channel behind the glow, got {behind_glow:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6592,6 +6774,9 @@ mod destination_tests;
 #[cfg(test)]
 #[path = "pack_material_tests.rs"]
 mod material_tests;
+
+#[cfg(test)]
+mod material_demand_tests;
 
 #[cfg(test)]
 #[path = "pack_paged_maps_tests.rs"]
@@ -6636,3 +6821,6 @@ mod sky_visibility_tests;
 
 #[cfg(test)]
 mod material_route_tests;
+
+#[cfg(test)]
+mod no_room_tests;

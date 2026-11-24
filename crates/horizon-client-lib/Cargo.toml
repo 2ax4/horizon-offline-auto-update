@@ -60,7 +60,9 @@ horizon-shader-api = { path = "../horizon-shader-api" }
 horizon-narrator = { path = "../horizon-narrator" }
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/modding/src/how-to/content-mods.md).
 # Their runtime is the `mods` feature.
-horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index", "junction"] }
+# Keep `horizon-mod-package` features aligned with `horizon-client` so alternating client and
+# client-lib builds/tests unify the same dependency set and reuse compiled artifacts.
+horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index", "junction", "runtime-process"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"
@@ -103,7 +105,7 @@ fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`HORIZON_SPIKES`, spans.rs).
-rustix = { version = "1", default-features = false, features = ["std", "time", "process", "fs"] }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "time", "process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
@@ -219,6 +221,10 @@ path = "../horizon-client/examples/resource_memory.rs"
 [[example]]
 name = "save_batch_bench"
 path = "../horizon-client/examples/save_batch_bench.rs"
+
+[[example]]
+name = "save_codec_bench"
+path = "../horizon-client/examples/save_codec_bench.rs"
 
 [[example]]
 name = "shared_json_startup_profile"

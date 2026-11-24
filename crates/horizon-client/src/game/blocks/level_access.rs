@@ -195,6 +195,12 @@ impl LevelAccess for GameLevel<'_> {
         self.native_block_grow_feature(self.dimension, pos, &mut feature, &mut cancel);
         feature.filter(|_| !cancel).map(std::borrow::Cow::Owned)
     }
+    fn structure_grow(&self, source: BlockPos, placed: &[[i32; 3]]) {
+        if self.native_authoritative && mod_api::__private::listened(mod_api::HookId::StructureGrow)
+        {
+            self.native_structure_grow(self.dimension, source, placed);
+        }
+    }
     fn crop_grow_pre(&mut self, pos: BlockPos, state: BlockStateId, vanilla: bool) -> bool {
         if !self.native_authoritative || !mod_api::__private::listened(mod_api::HookId::CropGrowPre)
         {
@@ -1134,8 +1140,10 @@ impl LevelAccess for GameLevel<'_> {
         };
         let name = &block.name;
         let tag = Tag::Compound(nbt);
-        if let Some((key, entity)) = horizon_client::save::decode_block_entity_for_block(&tag, name)
+        if let Some((key, mut entity)) =
+            horizon_client::save::decode_block_entity_for_block(&tag, name)
         {
+            entity.clean_stacks(&self.items.component_defaults);
             self.world.block_entities.insert(key, entity);
             if tag.get("LootTable").is_some() {
                 self.emit(LevelEvent::ContainerLootTable { pos, tag });

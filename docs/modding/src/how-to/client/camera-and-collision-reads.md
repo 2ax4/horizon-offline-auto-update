@@ -75,6 +75,18 @@ world, its culling, the billboards facing the camera and `Camera.view` follow it
 first-person hand and the HUD stay level. It is a hook of its own rather than a field of
 `CameraPoseEvent` so that wasm mods built before it keep loading.
 
+## Hurt feedback
+
+Use `hurt_camera` to change vanilla's camera reaction itself. Multiply the event's `strength` to scale
+the Damage Tilt setting, or set `hurt_dir` to `0.0` for a straight roll. Cancel the event to skip the
+damage tilt and death twist for both the world and the first-person hand. The callback does not
+change damage, walking bob, or additive `camera_shake`.
+
+`heart_blink` changes the blink argument of the vanilla heart draw without replacing the health
+layout or changing its history. From a writable client callback, `host.show_action_bar(text)` shows
+a styled `Text` above this client's hotbar. It works on servers without operator access and does
+not send a packet.
+
 ## Viewed levels
 
 A server can open other levels for a client to view besides the one the player is in (`horizon:levels`,
@@ -95,6 +107,24 @@ levels too, but keeps the client level, so the old handle reads again after the 
 server-only reads, the other level reads and the entity reads (`entities_in`) refuse a viewed level.
 Native and wasm mods use the same handle methods.
 
+## Loaded map reads
+
+Use `client_surface_columns(&columns, heightmap)` to paint loaded terrain. It returns one
+entry per input `(x, z)`, in order: the same first-free Y as `client_surface_heights`, plus the
+complete block state, unblended biome name, and sky and block light at the surface (`height - 1`).
+For an empty column the state is air and biome and light are sampled at the build floor.
+Unloaded columns are `None`; no client world or more than 65,536 columns is `Err` without
+reading any column.
+
+Poll `level_chunk_deltas(level, None)` with the client's current `host.level(dimension)` to
+get the loaded chunk keys. Pass the returned `cursor` back on the next poll, including in
+singleplayer. If `full` is true, replace the old roster: redraw every returned chunk, since its
+blocks may have changed while the history was missed, and drop tiles for keys not in it. Otherwise
+redraw keys marked `loaded` and remove those marked not loaded. The keys are unique and sorted by
+chunk x and z. Reacquire the level handle when the client switches dimensions or reconnects (a
+handle from an earlier connection returns `None`, even for the same dimension); missed history
+automatically returns a full snapshot. Neither call loads chunks.
+
 ## Far terrain reads
 
 A map drawing past the loaded chunks reads the far terrain the player already sees there:
@@ -108,8 +138,15 @@ from the server.
 A column no tile covers yet is `None`, and every column is `None` while far terrain is off
 (LOD Distance 0) or not started. The tiles follow the camera, so a column can go back to `None`
 after the player moves away: keep what you read. Inside the loaded chunks read them instead
-(`client_surface_heights`), since a far tile can lag an edit. No client world, or more than
+(`client_surface_columns`), since a far tile can lag an edit. No client world, or more than
 65,536 columns in one call, is `Err` and reads nothing.
+
+`client_lod_columns(&[(tile_x, tile_z, level)])` reads the exact retained CPU tiles, without
+substituting another level. Each ready tile returns its cell width and 256 cells in
+`z * 16 + x` order. A cell holds the top drawn material run, its half-open Y range, biome and
+retained light, or `None` when empty. This also covers detailed runs without ground-picking
+surface metadata. A missing tile is `None`, not 256 empty cells. A call can request at most
+256 tiles and never schedules terrain or reads anything new from the server.
 
 ## Crosshair reads
 
@@ -152,6 +189,13 @@ These read the local player as the client sees it. They take no mod-controlled n
   team name, name) and stop at the 80 it draws. Header and footer are `None` when empty. It is what
   this client has been sent and changes as the server updates the list; `None` outside a world.
   There is no NeoForge call for this: it is Horizon's own read.
+- `ClientHost::client_session().client_waypoints()` is the locator bar's tracked waypoints:
+  `ClientWaypoints { entries }`. Each `ClientWaypointEntry` has the waypoint's `id` (`Uuid` for
+  a player's waypoint, `Name` for a named one), its `target` (`Block`, `Chunk`, `Azimuth` or
+  `Empty`), the icon `style` (`waypoint_style` asset id) and the icon `color` as `0xRRGGBB`
+  (`None` when the server sent none — the bar then colours the dot from the waypoint's id).
+  Entries come in the order the server sent them. It is what this client has been sent and
+  changes as the server tracks and untracks waypoints; `None` outside a world.
 - `ClientHost::local_item_use()` is the item in use: `ItemUse { hand, ticks_used, ticks_remaining }`
   (`isUsingItem`, `getUsedItemHand`, `getTicksUsingItem`, `getUseItemRemainingTicks`).
   `ticks_used + ticks_remaining` is the use duration. It is `None` when no item is in use or no world

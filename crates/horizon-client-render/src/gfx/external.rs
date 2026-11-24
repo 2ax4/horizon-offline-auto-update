@@ -4,8 +4,8 @@
 //! (`Renderer::set_external_pipeline`), each point is one `Option` test.
 //!
 //! Workspace-internal: the trait names the engine's frame, its mesh format and its pass order,
-//! has one implementer in this workspace, carries no stability promise and is never exposed to
-//! mods. A mesher or pass change updates its implementer in the same PR. HDR output
+//! carries no stability promise and is never exposed to mods. A mesher or pass change
+//! updates its implementers in the same PR. HDR output
 //! (`output.rs`, `frame_policy`) is not an implementer: it stays the one output stage after the
 //! frame, and a pipeline draws into the frame it gives.
 //!
@@ -133,7 +133,11 @@ pub trait ExternalPipeline: Send + std::any::Any {
     /// Its grid of the solid terrain near the camera, drawn by `layers`' displaced layer, in a
     /// terrain pass with the engine's group 0 bound.
     fn draw_displaced(&self, _pass: &mut wgpu::RenderPass<'_>, _layers: TerrainLayers<'_>) {}
-    /// Where the world pass stops before translucent terrain, for layers that read it.
+    /// Whether the pipeline reads a copy of the world before translucent terrain.
+    fn reads_opaque(&self) -> bool {
+        false
+    }
+    /// Where the world pass stops before translucent terrain, for stages that read it.
     fn copy_opaque(&self, _copy: OpaqueCopy<'_>) {}
     /// Its rain and snow. False when it has none, for the engine's own.
     fn draw_weather(
@@ -177,6 +181,8 @@ pub struct Capabilities {
     pub displacement: bool,
     /// Its terrain draws with layers of its own.
     pub material: bool,
+    /// It draws its own sky in place of the engine's Overworld sky.
+    pub replaces_sky: bool,
     /// Its sky leaves out vanilla's clouds, sun, moon or stars.
     pub hides_clouds: bool,
     pub hides_sun: bool,
@@ -202,6 +208,10 @@ pub struct Capabilities {
     /// Besides `engine_resolve`, TAA upscales its world and sharpens it as without a pack: its
     /// `[tonemap]`, if it has one, never reads `previous`, which is then larger than the world.
     pub engine_upscale: bool,
+    /// Without `engine_resolve`, the renderer still moves the world's projection by TAA's
+    /// sub-pixel offset every frame and says it in `frame.jitter` (`[frame] jitter`), for the
+    /// pack's own temporal pass; it doesn't resolve, upscale or keep a history for it.
+    pub jitter: bool,
 }
 
 /// What the renderer hands the pack's post stage (`ExternalPipeline::run_post`).
@@ -340,6 +350,10 @@ pub struct TerrainLayers<'a> {
     pub displaced: Option<&'a wgpu::RenderPipeline>,
     /// The solid layers for 4x MSAA (instanced, then flat draws), when the pack's material got them.
     pub msaa: Option<&'a (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
+    /// The solid layers' depth pre-pass (instanced, then flat draws), and 4x MSAA's, where they
+    /// have one: drawn over the same draws before each solid layer, which then tests depth
+    /// equal to it and doesn't write it.
+    pub depth: Option<SolidDepth<'a>>,
     /// The solid layers' second target, which they write beside the world's colour.
     pub surface: Option<&'a wgpu::TextureView>,
     /// The layers read the world before translucent terrain: the renderer stops there for
@@ -347,6 +361,14 @@ pub struct TerrainLayers<'a> {
     pub reads_opaque: bool,
     /// What the layers read beside the terrain's groups (`bind`).
     pub frame: &'a wgpu::BindGroup,
+}
+
+/// `TerrainLayers::depth`.
+#[derive(Clone, Copy)]
+pub struct SolidDepth<'a> {
+    pub solid: &'a wgpu::RenderPipeline,
+    pub flat: Option<&'a wgpu::RenderPipeline>,
+    pub msaa: Option<&'a (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
 }
 
 impl TerrainLayers<'_> {
@@ -388,6 +410,9 @@ pub struct EntityLayers<'a> {
     /// Their group 3: the pack's frame, with this frame's version of the kept resources the
     /// stage reads where it reads any.
     pub frame: &'a wgpu::BindGroup,
+    /// `[entity] surface = true`: the surface target both pipelines write beside the colour,
+    /// the one the material stage's solid terrain writes.
+    pub surface: Option<&'a wgpu::TextureView>,
 }
 
 /// A section the grid may draw from this frame: its arena page, the base vertex of its solid

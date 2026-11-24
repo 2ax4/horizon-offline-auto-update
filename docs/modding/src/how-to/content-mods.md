@@ -170,7 +170,7 @@ with no `side` line is `client`, so a mod meant for both halves must say `side =
 only the server needs: it installs and runs like any mod (in single player and on a LAN host it runs in the integrated
 server), but it is never compared at join, so players joining need not have it. A server mod is refused by name at
 load when it carries what every joining client must know: registry declarations (`data/<id>/horizon/`, or blocks,
-items, block entity types and fluids its code declares), a listener on a client-side hook, a part that listens to one,
+items, block entity types, fluids and vanilla block shapes its code declares), a listener on a client-side hook, a part that listens to one,
 or a required payload the server sends to clients. Assets, lang and data vanilla syncs itself (recipes, loot, tags)
 are allowed. Where a hook runs is still the hook's own side: the manifest says what a client must have, not where a
 hook runs. A vanilla or other
@@ -207,12 +207,37 @@ A block gets a block item of its own id by default. `"item": false` gives it non
 `Block.asItem` is air (what a block drops comes from its loot table). `"block_item": "<item id>"` (with `"item": false`) makes the block
 that other item instead, an item of the mod or a vanilla one, such as `"minecraft:diamond"`: pick-block and
 `Block.asItem` both read it, and the load fails naming the block when no such item exists. `"none"` is not an item id;
-write `"item": false`. A sign's wall form takes its sign's item through `wall_block`, not `block_item`.
+write `"item": false`.
 
 Pick-block takes the block's item by default. `"pick_item": "<item id>"` names a different one, with any `item` and
 `block_item`: vanilla's `getCloneItemStack`, which lets a mature crop pick its seed while `Block.asItem` stays what it
 is (air for `"item": false`). It is an item of the mod or a vanilla one, and the load fails naming the block when no
-such item exists. A sign's wall form picks its sign's item through `wall_block`, so it declares no `pick_item`.
+such item exists.
+
+#### Floor, wall and ceiling forms
+
+A block with its own item can name a separate wall form, regardless of its template:
+
+```json
+{ "template": "minecraft:torch", "wall_block": "ruby:sconce_wall" }
+```
+
+```json
+{ "template": "minecraft:wall_torch", "item": false }
+```
+
+`wall_block` is the full ID of a distinct block owned by the same mod. It must have
+`"item": false`, no `block_item` or `pick_item`, and cannot be paired with another item
+or name its own wall form. Both forms share the primary block's item for `Block.asItem`
+and the wall form's pick-block; give each form its own loot table as needed.
+
+With `wall_block`, `"attachment_direction": "down"` (the default for non-signs) tries
+the primary form against a floor; `"up"` tries it against a ceiling instead. Horizontal
+directions try the wall form, in the normal placement order. Pairing does not change
+either block's support rules: choose suitable templates and, in native mods, give
+each block its own `state_for_placement` hook to set its properties. Neither hook
+can return a state of the other block. A dispenser ordinarily drops the item, just
+like a vanilla torch; pairing doesn't register dispenser placement.
 
 `push_reaction` sets vanilla's `BlockBehaviour.Properties.pushReaction` to `"PUSH_PULL"`, `"PUSH"`, `"POPPED"`, `"IMMOVEABLE"`, or `"IGNORE_ENTITY"`.
 
@@ -276,6 +301,12 @@ takes one value per declared property too, so a block's default is exactly one
 state of its own. Every combination has to fit in the states a world holds
 (2^20), so a declaration that would not is refused when the mods load.
 
+A `minecraft:simple_block` worldgen feature uses the template's placement rules.
+For example, a block based on `minecraft:sunflower` gets its own lower and upper
+halves when the feature names its lower half. The `minecraft:pale_moss_carpet`
+template follows vanilla's carpet placement routine, which writes vanilla pale
+moss carpet rather than the candidate block.
+
 A block with template `minecraft:farmland` may set `"base_block": "namespace:block"` to choose the block it becomes when it dries out, is trampled, or has a solid block placed above it. The ID must name a registered block; without the key, the template's dirt base is used.
 
 A block whose template is one of vanilla's signs is a sign, whatever its name: it has vanilla's sign block
@@ -293,8 +324,9 @@ one with the item names its wall form:
 
 The same goes for `minecraft:oak_hanging_sign` and `minecraft:oak_wall_hanging_sign`. `wall_block` is what the
 sign's item places on a wall, a block of the same mod, declared in its files when the sign is; without it the
-item places the template's wall sign. The wall form has no item of its own, and its sign's item is what picking
-it gives. `wood_type` names the editor's background:
+item places the template's wall sign. Signs still require their matching wall template
+and direction (`"down"` for standing signs, `"up"` for hanging signs).
+`wood_type` names the editor's background:
 `ruby:elm` is `assets/ruby/textures/gui/signs/elm.png` (24x26) and `assets/ruby/textures/gui/hanging_signs/elm.png`
 (16x16), and a bare name is vanilla's, such as `cherry`; without it the template's wood is used. The board is
 the block's model: `minecraft:block/template_sign_rot_0` to `_rot_3` and `template_wall_sign`, and for hanging
@@ -392,6 +424,41 @@ and overlap checks carry `item`, player movement and placement carry `player`,
 and player selection uses its own outline channel. Callers without a captured
 entity class retain ordinary shapes. These declarations select state/class-only
 geometry, not arbitrary world-dependent block behavior or native callbacks.
+
+### Entity-context shapes for vanilla blocks
+
+A mod gives vanilla blocks an outline or a collision of their own for one entity class, as a mod
+block's `outline_context_shapes` and `collision_context_shapes` do, in
+`data/<id>/horizon/vanilla_block_shapes/<name>.json`. Players stand on fences, walls and closed
+gates cut at one block, while mobs stay penned:
+
+```json
+{
+  "blocks": ["minecraft:oak_fence", "minecraft:cobblestone_wall", "minecraft:oak_fence_gate"],
+  "collision_context_shapes": {
+    "player": { "clip": [0, 0, 0, 1, 1, 1] }
+  }
+}
+```
+
+`blocks` names `minecraft:` blocks, each once. `outline_context_shapes` and
+`collision_context_shapes` take the same `item`, `player`, `living` and `other` keys; an omitted
+class keeps vanilla's shape, and empty and position-only queries always do. Each value is one of:
+
+- `{"clip": [minX,minY,minZ,maxX,maxY,maxZ]}`: every state's own vanilla shape of that channel
+  (its collision, or its outline), intersected with the box. A fence's arms and posts are clipped
+  for each of its connections, without the mod spelling them out. A block whose vanilla collision
+  depends on more than its state (powder snow, scaffolding) cannot be clipped:
+  the content is refused, naming the block.
+- a shape table, as `shapes` takes it, selected by the block's own vanilla state properties.
+
+Code mods, native and wasm, declare the same records through the `vanilla_block_shapes` hook,
+pushing `mod_api::VanillaBlockShapes` with `VanillaShape::Clip` or `VanillaShape::Table` values.
+The tables compile once per resource load into the collision table, beside the cached vanilla
+shapes, and take the same entity-class paths as a mod block's. When two mods declare the same
+block, class and channel, the mod whose id sorts first keeps it; the other's declaration of that
+block, class and channel is left out with a warning naming both. A mod with these declarations is
+needed on both sides: `side = "server"` refuses it, like a mod that declares blocks.
 
 An item copies its template's data components, with `max_stack_size` and
 `rarity` changed, and any other 26.3 component set or removed in
@@ -866,6 +933,14 @@ in_enchanting_table.json` and the others), which a mod adds to as any tag. A wor
 enchantment of the same id. What an enchantment does beyond vanilla's effect components is the mod's code: a native
 hook reads the held stack's enchantments, or claims a `post_attack` effect of its own kind
 ([enchantment effect kinds](items/enchantment-effect-kinds.md)).
+
+Armor trims use vanilla's `data/<namespace>/trim_material/<name>.json` and
+`data/<namespace>/trim_pattern/<name>.json`. World data packs can replace those entries
+on the server, which sends their registry IDs when players join. For rendering, install
+the content mod on the client too. Its `palette_id` names a PNG in `textures/palettes/`
+and its `asset_id` names a pattern in `textures/trims/entity/<equipment-layer>/`. To
+color an item icon, add a `paletted_permutations` source to `assets/minecraft/atlases/items.json`
+and a `minecraft:trim_material` select case for the full material ID in the armor's item definition.
 
 A mod adds to structure sets, template pools and processor lists that are not its own (vanilla's villages, another
 mod's houses) with a set, pool or processor list file in its own namespace holding `horizon:add_to`, a key vanilla data

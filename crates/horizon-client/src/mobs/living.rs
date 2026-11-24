@@ -72,7 +72,8 @@ fn landing_dust_at(position: Vec3, landing: [i32; 3]) -> Vec3 {
     )
 }
 
-/// `Entity.moveDist`, `flyDist`, `nextStep` and `Parrot.nextFlap`.
+/// `Entity.moveDist`, `flyDist`, `nextStep`, `Parrot.nextFlap` and the
+/// amethyst step chime's swell.
 #[derive(Clone, Copy, Debug)]
 pub struct Steps {
     pub move_dist: f32,
@@ -81,6 +82,10 @@ pub struct Steps {
     pub next_flap: f32,
     /// `AbstractHorse.gallopSoundCounter`.
     pub gallop: i32,
+    /// `Entity.crystalSoundIntensity`: the chime swells by 0.07 a step, up to 1.
+    pub crystal_sound_intensity: f32,
+    /// `Entity.lastCrystalSoundPlayTick`: the tick the last chime rang on.
+    pub last_crystal_sound_play_tick: i32,
 }
 impl Default for Steps {
     fn default() -> Self {
@@ -90,6 +95,8 @@ impl Default for Steps {
             next_step: 1.0,
             next_flap: 1.0,
             gallop: 0,
+            crystal_sound_intensity: 0.0,
+            last_crystal_sound_play_tick: 0,
         }
     }
 }
@@ -901,12 +908,16 @@ impl Mob {
     /// top of.
     pub fn apply_effects_from_blocks(&mut self, w: &MobWorld, events: &mut Vec<MobEvent>) {
         let mut tops = Vec::new();
+        // Entity.applyEffectsFromBlocks walks the recorded move, so a mob
+        // leaving a column sideways this tick still gets its last lift. The
+        // final box alone misses columns the start of the move touched.
+        let swept = self.bounds_at(self.previous).union_bounds(self.bounds());
         if crate::motion::bubble_column_push_over(
             w.world,
             w.registry,
             w.facts,
             w.collision,
-            self.bounds(),
+            swept,
             &mut self.velocity,
             |pos| tops.push(pos),
         ) {
@@ -1096,6 +1107,11 @@ impl Mob {
                         std::borrow::Cow::Owned(name) => MobEvent::SoundId(name, at, volume, pitch),
                     });
                 }
+                // Entity.walkingStepSound: the amethyst chime after the
+                // footfall, by the effect block's state.
+                if heard {
+                    self.amethyst_step_chime(w, legacy_state, events);
+                }
                 // Entity.vibrationAndSoundEffectsFromBlock: the step's game
                 // event, with the supporting block's state when the effect
                 // block is another.
@@ -1157,6 +1173,41 @@ impl Mob {
                 });
             }
         }
+    }
+    /// `Entity.playAmethystStepSound`: a step on
+    /// `#minecraft:crystal_sound_blocks` rings the chime at most once every 20
+    /// ticks, swelling by 0.07 a step and pitched by the mob's own random. A
+    /// silent mob rings nothing but still swells and draws.
+    fn amethyst_step_chime(
+        &mut self,
+        w: &MobWorld,
+        state: BlockStateId,
+        events: &mut Vec<MobEvent>,
+    ) {
+        let tick = self.age as i32;
+        let last = self.ai.steps.last_crystal_sound_play_tick;
+        if !w.has_tag("minecraft:crystal_sound_blocks", &w.facts.get(state).name)
+            || tick < last + 20
+        {
+            return;
+        }
+        let decayed = self.ai.steps.crystal_sound_intensity
+            * horizon_core::jmath::pow(0.997, f64::from(tick - last)) as f32;
+        let intensity = 1.0_f32.min(decayed + 0.07);
+        self.ai.steps.crystal_sound_intensity = intensity;
+        let pitch = 0.5 + intensity * self.random.next_float() * 1.2;
+        let volume = 0.1 + intensity * 1.2;
+        if !self.silent {
+            let at = [self.position.x, self.position.y, self.position.z];
+            events.push(MobEvent::SourcedSound(
+                "block.amethyst_block.chime",
+                self.sound_source(),
+                at,
+                volume,
+                pitch,
+            ));
+        }
+        self.ai.steps.last_crystal_sound_play_tick = tick;
     }
     /// `Entity.nextStep`: the next whole metre walked; a warden's steps come
     /// every 0.55, a strider's every 0.6, a turtle's every 0.15.
@@ -1364,9 +1415,12 @@ impl Mob {
         }
         // AbstractHorse.causeFallDamage (llamas override it): a landing of more
         // than a block thuds, and the horse's fall makes no generic fall sound.
+        // A client's copy of a mount it drives lands too, but `ClientLevel`
+        // plays a mob's `playSound` nowhere (its excluded entity is the local
+        // player, not the mob): the server's broadcast is what the rider hears.
         let thud =
             super::equine::is_equine(self.species()) && !super::llama::is_llama(self.species());
-        if thud && distance > 1.0 && !self.silent {
+        if thud && distance > 1.0 && !self.silent && !self.extra.client_side {
             let at = [self.position.x, self.position.y, self.position.z];
             let sound = if self.is_baby() {
                 "entity.baby_horse.land"
@@ -1433,8 +1487,9 @@ impl Mob {
                 (false, true) => "entity.generic.big_fall",
                 (false, false) => "entity.generic.small_fall",
             };
-            // Horses thud and llamas make no generic fall sound.
-            if !horse {
+            // Horses thud and llamas make no generic fall sound; a client's
+            // copy leaves every fall sound to the server's broadcast.
+            if !horse && !self.extra.client_side {
                 events.push(MobEvent::Sound(sound, at, 1.0, 1.0));
                 self.block_fall_sound(contact, events);
             }
@@ -1449,9 +1504,10 @@ impl Mob {
     }
     /// `LivingEntity.playBlockFallSound`: the block 0.2 below the feet plays
     /// its fall sound at half its volume and three quarters of its pitch,
-    /// unless the mob is silent or the block is air.
+    /// unless the mob is silent or the block is air. A client's copy of a
+    /// mount it drives leaves it to the server, as `ClientLevel` does.
     fn block_fall_sound(&self, contact: Option<(&MobWorld, [i32; 3])>, events: &mut Vec<MobEvent>) {
-        if self.silent {
+        if self.silent || self.extra.client_side {
             return;
         }
         if let Some((w, _)) = contact {
@@ -2668,6 +2724,7 @@ mod tests {
                 others_index: None,
                 passenger_objects: &[],
                 others_villagers: None,
+                village: None,
                 species_slots: None,
                 others_solid: None,
                 daylight: true,
@@ -2801,6 +2858,7 @@ mod tests {
                 others_index: None,
                 passenger_objects: &[],
                 others_villagers: None,
+                village: None,
                 species_slots: None,
                 others_solid: None,
                 daylight: true,
@@ -2935,6 +2993,7 @@ mod tests {
             others_index: None,
             passenger_objects: &[],
             others_villagers: None,
+            village: None,
             species_slots: None,
             others_solid: None,
             daylight: true,
@@ -3078,6 +3137,7 @@ mod tests {
                 others_index: None,
                 passenger_objects: &[],
                 others_villagers: None,
+                village: None,
                 species_slots: None,
                 others_solid: None,
                 daylight: true,
@@ -3853,8 +3913,17 @@ pub mod teleports;
 mod farmland_event_tests;
 
 #[cfg(test)]
+#[path = "living_amethyst_tests.rs"]
+mod amethyst_tests;
+#[cfg(test)]
+#[path = "climbable_player_push_tests.rs"]
+mod climbable_player_push_tests;
+#[cfg(test)]
 #[path = "living_climbable_tests.rs"]
 mod climbable_tests;
+#[cfg(test)]
+#[path = "horse_fall_sound_tests.rs"]
+mod horse_fall_sound_tests;
 #[cfg(test)]
 #[path = "ice_friction_tests.rs"]
 mod ice_friction_tests;

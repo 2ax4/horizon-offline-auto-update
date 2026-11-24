@@ -84,6 +84,9 @@ pub fn crate_mappings() -> &'static [&'static [(&'static str, &'static str, &'st
 pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
     // The emote wheel (docs/cosmetics.md), on a key vanilla leaves free.
     ("key.emote", "key.keyboard.b", "multiplayer"),
+    // Fullbright (`extras.fullbright`), unbound until a player picks a key: vanilla has only the
+    // gamma slider.
+    ("key.fullbright", "key.keyboard.unknown", "misc"),
 ];
 /// Active non-vanilla mappings: registered crate mappings, falling back to HORIZON_MAPPINGS if empty.
 fn non_vanilla_mappings()
@@ -382,14 +385,20 @@ pub fn layout_key_name(
 /// doesn't identify; 0 when there is neither. Stable within a platform only.
 pub fn raw_key_code(physical: winit::keyboard::PhysicalKey) -> u32 {
     use winit::keyboard::{NativeKeyCode, PhysicalKey};
-    use winit::platform::scancode::PhysicalKeyExtScancode;
     match physical {
         PhysicalKey::Unidentified(native) => match native {
             NativeKeyCode::Android(c) | NativeKeyCode::Xkb(c) => c,
             NativeKeyCode::MacOS(c) | NativeKeyCode::Windows(c) => c.into(),
             NativeKeyCode::Unidentified => 0,
         },
-        PhysicalKey::Code(_) => physical.to_scancode().unwrap_or(0),
+        #[cfg(not(target_os = "android"))]
+        PhysicalKey::Code(_) => {
+            use winit::platform::scancode::PhysicalKeyExtScancode;
+            physical.to_scancode().unwrap_or(0)
+        }
+        // Android does not expose winit's platform scancode extension.
+        #[cfg(target_os = "android")]
+        PhysicalKey::Code(_) => 0,
     }
 }
 
@@ -762,8 +771,12 @@ mod tests {
     fn horizon_saved_falls_back_when_no_crates_registered() {
         let mut keys = KeyBinds::default();
         let saved = keys.horizon_saved();
-        assert_eq!(saved.len(), 1);
+        assert_eq!(saved.len(), 2);
         assert_eq!(saved[0], ("key.emote", "key.keyboard.b".to_string()));
+        assert_eq!(
+            saved[1],
+            ("key.fullbright", "key.keyboard.unknown".to_string())
+        );
         keys.set("key.emote", "key.keyboard.v");
         let saved_rebound = keys.horizon_saved();
         assert_eq!(
@@ -785,9 +798,11 @@ mod tests {
         assert_eq!(active[1].1, "key.keyboard.x");
         // Verify fallback is empty when registered is provided
         let fallback_only: Vec<_> = active_non_vanilla(&[]).collect();
-        assert_eq!(fallback_only.len(), 1);
+        assert_eq!(fallback_only.len(), 2);
         assert_eq!(fallback_only[0].0, "key.emote");
         assert_eq!(fallback_only[0].1, "key.keyboard.b");
+        assert_eq!(fallback_only[1].0, "key.fullbright");
+        assert_eq!(fallback_only[1].1, "key.keyboard.unknown");
     }
     #[test]
     fn only_a_synced_set_changes_keybind_display() {
@@ -818,5 +833,11 @@ mod tests {
         let a = PhysicalKey::Unidentified(NativeKeyCode::Windows(0x6a));
         let b = PhysicalKey::Unidentified(NativeKeyCode::Windows(0x6b));
         assert_eq!((raw_key_code(a), raw_key_code(b)), (0x6a, 0x6b));
+        assert_eq!(
+            raw_key_code(PhysicalKey::Unidentified(NativeKeyCode::Android(0x2a))),
+            0x2a
+        );
+        #[cfg(target_os = "android")]
+        assert_eq!(raw_key_code(w), 0);
     }
 }

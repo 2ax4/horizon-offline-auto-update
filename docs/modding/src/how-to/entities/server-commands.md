@@ -59,6 +59,7 @@ as vanilla's parser so `~`, `^` and the dimension list complete as in a vanilla 
 | `rotation` | `minecraft:rotation` | `Rotation([f32; 2])`, yaw then pitch |
 | `dimension` | `minecraft:dimension` | `Dimension(LevelRef)` |
 | `nbt` | `minecraft:nbt_compound_tag` | `Nbt(Compound)` |
+| `player_name` | `minecraft:game_profile`, completed from the online players | `String` (the typed name, online or not; a selector is refused) |
 
 `~` and `^` resolve against the command source's position and rotation, as `block_pos` does. A
 `dimension` the world has not loaded is refused with `argument.dimension.invalid` before a
@@ -266,6 +267,13 @@ while `/warp admin` is absent for a non-operator. An operator level change sends
 trees again (`/op`, `/deop`) and the completions follow from then on; a provider
 whose answers depend on its own policy calls `host.commands().refresh_commands()`
 after it changes them.
+
+`Command::op(usage, level).denied_message("text")` sets a plain text for a player below
+the command's lowest usage level: they get it in chat instead of vanilla's unknown-command answer, and it is only
+shown when that player still types the command. The first usage of a root that sets a text
+answers for the whole root; each usage's own level still decides who may run it, and a player who may run
+some usage but not the one typed gets vanilla's answer. The text is
+not styled and is not translated. Paper's `messages.no-permission` is the nearest equivalent.
 
 ## Custom selector tokens
 

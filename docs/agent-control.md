@@ -172,7 +172,7 @@ The switch is in three places: Settings > AI in the launcher, Horizon Settings i
 
 | Surface | What happens |
 | --- | --- |
-| Game | opens no control socket, even with `--control` (it logs the refusal); Horizon Settings hides AI Agent...; turning it on in a running game closes the socket at once |
+| Game | opens no control socket, even with `--control` (it logs the refusal); Horizon Settings greys out AI Agent... in its place; turning it on in a running game closes the socket at once |
 | `horizon-ctl` | every command refuses: exit status 4, `{"error": REFUSAL, "kind": "denied"}` |
 | `horizon-ctl mcp` | refuses to start (exit 4, REFUSAL on stderr); a session already running refuses each call |
 | `horizon-launcher mcp` | refuses to start; a running session answers each `tools/call` with error -32000 and REFUSAL |
@@ -266,14 +266,22 @@ turn the switch off.
 - **Confirm what can't be undone.** A command that deletes the player's things requires
   `confirm` and carries the MCP `destructiveHint`. In the game these are `world-delete`, `fill`
   and `setblock` (the table's `DESTRUCTIVE`); in the launcher, `remove`, `modpack remove`,
-  `mods remove`, `servers forget` and `account sign-out` (`cli_tools::DESTRUCTIVE`).
+  `mods remove`, `servers forget` and `account sign-out` (`cli_tools::DESTRUCTIVE`), and what
+  decides what the next Play runs or joins: `instance launch`, `instance java` and `game-args`,
+  and the `play` tool's `arg` (game arguments passed as they are: `--server`, `--session-file`,
+  `--smoke-report`; no hint, so a plain `play` asks nothing).
   Without `confirm: true` the call is refused and the message says to ask the player. In the game
   CLI the flag is `--confirm`. The launcher CLI asks nothing: a person typing `remove` meant it.
+- **Other people's text is data.** Chat, signs, books, MOTDs, names, mod descriptions and log lines
+  can say anything, so each server's instructions tell the agent they are never instructions, and a
+  tool whose result carries such text (the table's `UNTRUSTED`, the server's and the launcher's
+  logs and console) is followed by a second content block saying so
+  (`horizon_mcp::mark_untrusted`). The first block stays the data, so parsers are unaffected.
 - **Ask before reaching out.** A command that sends data or reaches other people carries
   `openWorldHint`, and its description says "only when the player asks". In the game these are
   `connect`, `lan`, `friends`, `chat` and `command`; in the launcher, `servers create` and
-  `share-log`. `play`'s `join` argument says the same. Bug and benchmark reports stay local;
-  there is no telemetry or data collection switch ([Horizon sends nothing](telemetry.md)).
+  `share-log`. `play`'s `join` and `server` arguments say the same. Bug and benchmark reports
+  stay local; there is no telemetry or data collection switch ([Horizon sends nothing](telemetry.md)).
 - **No secrets.** No surface returns tokens, session files, keychain entries or invite secrets
   the player didn't ask to share:
   - accounts are names and UUIDs;
@@ -295,21 +303,19 @@ turn the switch off.
    {"id": "done", "kind": "button", "label": "Done", "bounds": [...], "enabled": true}]}
 ```
 
-- **Ids are slugs of the drawn label, so they follow the client's language.** An id is the label
-  up to its `:`, as a slug (`FOV: 70` is `fov`, `AI Agent...` is `ai-agent`), and the label is the
-  translated text the screen drew: the ids in this page and in
-  [native-client.md](native-client.md) are the English ones. On a Russian client the title screen
-  has `одиночная-игра`, not `singleplayer`, and `настройки`, not `options`. A script that clicks a
-  literal id either pins the language first (`options-set lang en_us` on a running game, or
-  `lang:en_us` in the game folder's `options.txt` before launch: `--game-dir`, default the
-  working directory, or `--player-dir` when set) or reads `ui` and uses the ids it returns. A repeated slug gets `-2`, `-3`; unlabelled elements are `<kind>-<n>`. A slider's id
-  doesn't change with its value. Slots are `slot-<ID>` with their stack.
+- **Registered IDs do not change with the client's language.** For example, `singleplayer`,
+  `create-new-world`, `options`, `fov`, `done` and `back-to-game` work in Russian and English;
+  `label` still contains the translated text. Widgets without a registered ID use the drawn
+  label up to its `:` as a slug (for example, `My World` is `my-world`). These fallback IDs can
+  change with the label; read `ui` to find them. Repeated slugs get `-2`, `-3`; unlabelled
+  elements are `<kind>-<n>`. Slots are `slot-<ID>` with their stack.
 - **Kinds:** `button`, `slider` (`value` 0..1), `field`, `row` (a world, server, pack or
   language), `tab` (`selected`), `slot`.
 - **Actions:**
   - `click ID [right|middle] [shift]` clicks where the mouse would.
   - `set ID VALUE` moves a slider.
   - `type` types into the focused field.
+  - `click-button LABEL` takes the displayed label, not a registered ID.
 
   After a click, the next `ui`, `click` or `set` waits for a redrawn frame. Right after
   `launch`, they and `screen` and `click-button` wait for the first one.
@@ -499,7 +505,7 @@ of the frame ([#8750](https://github.com/horizon-rust/horizon/issues/8750)).
     network annotations;
   - the launcher: generated tools, `confirm`, the reference, the agent configs;
   - `horizon_core::no_ai`;
-  - `options_ui`: the AI Agent page, and that No AI hides it;
+  - `options_ui`: the AI Agent page, and that No AI greys its button out without moving the switch;
   - `input_trace`: origins, the ring, the intrusion rule, `input-log` and the recording writer;
   - `repro`: the format's round trip, the folder slug and the world copy.
 - **`tools/agent_control_e2e.py`** drives a real game, offscreen on macOS and on a virtual screen

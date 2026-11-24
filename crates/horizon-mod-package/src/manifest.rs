@@ -41,6 +41,12 @@ pub const MAX_WASM_MEMORY_MIB: u32 = 4096;
 /// Maximum manifest bytes accepted by package readers and developer tools.
 pub const MAX_MANIFEST: u64 = 32 << 20;
 
+/// The most source files (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/**`, the root notices) a
+/// package selects: as many as its content files, so a port laid out one file per class fits.
+pub const MAX_SOURCE_FILES: usize = crate::content::MAX_FILES;
+/// The most bytes those source files take, unpacked.
+pub const MAX_SOURCE_BYTES: u64 = 64 << 20;
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -111,6 +117,23 @@ pub struct Manifest {
     /// Free-form values other mods read through `PackageInfo::property`.
     #[serde(default)]
     pub properties: std::collections::BTreeMap<String, Property>,
+    /// The Java mod a port was made from, so its licence travels with the port
+    /// (docs/modpacks.md, Licences). Recorded only: nothing checks it yet.
+    #[serde(default)]
+    pub ported_from: Option<PortedFrom>,
+}
+
+/// `ported_from = { id, version, license, url }`: the original mod as its own metadata names it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PortedFrom {
+    /// The original's mod id (`fabric.mod.json` `id`, `mods.toml` `modId`).
+    pub id: String,
+    pub version: String,
+    /// An SPDX id or the original's own licence string.
+    pub license: String,
+    /// The original's page, such as its Modrinth or CurseForge project.
+    pub url: String,
 }
 
 /// Why a manifest that declares `[[inject]]` is refused.
@@ -627,6 +650,23 @@ impl Manifest {
                 ));
             }
         }
+        if let Some(from) = &m.ported_from {
+            if [&from.id, &from.version, &from.license]
+                .iter()
+                .any(|text| text.trim().is_empty() || text.len() > 256)
+            {
+                return Err(format!(
+                    "{MANIFEST}: ported_from needs id, version and license, each at most 256 bytes"
+                ));
+            }
+            if from.url.len() > 2048
+                || !(from.url.starts_with("https://") || from.url.starts_with("http://"))
+            {
+                return Err(format!(
+                    "{MANIFEST}: ported_from url is an http(s) link of at most 2048 characters"
+                ));
+            }
+        }
         for (i, ns) in m.namespaces.iter().enumerate() {
             // Vanilla's namespace characters, at most as long as an id.
             let chars_ok = (1..=64).contains(&ns.len())
@@ -1065,7 +1105,7 @@ impl Package {
                     }
                 }
             }
-            if source_count > 511 || source_bytes > 64 << 20 {
+            if source_count > MAX_SOURCE_FILES || source_bytes > MAX_SOURCE_BYTES {
                 return Err("native package exceeds its entry or size limit".into());
             }
             if resource_count > crate::content::MAX_FILES
@@ -1176,7 +1216,7 @@ impl Package {
                             .checked_add(size)
                             .ok_or("native package too large")?;
                         *source_count += 1;
-                        if *source_bytes > 64 << 20 || *source_count > 511 {
+                        if *source_bytes > MAX_SOURCE_BYTES || *source_count > MAX_SOURCE_FILES {
                             return Err("native package exceeds its entry or size limit".into());
                         }
                         files.insert(name, std::fs::read(path).map_err(|e| e.to_string())?);
@@ -1878,6 +1918,29 @@ capabilities = ["registries"]
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A port written one file per class keeps more than 511 source files, far under the byte cap.
+    #[test]
+    fn a_native_project_of_many_source_files_packs_and_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/classes")).unwrap();
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame = '26.3'\nhorizon = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        std::fs::write(root.join(MANIFEST), manifest).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = 'ruby'\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "mod classes;\n").unwrap();
+        for i in 0..700 {
+            std::fs::write(root.join(format!("src/classes/c{i}.rs")), "pub struct C;\n").unwrap();
+        }
+        let bytes = Package::pack_directory(root).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(Package::read_zip(&mut zip).unwrap().manifest.id, "ruby");
+        assert!(zip.by_name("src/classes/c699.rs").is_ok());
+    }
+
     #[test]
     fn package_kind_requires_matching_source_and_native_declaration() {
         let root =
@@ -1957,6 +2020,37 @@ issues = \"http://example.org/issues\"
             .unwrap_err();
             assert!(e.contains(field), "{e}");
         }
+    }
+
+    #[test]
+    fn a_port_records_the_mod_it_came_from() {
+        assert_eq!(Manifest::parse(EXAMPLE).unwrap().ported_from, None);
+        let port = |row: &str| Manifest::parse(&format!("{EXAMPLE}ported_from = {{ {row} }}\n"));
+        let m = port(
+            "id = \"totemcounter\", version = \"1.14.0+mc26.3-fabric\", license = \"MIT\", \
+             url = \"https://modrinth.com/mod/totemcounter\"",
+        )
+        .unwrap();
+        assert_eq!(
+            m.ported_from,
+            Some(PortedFrom {
+                id: "totemcounter".into(),
+                version: "1.14.0+mc26.3-fabric".into(),
+                license: "MIT".into(),
+                url: "https://modrinth.com/mod/totemcounter".into(),
+            })
+        );
+        let e = port("id = \"a\", version = \"1\", license = \" \", url = \"https://a.b\"")
+            .unwrap_err();
+        assert!(e.contains("ported_from needs"), "{e}");
+        let e = port("id = \"a\", version = \"1\", license = \"MIT\", url = \"file:///x\"")
+            .unwrap_err();
+        assert!(e.contains("ported_from url"), "{e}");
+        assert!(port("id = \"a\", version = \"1\", license = \"MIT\"").is_err());
+        assert!(
+            port("id = \"a\", version = \"1\", license = \"MIT\", url = \"https://a.b\", x = 1")
+                .is_err()
+        );
     }
 
     #[test]

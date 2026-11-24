@@ -279,6 +279,7 @@ struct MeshSettings {
     blend_radius: i32,
     smooth_lighting: bool,
     cutout_leaves: bool,
+    better_grass_mode: horizon_optifine::better_grass::Mode,
     opaque_ice: bool,
     translucent_layers: Arc<[bool]>,
     block_layers: Arc<crate::mesher::BlockLayerTable>,
@@ -384,6 +385,274 @@ impl MeshPool {
         self.bytes += bytes;
         self.meshes.push(mesh);
         None
+    }
+}
+
+/// Recycle a batch of spent section meshes under a single `MeshPool` lock,
+/// dropping any rejected or overflow meshes outside the mutex.
+fn free_meshes(pool: &Mutex<MeshPool>, meshes: Vec<((i32, i32, i32), SectionMesh)>) {
+    let mut iter = meshes.into_iter();
+    let mut rejected = Vec::new();
+    {
+        let mut guard = pool.lock().unwrap();
+        while guard.meshes.len() < MeshPool::COUNT && guard.bytes < MeshPool::BYTES {
+            let Some((_, mesh)) = iter.next() else {
+                break;
+            };
+            if let Some(mesh) = guard.put(mesh) {
+                rejected.push(mesh);
+            }
+        }
+    }
+    drop(rejected);
+    drop(iter);
+}
+
+#[inline]
+fn section_distance_sq(origin: ((i32, i32), i32), key: (i32, i32, i32)) -> u32 {
+    let ((cx, cz), cam_y) = origin;
+    let dx = u64::from(key.0.abs_diff(cx));
+    let dy = u64::from(key.1.abs_diff(cam_y));
+    let dz = u64::from(key.2.abs_diff(cz));
+    let dist_sq = dx
+        .saturating_mul(dx)
+        .saturating_add(dy.saturating_mul(dy))
+        .saturating_add(dz.saturating_mul(dz));
+    u32::try_from(dist_sq).unwrap_or(u32::MAX)
+}
+
+/// Estimated GPU upload size in bytes for a queued section mesh: uses the
+/// compact `packed` solid buffer (`24` bytes per record) when present,
+/// otherwise `solid` vertices, plus `translucent` vertices.
+pub fn upload_mesh_bytes(mesh: &SectionMesh) -> u64 {
+    let solid = if !mesh.packed.is_empty() {
+        (mesh.packed.len() as u64).saturating_mul(std::mem::size_of::<[u32; 6]>() as u64)
+    } else {
+        (mesh.solid.len() as u64)
+            .saturating_mul(std::mem::size_of::<crate::mesher::TerrainVertex>() as u64)
+    };
+    let translucent = (mesh.translucent.len() as u64)
+        .saturating_mul(std::mem::size_of::<crate::mesher::TerrainVertex>() as u64);
+    solid.saturating_add(translucent)
+}
+
+/// Section meshes queued for budgeted or frame-paced GPU upload, stored in a
+/// hash map for `O(1)` dedup and membership checks and prioritized nearest
+/// first via a compact 16-byte min-heap rebuilt only when `(centre, cam_y)`
+/// changes or tombstones exceed a bounded threshold.
+#[derive(Default)]
+pub struct PendingUploads {
+    meshes: FxHashMap<(i32, i32, i32), SectionMesh>,
+    heap: BinaryHeap<std::cmp::Reverse<(u32, (i32, i32, i32))>>,
+    origin: Option<((i32, i32), i32)>,
+    chunks_revision: u64,
+}
+
+impl PendingUploads {
+    /// Creates an empty upload queue.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of live section meshes currently waiting to upload.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// Whether no live section meshes are waiting to upload.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.meshes.is_empty()
+    }
+
+    /// Whether `key` has a mesh waiting to upload (`O(1)`).
+    #[inline]
+    pub fn contains(&self, key: &(i32, i32, i32)) -> bool {
+        self.meshes.contains_key(key)
+    }
+
+    /// Discard all queued meshes and reset cached priority state.
+    pub fn clear(&mut self) {
+        self.meshes.clear();
+        self.heap.clear();
+        self.origin = None;
+        self.chunks_revision = 0;
+    }
+
+    /// Drain all queued `(key, mesh)` pairs for off-thread disposal via
+    /// [`Streaming::free`], resetting cached priority state.
+    pub fn take_all(&mut self) -> Vec<((i32, i32, i32), SectionMesh)> {
+        self.heap.clear();
+        self.origin = None;
+        self.chunks_revision = 0;
+        self.meshes.drain().collect()
+    }
+
+    /// Remove any queued meshes for `keys`, pushing them into `spent` for
+    /// off-thread disposal. Tombstones are compacted once dead entries outgrow
+    /// live ones.
+    pub fn remove_keys(
+        &mut self,
+        keys: impl IntoIterator<Item = (i32, i32, i32)>,
+        spent: &mut Vec<((i32, i32, i32), SectionMesh)>,
+    ) {
+        if self.meshes.is_empty() {
+            return;
+        }
+        for key in keys {
+            if let Some(mesh) = self.meshes.remove(&key) {
+                spent.push((key, mesh));
+            }
+        }
+        self.maybe_compact_heap();
+    }
+
+    /// Prune queued sections belonging to any column in `unloaded`, pushing
+    /// their meshes into `spent`.
+    pub fn remove_columns(
+        &mut self,
+        unloaded: &FxHashSet<(i32, i32)>,
+        spent: &mut Vec<((i32, i32, i32), SectionMesh)>,
+    ) {
+        if self.meshes.is_empty() || unloaded.is_empty() {
+            return;
+        }
+        spent.extend(
+            self.meshes
+                .extract_if(|k, _| unloaded.contains(&(k.0, k.2))),
+        );
+        self.maybe_compact_heap();
+    }
+
+    /// Merge incoming `uploads` against `chunks` for `origin = (centre, cam_y)`,
+    /// using [`crate::chunk_map::ChunkMap::deltas_since`] to skip scanning
+    /// existing entries when no chunk columns were removed since the last frame.
+    pub fn push_batch_for_chunks(
+        &mut self,
+        uploads: Vec<((i32, i32, i32), SectionMesh)>,
+        chunks: &crate::chunk_map::ChunkMap,
+        origin: ((i32, i32), i32),
+        spent: &mut Vec<((i32, i32, i32), SectionMesh)>,
+    ) {
+        let rev = chunks.membership_revision();
+        let prune_existing = !self.meshes.is_empty()
+            && self.chunks_revision != rev
+            && chunks
+                .deltas_since(self.chunks_revision)
+                .is_none_or(|mut deltas| {
+                    deltas.any(|(_, delta)| matches!(delta, ChunkMembershipDelta::Removed(_)))
+                });
+        self.chunks_revision = rev;
+        self.push_batch(
+            uploads,
+            |k| chunks.contains_key(&(k.0, k.2)),
+            origin,
+            prune_existing,
+            spent,
+        );
+    }
+
+    /// Merge incoming `uploads` for `origin = (centre, cam_y)`.
+    ///
+    /// Incoming meshes whose chunk is not `loaded` are pushed into `spent`.
+    /// Existing queued meshes failing `loaded` are pruned into `spent` when
+    /// `prune_existing` is true or `origin` changed. A newer mesh for an
+    /// already-queued section replaces it and pushes the old mesh into `spent`.
+    /// The 16-byte min-heap is rebuilt in `O(N)` only when `origin` changed or
+    /// tombstones exceed the bounded compaction threshold.
+    pub fn push_batch(
+        &mut self,
+        uploads: Vec<((i32, i32, i32), SectionMesh)>,
+        mut loaded: impl FnMut(&(i32, i32, i32)) -> bool,
+        origin: ((i32, i32), i32),
+        prune_existing: bool,
+        spent: &mut Vec<((i32, i32, i32), SectionMesh)>,
+    ) {
+        let origin_changed = self.origin != Some(origin);
+        if (prune_existing || origin_changed) && !self.meshes.is_empty() {
+            spent.extend(self.meshes.extract_if(|k, _| !loaded(k)));
+        }
+        if origin_changed {
+            for (key, mesh) in uploads {
+                if loaded(&key) {
+                    if let Some(old) = self.meshes.insert(key, mesh) {
+                        spent.push((key, old));
+                    }
+                } else {
+                    spent.push((key, mesh));
+                }
+            }
+            self.rebuild_heap(origin);
+        } else {
+            for (key, mesh) in uploads {
+                if loaded(&key) {
+                    if let Some(old) = self.meshes.insert(key, mesh) {
+                        spent.push((key, old));
+                    } else {
+                        self.heap
+                            .push(std::cmp::Reverse((section_distance_sq(origin, key), key)));
+                    }
+                } else {
+                    spent.push((key, mesh));
+                }
+            }
+            self.maybe_compact_heap();
+        }
+    }
+
+    /// Return the nearest live queued section and its mesh without removing it,
+    /// discarding any stale tombstones at the top of the heap.
+    pub fn peek_nearest(&mut self) -> Option<((i32, i32, i32), &SectionMesh)> {
+        while let Some(&std::cmp::Reverse((_, key))) = self.heap.peek() {
+            if self.meshes.contains_key(&key) {
+                return self.meshes.get(&key).map(|mesh| (key, mesh));
+            }
+            self.heap.pop();
+        }
+        None
+    }
+
+    /// Remove and return the nearest live queued section and its mesh,
+    /// discarding any stale tombstones encountered along the way.
+    pub fn pop_nearest(&mut self) -> Option<((i32, i32, i32), SectionMesh)> {
+        while let Some(std::cmp::Reverse((_, key))) = self.heap.pop() {
+            if let Some(mesh) = self.meshes.remove(&key) {
+                if self.meshes.is_empty() {
+                    self.heap.clear();
+                }
+                return Some((key, mesh));
+            }
+        }
+        None
+    }
+
+    fn rebuild_heap(&mut self, origin: ((i32, i32), i32)) {
+        self.origin = Some(origin);
+        let mut entries = std::mem::take(&mut self.heap).into_vec();
+        entries.clear();
+        if entries.capacity() > 4096 && entries.capacity() > self.meshes.len().saturating_mul(4) {
+            entries.shrink_to(self.meshes.len().max(256));
+        }
+        entries.reserve(self.meshes.len());
+        entries.extend(
+            self.meshes
+                .keys()
+                .map(|&key| std::cmp::Reverse((section_distance_sq(origin, key), key))),
+        );
+        self.heap = BinaryHeap::from(entries);
+    }
+
+    fn maybe_compact_heap(&mut self) {
+        if self.meshes.is_empty() {
+            self.heap.clear();
+            return;
+        }
+        if self.heap.len() > self.meshes.len().saturating_mul(2).saturating_add(64)
+            && let Some(origin) = self.origin
+        {
+            self.rebuild_heap(origin);
+        }
     }
 }
 
@@ -656,6 +925,8 @@ pub struct Streaming {
     gone_scratch: Vec<(i32, i32)>,
     mesh_candidates_scratch: Vec<(i64, i32, i32, SectionMask)>,
     mesh_columns_scratch: Vec<((i32, i32), SectionMask)>,
+    /// The mesh jobs an update makes, queued together (`submit_mesh_candidates`).
+    mesh_jobs_scratch: Vec<Queued>,
     sequence: u64,
     pub center: (i32, i32),
     /// The view distance around `center`; below 0, no area there (a dedicated
@@ -697,6 +968,8 @@ pub struct Streaming {
     /// The `ao` and `cutoutLeaves` options.
     pub smooth_lighting: bool,
     pub cutout_leaves: bool,
+    /// Optional resource-pack smoothing of exposed terrain block sides.
+    pub better_grass_mode: horizon_optifine::better_grass::Mode,
     /// Draw regular ice opaque in the solid pass (`Mesher::opaque_ice`).
     pub opaque_ice: bool,
     /// Sprite layers a shader pack draws in the translucent pass (`[[materials]]
@@ -747,6 +1020,8 @@ pub struct Streaming {
     /// Cached face visibility and scratch buffers for synchronous edit meshing (`mesh_immediate`).
     immediate_faces: Faces,
     immediate_scratch: MeshScratch,
+    /// Frames left before nearby sections are meshed synchronously again (`NEARBY_COOLDOWN_FRAMES`).
+    nearby_cooldown: immediate_mesh::NearbyCooldown,
 }
 /// Snapshot only after a scan found no missing candidates. Public range fields
 /// and `World::chunks` can change without going through Streaming, so compare
@@ -1152,10 +1427,7 @@ impl<G: ChunkGenerator> Jobs<G> {
                 Done::LightView(x, z, proto, view)
             }
             Job::Free(meshes) => {
-                for (_, mesh) in meshes {
-                    let rejected = shared.meshes.lock().unwrap().put(mesh);
-                    drop(rejected);
-                }
+                free_meshes(&shared.meshes, meshes);
                 return None;
             }
             Job::Light(x, z, region, seq, sky) => {
@@ -1290,6 +1562,7 @@ impl Streaming {
             gone_scratch: Vec::new(),
             mesh_candidates_scratch: Vec::new(),
             mesh_columns_scratch: Vec::new(),
+            mesh_jobs_scratch: Vec::new(),
             sequence: 0,
             center: (0, 0),
             radius: 8,
@@ -1309,6 +1582,7 @@ impl Streaming {
             biome_blend: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            better_grass_mode: Default::default(),
             opaque_ice: false,
             translucent_layers: Arc::from([]),
             block_layers: Arc::default(),
@@ -1330,6 +1604,7 @@ impl Streaming {
             band_ranked: None,
             immediate_faces: None,
             immediate_scratch: MeshScratch::default(),
+            nearby_cooldown: Default::default(),
         }
     }
     /// Shares generation resources, but gives distant work its own worker state.
@@ -2423,7 +2698,11 @@ impl Streaming {
         hz_laps.lap("st_candidates");
         if room > 0 && !candidates.is_empty() {
             let settings = self.mesh_settings();
-            let mut queue = self.shared.queue.lock().unwrap();
+            // Made before the queue's lock is taken, and pushed under it together: a worker
+            // choosing its next job asks every source's queue (`Jobs::next`), so ranking the
+            // columns and building their regions under this lock held every worker that
+            // finished a job meanwhile, whatever it would have run next.
+            let mut batch = std::mem::take(&mut self.mesh_jobs_scratch);
             let submitted = submit_mesh_candidates(
                 world,
                 &mut candidates,
@@ -2433,9 +2712,12 @@ impl Streaming {
                 &mut self.meshing,
                 &mut self.sequence,
                 &mut self.order,
-                &mut queue,
+                &mut batch,
             );
-            drop(queue);
+            if !batch.is_empty() {
+                self.shared.queue.lock().unwrap().extend(batch.drain(..));
+            }
+            self.mesh_jobs_scratch = batch;
             candidates.clear();
             if submitted > 1 {
                 self.jobs.notify_all();
@@ -3710,9 +3992,11 @@ fn order_column_sections(
     count
 }
 
-/// Submit up to `room` dirty sections from the nearest candidate columns.
-/// Enforces the section budget inside each column's section loop and re-marks
-/// any unsubmitted sections dirty so no section is lost after `take_column`.
+/// Makes the mesh jobs of up to `room` dirty sections from the nearest
+/// candidate columns, into `jobs` for the caller to queue: none of it needs the
+/// queue's lock. Enforces the section budget inside each column's section loop
+/// and re-marks any unsubmitted sections dirty so no section is lost after
+/// `take_column`. Returns how many jobs it made.
 fn submit_mesh_candidates(
     world: &mut World,
     candidates: &mut Vec<(i64, i32, i32, SectionMask)>,
@@ -3722,7 +4006,7 @@ fn submit_mesh_candidates(
     meshing: &mut FxHashMap<(i32, i32, i32), u64>,
     sequence: &mut u64,
     order: &mut u64,
-    queue: &mut BinaryHeap<Queued>,
+    jobs: &mut Vec<Queued>,
 ) -> usize {
     if room == 0 || candidates.is_empty() {
         return 0;
@@ -3761,7 +4045,7 @@ fn submit_mesh_candidates(
             *sequence += 1;
             *order += 1;
             meshing.insert((x, sy, z), *sequence);
-            queue.push(Queued {
+            jobs.push(Queued {
                 priority,
                 at: Some((x, z)),
                 bias,
@@ -4342,6 +4626,390 @@ mod tests {
         assert_eq!(pool.bytes, 0);
     }
 
+    #[test]
+    fn batched_free_meshes_recycles_within_caps_and_skips_overflow() {
+        let pool = Mutex::new(MeshPool::default());
+        // Empty batch is a no-op.
+        free_meshes(&pool, Vec::new());
+        assert!(pool.lock().unwrap().meshes.is_empty());
+
+        // An empty mesh and an oversized mesh in the same batch must not block
+        // later valid meshes from being recycled.
+        let mut oversized = SectionMesh::default();
+        oversized.solid.reserve_exact(
+            MeshPool::BYTES / std::mem::size_of::<crate::mesher::TerrainVertex>() + 1,
+        );
+        let mut valid_a = SectionMesh::default();
+        valid_a.solid.reserve_exact(32);
+        let mut valid_b = SectionMesh::default();
+        valid_b.solid.reserve_exact(64);
+        let expected_bytes = valid_a.capacity_bytes() + valid_b.capacity_bytes();
+        free_meshes(
+            &pool,
+            vec![
+                ((0, 0, 0), SectionMesh::default()),
+                ((1, 0, 0), oversized),
+                ((2, 0, 0), valid_a),
+                ((3, 0, 0), valid_b),
+            ],
+        );
+        {
+            let guard = pool.lock().unwrap();
+            assert_eq!(guard.meshes.len(), 2);
+            assert_eq!(guard.bytes, expected_bytes);
+        }
+
+        // Batch exceeding MeshPool::COUNT fills exactly to COUNT and drops the rest.
+        let overflow: Vec<_> = (0..MeshPool::COUNT + 20)
+            .map(|i| {
+                let mut mesh = SectionMesh::default();
+                mesh.solid.reserve_exact(4);
+                ((i as i32, 0, 0), mesh)
+            })
+            .collect();
+        free_meshes(&pool, overflow);
+        {
+            let guard = pool.lock().unwrap();
+            assert_eq!(guard.meshes.len(), MeshPool::COUNT);
+            assert!(guard.bytes <= MeshPool::BYTES);
+        }
+
+        // Already-full pool rejects an incoming batch without changing caps.
+        let bytes_before = pool.lock().unwrap().bytes;
+        let mut extra = SectionMesh::default();
+        extra.solid.reserve_exact(8);
+        free_meshes(&pool, vec![((99, 0, 0), extra)]);
+        {
+            let guard = pool.lock().unwrap();
+            assert_eq!(guard.meshes.len(), MeshPool::COUNT);
+            assert_eq!(guard.bytes, bytes_before);
+        }
+    }
+
+    fn tagged_mesh(tag: u64) -> SectionMesh {
+        SectionMesh {
+            visibility: tag,
+            ..SectionMesh::default()
+        }
+    }
+
+    #[test]
+    fn pending_uploads_heap_entry_is_16_bytes() {
+        assert_eq!(
+            std::mem::size_of::<std::cmp::Reverse<(u32, (i32, i32, i32))>>(),
+            16
+        );
+    }
+
+    #[test]
+    fn pending_uploads_matches_reference_distance_order_and_extreme_coords() {
+        let mut pending = PendingUploads::new();
+        let origin = ((3, -2), 5);
+        let mut uploads = Vec::new();
+        for x in -2..=8 {
+            for sy in 2..=8 {
+                for z in -6..=3 {
+                    let key = (x, sy, z);
+                    let tag =
+                        ((x + 100) as u64) << 16 | ((sy + 100) as u64) << 8 | (z + 100) as u64;
+                    uploads.push((key, tagged_mesh(tag)));
+                }
+            }
+        }
+        // Extreme coordinates must saturate distance without panicking or wrapping.
+        uploads.push(((i32::MAX, i32::MIN, i32::MAX), tagged_mesh(u64::MAX)));
+        let unloaded_col = (5, 0);
+        let mut spent = Vec::new();
+        pending.push_batch(
+            uploads,
+            |k| (k.0, k.2) != unloaded_col,
+            origin,
+            false,
+            &mut spent,
+        );
+        assert_eq!(spent.len(), 7);
+        assert!(!pending.contains(&(5, 4, 0)));
+        assert!(pending.contains(&(3, 5, -2)));
+
+        let mut prev_dist = 0u32;
+        let mut popped = 0usize;
+        while let Some((peek_key, peek_mesh)) = pending.peek_nearest() {
+            let peek_vis = peek_mesh.visibility;
+            let (pop_key, pop_mesh) = pending.pop_nearest().expect("peeked above");
+            assert_eq!(pop_key, peek_key);
+            assert_eq!(pop_mesh.visibility, peek_vis);
+            let dist = section_distance_sq(origin, pop_key);
+            assert!(dist >= prev_dist, "distances must be non-decreasing");
+            prev_dist = dist;
+            popped += 1;
+        }
+        assert!(pending.is_empty());
+        assert!(pending.heap.is_empty());
+        assert_eq!(popped, 11 * 7 * 10 - 7 + 1);
+    }
+
+    #[test]
+    fn pending_uploads_overwrite_replaces_mesh_without_duplicating_heap_entries() {
+        let mut pending = PendingUploads::new();
+        let origin = ((0, 0), 4);
+        let mut spent = Vec::new();
+        pending.push_batch(
+            vec![
+                ((1, 4, 0), tagged_mesh(10)),
+                ((3, 4, 0), tagged_mesh(30)),
+                ((2, 4, 0), tagged_mesh(20)),
+            ],
+            |_| true,
+            origin,
+            false,
+            &mut spent,
+        );
+        assert!(spent.is_empty());
+        assert_eq!(pending.heap.len(), 3);
+
+        // Overwrite (2, 4, 0) twice across stationary frames (including duplicate within batch).
+        pending.push_batch(
+            vec![((2, 4, 0), tagged_mesh(21)), ((2, 4, 0), tagged_mesh(22))],
+            |_| true,
+            origin,
+            false,
+            &mut spent,
+        );
+        assert_eq!(spent.len(), 2);
+        assert_eq!(spent[0].1.visibility, 20);
+        assert_eq!(spent[1].1.visibility, 21);
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending.heap.len(), 3);
+
+        let order: Vec<_> = std::iter::from_fn(|| pending.pop_nearest())
+            .map(|(k, m)| (k, m.visibility))
+            .collect();
+        assert_eq!(order, [((1, 4, 0), 10), ((2, 4, 0), 22), ((3, 4, 0), 30)]);
+    }
+
+    #[test]
+    fn pending_uploads_remove_keys_and_columns_bound_tombstones_and_handle_reinsert() {
+        let mut pending = PendingUploads::new();
+        let origin = ((0, 0), 0);
+        let mut spent = Vec::new();
+        pending.push_batch(
+            (0..200)
+                .map(|x| ((x, 0, 0), tagged_mesh(x as u64)))
+                .collect(),
+            |_| true,
+            origin,
+            false,
+            &mut spent,
+        );
+        assert_eq!(pending.len(), 200);
+
+        // Remove key 0, then reinsert a newer mesh for key 0 before compaction.
+        pending.remove_keys([(0, 0, 0)], &mut spent);
+        assert!(!pending.contains(&(0, 0, 0)));
+        assert_eq!(spent.len(), 1);
+        pending.push_batch(
+            vec![((0, 0, 0), tagged_mesh(999))],
+            |_| true,
+            origin,
+            false,
+            &mut spent,
+        );
+        assert!(pending.contains(&(0, 0, 0)));
+        assert_eq!(
+            pending.peek_nearest().map(|(k, m)| (k, m.visibility)),
+            Some(((0, 0, 0), 999))
+        );
+        let (k, m) = pending.pop_nearest().unwrap();
+        assert_eq!((k, m.visibility), ((0, 0, 0), 999));
+        // Duplicate tombstone for key 0 must be skipped cleanly, yielding key 1 next.
+        assert_eq!(pending.peek_nearest().map(|(k, _)| k), Some((1, 0, 0)));
+
+        // Remove 180 columns to trigger bounded tombstone compaction.
+        let gone: FxHashSet<(i32, i32)> = (1..181).map(|x| (x, 0)).collect();
+        spent.clear();
+        pending.remove_columns(&gone, &mut spent);
+        assert_eq!(spent.len(), 180);
+        assert_eq!(pending.len(), 19);
+        assert!(pending.heap.len() <= pending.len() * 2 + 64);
+        assert_eq!(pending.heap.len(), 19);
+        assert_eq!(pending.peek_nearest().map(|(k, _)| k), Some((181, 0, 0)));
+    }
+
+    #[test]
+    fn pending_uploads_rebuilds_priority_when_camera_origin_moves() {
+        let mut pending = PendingUploads::new();
+        let mut spent = Vec::new();
+        pending.push_batch(
+            vec![
+                ((0, 0, 0), tagged_mesh(1)),
+                ((10, 0, 0), tagged_mesh(2)),
+                ((10, 8, 0), tagged_mesh(3)),
+            ],
+            |_| true,
+            ((0, 0), 0),
+            false,
+            &mut spent,
+        );
+        assert_eq!(pending.peek_nearest().map(|(k, _)| k), Some((0, 0, 0)));
+
+        // Move centre horizontally toward (10, 0): (10, 0, 0) becomes nearest.
+        pending.push_batch(Vec::new(), |_| true, ((10, 0), 0), false, &mut spent);
+        assert_eq!(pending.peek_nearest().map(|(k, _)| k), Some((10, 0, 0)));
+
+        // Move cam_y vertically toward 8: (10, 8, 0) becomes nearest.
+        pending.push_batch(Vec::new(), |_| true, ((10, 0), 8), false, &mut spent);
+        assert_eq!(pending.peek_nearest().map(|(k, _)| k), Some((10, 8, 0)));
+    }
+
+    #[test]
+    fn pending_uploads_push_batch_for_chunks_tracks_chunk_map_removals_and_resets() {
+        let mut chunks = crate::chunk_map::ChunkMap::default();
+        let c0 = Arc::new(Chunk::with_layout(
+            0,
+            0,
+            crate::chunk::ColumnLayout::VANILLA,
+        ));
+        let c1 = Arc::new(Chunk::with_layout(
+            1,
+            0,
+            crate::chunk::ColumnLayout::VANILLA,
+        ));
+        chunks.insert((0, 0), c0);
+        chunks.insert((1, 0), c1);
+
+        let mut pending = PendingUploads::new();
+        let origin = ((0, 0), 4);
+        let mut spent = Vec::new();
+        pending.push_batch_for_chunks(
+            vec![
+                ((0, 4, 0), tagged_mesh(1)),
+                ((1, 4, 0), tagged_mesh(2)),
+                ((2, 4, 0), tagged_mesh(3)),
+            ],
+            &chunks,
+            origin,
+            &mut spent,
+        );
+        // Column (2, 0) was never loaded -> sent directly to spent.
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].0, (2, 4, 0));
+        assert_eq!(pending.len(), 2);
+
+        // Adding another chunk (Added-only delta) preserves existing entries.
+        let c2 = Arc::new(Chunk::with_layout(
+            2,
+            0,
+            crate::chunk::ColumnLayout::VANILLA,
+        ));
+        chunks.insert((2, 0), c2);
+        spent.clear();
+        pending.push_batch_for_chunks(Vec::new(), &chunks, origin, &mut spent);
+        assert!(spent.is_empty());
+        assert_eq!(pending.len(), 2);
+
+        // Removing column (1, 0) triggers pruning on the next stationary frame.
+        chunks.remove(&(1, 0));
+        pending.push_batch_for_chunks(Vec::new(), &chunks, origin, &mut spent);
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].0, (1, 4, 0));
+        assert!(!pending.contains(&(1, 4, 0)));
+        assert!(pending.contains(&(0, 4, 0)));
+
+        // Clearing the ChunkMap (Reset delta) prunes remaining queued sections.
+        chunks.clear();
+        spent.clear();
+        pending.push_batch_for_chunks(Vec::new(), &chunks, origin, &mut spent);
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].0, (0, 4, 0));
+        assert!(pending.is_empty());
+
+        // take_all drains live entries and resets cached origin/revision.
+        let c3 = Arc::new(Chunk::with_layout(
+            3,
+            0,
+            crate::chunk::ColumnLayout::VANILLA,
+        ));
+        chunks.insert((3, 0), c3);
+        pending.push_batch_for_chunks(
+            vec![((3, 4, 0), tagged_mesh(9))],
+            &chunks,
+            origin,
+            &mut spent,
+        );
+        let drained = pending.take_all();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, (3, 4, 0));
+        assert!(pending.is_empty());
+        assert!(pending.origin.is_none());
+    }
+
+    #[test]
+    fn upload_mesh_bytes_accounts_for_packed_solid_and_translucent_budgets() {
+        let vertex = crate::mesher::TerrainVertex {
+            pos: [0.0; 3],
+            uv: [0; 2],
+            layer: 0,
+            light: 0,
+            color: 0,
+        };
+        assert_eq!(upload_mesh_bytes(&SectionMesh::default()), 0);
+
+        // Unpacked solid + translucent: 24 bytes per vertex.
+        let mut unpacked = SectionMesh::default();
+        unpacked.solid.resize(16, vertex);
+        unpacked.translucent.resize(4, vertex);
+        assert_eq!(upload_mesh_bytes(&unpacked), (16 + 4) * 24);
+
+        // Packed solid with solid vertices also present: uses compact packed records (24 B each),
+        // matching Renderer::upload_mesh, plus translucent vertices.
+        let mut packed_with_solid = SectionMesh::default();
+        packed_with_solid.solid.resize(400, vertex);
+        packed_with_solid.packed.resize(100, [0u32; 6]);
+        packed_with_solid.translucent.resize(12, vertex);
+        assert_eq!(upload_mesh_bytes(&packed_with_solid), (100 + 12) * 24);
+
+        // Packed-only mesh (empty solid Vec) still accounts for packed.len() * 24 bytes.
+        let mut packed_only = SectionMesh::default();
+        packed_only.packed.resize(50, [0u32; 6]);
+        assert_eq!(upload_mesh_bytes(&packed_only), 50 * 24);
+
+        // Verify byte budget enforcement stops before exceeding budget once bytes > 0,
+        // while still allowing the first section and zero-byte empty sections.
+        let mut pending = PendingUploads::new();
+        let mut m1 = SectionMesh::default();
+        m1.packed.resize(40, [0u32; 6]); // 960 B
+        let mut m2 = SectionMesh::default();
+        m2.packed.resize(40, [0u32; 6]); // 960 B
+        let mut spent = Vec::new();
+        pending.push_batch(
+            vec![
+                ((0, 0, 0), m1),
+                ((1, 0, 0), SectionMesh::default()), // 0 B
+                ((2, 0, 0), m2),
+            ],
+            |_| true,
+            ((0, 0), 0),
+            false,
+            &mut spent,
+        );
+        let budget = 1024u64;
+        let mut bytes = 0u64;
+        let mut uploaded = Vec::new();
+        while let Some((_, mesh)) = pending.peek_nearest() {
+            let size = upload_mesh_bytes(mesh);
+            if bytes > 0 && bytes + size > budget {
+                break;
+            }
+            let (key, _mesh) = pending.pop_nearest().expect("peeked above");
+            uploaded.push(key);
+            bytes += size;
+        }
+        assert_eq!(uploaded, [(0, 0, 0), (1, 0, 0)]);
+        assert_eq!(bytes, 960);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains(&(2, 0, 0)));
+    }
+
     /// The frame never waits for a worker: while one holds the mailbox, the
     /// frame takes nothing and finds the results, in order, the next time.
     #[test]
@@ -4481,6 +5149,7 @@ mod tests {
             blend_radius: 0,
             smooth_lighting: true,
             cutout_leaves: true,
+            better_grass_mode: Default::default(),
             opaque_ice: false,
             translucent_layers: Arc::from([]),
             block_layers: Arc::default(),
@@ -4490,9 +5159,11 @@ mod tests {
         let mut meshing = FxHashMap::default();
         let mut sequence = 0u64;
         let mut order = 0u64;
-        let mut queue = BinaryHeap::new();
+        let mut jobs = Vec::new();
 
-        let drain_sections = |queue: &mut BinaryHeap<Queued>| -> Vec<(i32, i32, i32)> {
+        // A pass's jobs in the order the queue runs them once they are in it.
+        let drain_sections = |jobs: &mut Vec<Queued>| -> Vec<(i32, i32, i32)> {
+            let mut queue = BinaryHeap::from(std::mem::take(jobs));
             let mut out = Vec::new();
             while let Some(item) = queue.pop() {
                 if let Job::Mesh(x, sy, z, _, _, _) = item.job {
@@ -4517,10 +5188,10 @@ mod tests {
             &mut meshing,
             &mut sequence,
             &mut order,
-            &mut queue,
+            &mut jobs,
         );
         assert_eq!(submitted, 3);
-        let first_batch = drain_sections(&mut queue);
+        let first_batch = drain_sections(&mut jobs);
         assert_eq!(first_batch, vec![(0, 7, 0), (0, 6, 0), (0, 8, 0)]);
         assert!(!meshed.contains(&(0, 0)));
         assert_eq!(world.dirty_sections.len(), 21 + 4);
@@ -4549,10 +5220,10 @@ mod tests {
             &mut meshing,
             &mut sequence,
             &mut order,
-            &mut queue,
+            &mut jobs,
         );
         assert_eq!(submitted, 22);
-        let second_batch = drain_sections(&mut queue);
+        let second_batch = drain_sections(&mut jobs);
         assert!(meshed.contains(&(0, 0)));
         assert!(!meshed.contains(&(1, 0)));
         assert_eq!(world.dirty_sections.len(), 3);
@@ -4576,10 +5247,10 @@ mod tests {
             &mut meshing,
             &mut sequence,
             &mut order,
-            &mut queue,
+            &mut jobs,
         );
         assert_eq!(submitted, 3);
-        let third_batch = drain_sections(&mut queue);
+        let third_batch = drain_sections(&mut jobs);
         assert!(meshed.contains(&(1, 0)));
         assert!(world.dirty_sections.is_empty());
 

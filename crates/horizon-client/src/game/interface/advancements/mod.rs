@@ -26,6 +26,7 @@ use std::{
     time::Instant,
 };
 
+mod location_memo;
 #[cfg(test)]
 mod progress_tests;
 
@@ -135,6 +136,10 @@ pub(super) struct AdvState {
     /// place on its tab (`DisplayInfo` x, y), in tree order.
     pub(super) positions: Option<Vec<(f32, f32)>>,
     pub(super) progress: Progress,
+    /// How many times a mod replaced a player's whole progress (`player.set_advancements`), by player
+    /// (the game's own player under 0): a grant that ran a hook which replaced that player's progress
+    /// completed nothing itself.
+    pub(super) replaced: std::collections::HashMap<u128, u32>,
     pub(super) loaded: bool,
     pub(super) toasts: VecDeque<Toast>,
     /// Awards skip the toast (`/advancement grant ... everything`).
@@ -158,6 +163,9 @@ pub(super) struct AdvState {
     inventory_index: Option<(Arc<Tree>, Arc<adv::InventoryIndex>)>,
     /// Reusable candidate list for `tick_advancements` so matching ticks avoid allocating.
     tick_candidates: Vec<(usize, usize)>,
+    /// How many `/reload`s the game has applied: the tree stays the same one when the packs add
+    /// no advancements, though the tags the criteria read changed.
+    reloads: u32,
 }
 impl AdvState {
     /// Drop the prefetched tree and the index built for the old one (a
@@ -165,6 +173,7 @@ impl AdvState {
     pub(super) fn reset_tree(&mut self) {
         self.pending_tree = None;
         self.inventory_index = None;
+        self.reloads = self.reloads.wrapping_add(1);
     }
 }
 /// The game's world for predicates.
@@ -1003,15 +1012,32 @@ impl Game<'_> {
         for (ai, ci) in hits {
             let a = &tree.list[ai];
             let was = self.adv.progress.done(a);
+            let replaced = self.replacements();
             let criterion = &a.criteria[ci].name;
             if self.adv.progress.grant(&a.id, criterion, &date) {
                 self.advancement_progress(a, criterion, ProgressType::Grant);
             }
             self.progress_changed(ai);
-            if !was && self.adv.progress.done(a) {
+            // A mod's hook that replaced the progress is no grant of this criterion: what it imported
+            // completed the advancement, not this trigger, and nothing is awarded for it.
+            if !was && self.adv.progress.done(a) && self.replacements() == replaced {
                 self.award(ai);
             }
         }
+    }
+    /// How many times a mod replaced the progress of the player the game acts as now.
+    pub(in crate::game) fn replacements(&self) -> u32 {
+        self.replacements_of(self.lan_acting_uuid.unwrap_or(0))
+    }
+    /// How many times a mod replaced the progress of one player.
+    fn replacements_of(&self, player: u128) -> u32 {
+        self.adv.replaced.get(&player).copied().unwrap_or(0)
+    }
+    /// A mod replaced the acting player's whole progress.
+    pub(in crate::game) fn note_replacement(&mut self) {
+        let player = self.lan_acting_uuid.unwrap_or(0);
+        let count = self.adv.replaced.entry(player).or_insert(0);
+        *count = count.wrapping_add(1);
     }
     /// `PlayerAdvancements.award` / `revoke` after a criterion's progress changed.
     fn advancement_progress(
@@ -1075,6 +1101,7 @@ impl Game<'_> {
         for task in tasks {
             let mut fresh = Vec::new();
             for grant in &task.grants {
+                let replaced = self.replacements_of(task.player);
                 let Some(was_done) = self
                     .with_advancement_hub(|hub, owners| hub.grant_native_tick(&task, grant, owners))
                     .flatten()
@@ -1121,6 +1148,11 @@ impl Game<'_> {
                     })
                     .flatten()
                     .unwrap_or(false);
+                // A hook that replaced this player's progress during the grant is no grant of this
+                // criterion: what it imported completed the advancement, so nothing is awarded.
+                if self.replacements_of(task.player) != replaced {
+                    continue;
+                }
                 if self.lan_acting == Some(task.conn) {
                     if !was_done && done {
                         self.award_definition(definition);
@@ -1607,16 +1639,7 @@ impl Game<'_> {
         if self.own_tick_count().is_some_and(|n| n % 20 == 0)
             && self.has_open_trigger("minecraft:location")
         {
-            let me = self.player_entity_for("minecraft:location");
-            self.trigger("minecraft:location", |c, w| {
-                let ctx = adv::Entities {
-                    this: Some(&me),
-                    origin: me.position,
-                    tool: None,
-                    block_pos: None,
-                };
-                adv::conditions(&c["player"], &ctx, w)
-            });
+            self.tick_location();
         }
     }
     /// A player condition plus one entity (`player`, `entity` keys).
@@ -2745,11 +2768,14 @@ impl Game<'_> {
         let mut changed = false;
         for c in names {
             let was = self.adv.progress.done(a);
+            let replaced = self.replacements();
             if self.adv.progress.grant(&a.id, c, &date) {
                 changed = true;
                 self.advancement_progress(a, c, ProgressType::Grant);
                 self.progress_changed(index);
-                if !was && self.adv.progress.done(a) {
+                // A progress hook that replaced this player's progress (a mod's import) completed
+                // nothing by this grant: no reward for it.
+                if !was && self.adv.progress.done(a) && self.replacements() == replaced {
                     self.award(index);
                 }
             }
@@ -2809,6 +2835,7 @@ impl Game<'_> {
         }
         for id in &p.removed {
             self.adv.progress.criteria.remove(id);
+            self.adv.progress.memo = None;
         }
         for a in p.added {
             list.retain(|o| o.id != a.id);
@@ -2866,6 +2893,7 @@ impl Game<'_> {
                 .map(|(name, _)| (name, String::new()))
                 .collect();
             self.adv.progress.criteria.insert(id, obtained);
+            self.adv.progress.memo = None;
             let a = &tree.list[i];
             if !p.reset
                 && p.show

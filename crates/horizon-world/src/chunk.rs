@@ -49,6 +49,10 @@ pub fn block_entity_pos(pos: (i32, i32, i32), chunk: [i32; 2]) -> (i32, i32, i32
 #[derive(Clone, Debug)]
 pub struct PalettedContainer {
     palette: Vec<Tag>,
+    // Only loaded input can contain equal tags in multiple slots. Remember the
+    // first slot of each such tag without changing the stored ids or bit width.
+    // New slots appended by `set` are already unique and need no entry here.
+    aliases: Option<Box<[u32]>>,
     storage: Option<PackedStorage>,
     entries: usize,
     min_bits: u8,
@@ -64,6 +68,7 @@ impl PalettedContainer {
         }
         Ok(Self {
             palette: vec![value],
+            aliases: None,
             storage: None,
             entries,
             min_bits,
@@ -97,6 +102,7 @@ impl PalettedContainer {
                     return Err(invalid("palette index outside palette"));
                 }
             }
+            result.aliases = duplicate_palette_slots(palette);
             result.storage = Some(storage);
         }
         result.extra = map.clone();
@@ -152,17 +158,64 @@ impl PalettedContainer {
         Ok(old)
     }
 
+    /// Maps unpacked cell indices into a minimal first-use palette, hashing each
+    /// distinct palette slot at most once rather than once per cell.
+    fn remap_first_use<'a>(palette_src: &'a [Tag], indices: &mut [u32]) -> Vec<&'a Tag> {
+        let mut palette: Vec<&'a Tag> = Vec::with_capacity(palette_src.len());
+        let mut seen: HashMap<&'a Tag, u32> = HashMap::with_capacity(palette_src.len());
+        let mut old_to_new = vec![u32::MAX; palette_src.len()];
+        for id in indices.iter_mut() {
+            let old = *id as usize;
+            let mapped = old_to_new[old];
+            if mapped != u32::MAX {
+                *id = mapped;
+            } else {
+                let value = &palette_src[old];
+                let new_id = *seen.entry(value).or_insert_with(|| {
+                    palette.push(value);
+                    palette.len() as u32 - 1
+                });
+                old_to_new[old] = new_id;
+                *id = new_id;
+            }
+        }
+        palette
+    }
+
     /// Rebuild a minimal palette in first-use order, preserving every entry.
     pub fn compact(&mut self) -> io::Result<()> {
-        let values = (0..self.entries)
-            .map(|i| self.get(i).cloned())
-            .collect::<io::Result<Vec<_>>>()?;
-        let mut compact = Self::uniform(values[0].clone(), self.entries, self.min_bits)?;
-        for (i, value) in values.into_iter().enumerate() {
-            compact.set(i, value)?;
-        }
-        compact.extra = std::mem::take(&mut self.extra);
-        *self = compact;
+        let Some(storage) = &self.storage else {
+            self.palette.truncate(1);
+            return Ok(());
+        };
+        let mut stack = [0u32; 4096];
+        let mut heap;
+        let indices: &mut [u32] = if self.entries <= stack.len() {
+            let slice = &mut stack[..self.entries];
+            storage.unpack_into(slice);
+            slice
+        } else {
+            heap = storage.unpack();
+            &mut heap
+        };
+        let new_palette: Vec<Tag> = Self::remap_first_use(&self.palette, indices)
+            .into_iter()
+            .cloned()
+            .collect();
+        let bits = bits_for_palette(new_palette.len(), self.min_bits);
+        self.storage = if bits == 0 {
+            None
+        } else {
+            let mut packed =
+                PackedStorage::new(bits, self.entries).map_err(|e| invalid(e.to_string()))?;
+            for (index, &id) in indices.iter().enumerate() {
+                packed.write(index, id);
+            }
+            Some(packed)
+        };
+        self.palette = new_palette;
+        // The rebuilt palette holds each tag once, so no slot aliases another.
+        self.aliases = None;
         Ok(())
     }
 
@@ -173,22 +226,30 @@ impl PalettedContainer {
     /// vanilla writes for the same cells.
     pub fn to_nbt(&self) -> Tag {
         let mut map = self.extra.clone();
-        let mut palette: Vec<&Tag> = Vec::with_capacity(self.palette.len());
-        let mut seen: HashMap<&Tag, u32> = HashMap::with_capacity(self.palette.len());
-        let mut ids = Vec::with_capacity(self.entries);
-        for index in 0..self.entries {
-            let id = self.storage.as_ref().map_or(0, |s| s.get(index).unwrap()) as usize;
-            let value = &self.palette[id];
-            ids.push(*seen.entry(value).or_insert_with(|| {
-                palette.push(value);
-                palette.len() as u32 - 1
-            }));
+        let Some(storage) = &self.storage else {
+            map.insert(key("palette"), Tag::List(vec![self.palette[0].clone()]));
+            return Tag::Compound(map);
+        };
+        let mut ids = storage.unpack();
+        if let Some(aliases) = &self.aliases {
+            for id in &mut ids {
+                if let Some(&first) = aliases.get(*id as usize) {
+                    *id = first;
+                }
+            }
+        }
+        let mut palette = Vec::with_capacity(self.palette.len().min(self.entries));
+        let mut remap = vec![u32::MAX; self.palette.len()];
+        for id in &mut ids {
+            let saved = &mut remap[*id as usize];
+            if *saved == u32::MAX {
+                *saved = palette.len() as u32;
+                palette.push(self.palette[*id as usize].clone());
+            }
+            *id = *saved;
         }
         let bits = bits_for_palette(palette.len(), self.min_bits);
-        map.insert(
-            key("palette"),
-            Tag::List(palette.into_iter().cloned().collect()),
-        );
+        map.insert(key("palette"), Tag::List(palette));
         if bits > 0 {
             let mut storage = PackedStorage::new(bits, self.entries).unwrap();
             for (index, id) in ids.into_iter().enumerate() {
@@ -201,6 +262,26 @@ impl PalettedContainer {
         }
         Tag::Compound(map)
     }
+}
+
+/// Resolve duplicate imported palette tags once, not once per cell on every save.
+fn duplicate_palette_slots(palette: &[Tag]) -> Option<Box<[u32]>> {
+    use std::collections::hash_map::Entry;
+
+    let mut seen = HashMap::with_capacity(palette.len());
+    let mut aliases: Option<Box<[u32]>> = None;
+    for (id, tag) in (0u32..).zip(palette) {
+        match seen.entry(tag) {
+            Entry::Vacant(slot) => {
+                slot.insert(id);
+            }
+            Entry::Occupied(slot) => {
+                let aliases = aliases.get_or_insert_with(|| (0..palette.len() as u32).collect());
+                aliases[id as usize] = *slot.get();
+            }
+        }
+    }
+    aliases
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -745,32 +826,42 @@ impl<'r> BlockSection<'r> {
         Ok(added)
     }
     pub fn compact(&mut self) -> io::Result<()> {
-        let values: Vec<_> = (0..4096).map(|i| self.get(i).unwrap()).collect();
-        self.palette.clear();
-        self.last = None;
-        self.counts.clear();
-        self.free.clear();
-        for state in &values {
-            if let Some(id) = id_in(&self.palette, &self.counts, &mut self.last, *state) {
-                self.counts[id as usize] += 1;
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        let mut indices = [0u32; 4096];
+        storage.unpack_into(&mut indices);
+        let mut old_to_new = vec![u32::MAX; self.palette.len()];
+        let mut new_palette = Vec::with_capacity(self.palette.len());
+        let mut new_counts = Vec::with_capacity(self.palette.len());
+        for id in indices.iter_mut() {
+            let old = *id as usize;
+            let mapped = old_to_new[old];
+            if mapped != u32::MAX {
+                *id = mapped;
+                new_counts[mapped as usize] += 1;
             } else {
-                self.palette.push(*state);
-                self.counts.push(1);
-                self.last = Some((*state, self.palette.len() as u32 - 1));
+                let new_id = new_palette.len() as u32;
+                old_to_new[old] = new_id;
+                new_palette.push(self.palette[old]);
+                new_counts.push(1);
+                *id = new_id;
             }
         }
-        let bits = bits_for_palette(self.palette.len(), 4);
+        let bits = bits_for_palette(new_palette.len(), 4);
         self.storage = if bits == 0 {
             None
         } else {
-            let mut storage = PackedStorage::new(bits, 4096).map_err(|e| invalid(e.to_string()))?;
-            let mut last = None;
-            for (i, state) in values.iter().enumerate() {
-                let id = id_in(&self.palette, &self.counts, &mut last, *state).unwrap();
-                storage.set(i, id).unwrap();
+            let mut packed = PackedStorage::new(bits, 4096).map_err(|e| invalid(e.to_string()))?;
+            for (i, &id) in indices.iter().enumerate() {
+                packed.write(i, id);
             }
-            Some(storage)
+            Some(packed)
         };
+        self.last = new_palette.first().map(|&state| (state, 0));
+        self.palette = new_palette;
+        self.counts = new_counts;
+        self.free.clear();
         Ok(())
     }
     pub fn to_nbt(&self) -> io::Result<Tag> {

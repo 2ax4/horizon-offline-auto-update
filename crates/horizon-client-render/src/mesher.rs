@@ -28,7 +28,7 @@ use crate::{
     blocks::{BlockFacts, RenderShape},
     chunk::{Chunk, MIN_Y},
     graphics::LeafCullingMode,
-    models::catalog::BakedFace,
+    models::catalog::{BakedFace, CullFlags},
 };
 use horizon_assets::model::Direction as ModelDirection;
 use horizon_core::{biome::BiomeZoom, geometry::Direction, position::BlockPos};
@@ -387,6 +387,119 @@ mod section_mesh_tests {
             ])
         );
     }
+
+    #[test]
+    fn sort_solid_for_lod_matches_sort_solid_without_meshlets() {
+        let quad = |positions: [[f32; 3]; 4], layer: u16, color: u32| {
+            positions.map(|pos| TerrainVertex::tiled(pos, [0.0, 0.0], layer, color, 0xF0F0))
+        };
+        let mut solid = Vec::new();
+        // +Y opaque face at y = 10
+        solid.extend(quad(
+            [
+                [0.0, 10.0, 0.0],
+                [0.0, 10.0, 4.0],
+                [4.0, 10.0, 4.0],
+                [4.0, 10.0, 0.0],
+            ],
+            OPAQUE_LAYER | 1,
+            0xFF11_2233,
+        ));
+        // +X cutout face at x = 8
+        solid.extend(quad(
+            [
+                [8.0, 0.0, 0.0],
+                [8.0, 4.0, 0.0],
+                [8.0, 4.0, 4.0],
+                [8.0, 0.0, 4.0],
+            ],
+            2,
+            0xFF44_5566,
+        ));
+        // -Z opaque face at z = 0
+        solid.extend(quad(
+            [
+                [4.0, 0.0, 0.0],
+                [4.0, 4.0, 0.0],
+                [0.0, 4.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+            OPAQUE_LAYER | 3,
+            0xFF77_8899,
+        ));
+        let translucent = quad(
+            [
+                [0.0, 12.0, 0.0],
+                [0.0, 12.0, 4.0],
+                [4.0, 12.0, 4.0],
+                [4.0, 12.0, 0.0],
+            ],
+            4,
+            0x80AA_BBCC,
+        )
+        .to_vec();
+        let solid_sources = vec![
+            TerrainSource::new(1, [0, 10, 0], 0, false),
+            TerrainSource::new(2, [8, 0, 0], 0, false),
+            TerrainSource::new(3, [0, 0, 0], 0, false),
+        ];
+        let solid_looks = vec![QuadLook([1, 2]), QuadLook([3, 4]), QuadLook([5, 6])];
+
+        let mut expected = SectionMesh {
+            solid: solid.clone(),
+            solid_sources: solid_sources.clone(),
+            translucent: translucent.clone(),
+            solid_looks: solid_looks.clone(),
+            ..Default::default()
+        };
+        expected.sort_solid();
+
+        let mut lod = SectionMesh {
+            solid: solid.clone(),
+            solid_sources,
+            translucent,
+            solid_looks,
+            ..Default::default()
+        };
+        lod.sort_solid_for_lod();
+
+        assert_eq!(
+            bytemuck::cast_slice::<TerrainVertex, u32>(&lod.solid),
+            bytemuck::cast_slice::<TerrainVertex, u32>(&expected.solid),
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<TerrainVertex, u32>(&lod.translucent),
+            bytemuck::cast_slice::<TerrainVertex, u32>(&expected.translucent),
+        );
+        assert_eq!(lod.sides, expected.sides);
+        assert_eq!(lod.bounds, expected.bounds);
+        assert_eq!(lod.solid_sources, expected.solid_sources);
+        assert_eq!(lod.solid_looks, expected.solid_looks);
+        assert!(lod.packed.is_empty());
+        assert!(!lod.packed_far);
+        assert!(lod.solid_tints.is_empty());
+        assert!(lod.meshlets.is_empty());
+        assert_eq!(lod.meshlets.capacity(), 0);
+
+        // Pre-populated stale meshlets, packed records, and tints are cleared.
+        let mut recycled = SectionMesh {
+            solid,
+            translucent: expected.translucent.clone(),
+            packed: vec![[1; 6]],
+            packed_far: true,
+            solid_tints: vec![0xFF_FFFF; 3],
+            meshlets: meshlet::build_section_meshlets(&expected.sides, &expected.solid, &[]),
+            ..Default::default()
+        };
+        assert!(!recycled.meshlets.is_empty());
+        recycled.sort_solid_for_lod();
+        assert!(recycled.meshlets.is_empty());
+        assert!(recycled.packed.is_empty());
+        assert!(!recycled.packed_far);
+        assert!(recycled.solid_tints.is_empty());
+        assert_eq!(recycled.sides, expected.sides);
+        assert_eq!(recycled.bounds, expected.bounds);
+    }
 }
 /// A shader terrain quad's unmodified source state and owning section cell. Two words
 /// per quad, kept beside (not in) the native 24-byte vertex format. Word 1 has cell XYZ
@@ -538,6 +651,9 @@ impl SectionMesh {
     /// is removed here so the renderer can compare the actual atlas layer.
     pub fn note_sprite_layer(&mut self, layer: u16) {
         let layer = layer & !crate::mesher::OPAQUE_LAYER;
+        if self.sprite_layers.last() == Some(&layer) {
+            return;
+        }
         if !self.sprite_layers.contains(&layer) {
             self.sprite_layers.push(layer);
         }
@@ -600,23 +716,60 @@ impl SectionMesh {
             &mut self.solid_sources,
             &mut self.solid_looks,
         );
-        self.bounds = self.compute_bounds();
         self.packed.clear();
-        self.meshlets.clear();
         self.packed_far = false;
         if packed::packing() && quads > 0 && self.solid_tints.len() == quads {
             packed::layout_into(&self.solid, &self.solid_tints, &mut self.packed);
         }
         self.solid_tints.clear();
         self.meshlets.clear();
-        if meshlet::packing_meshlets() && quads > 0 {
-            meshlet::build_section_meshlets_into(
+        let solid_bounds = if meshlet::packing_meshlets() && quads > 0 {
+            meshlet::build_section_meshlets_with_bounds(
                 &self.sides,
                 &self.solid,
                 &self.packed,
                 &mut self.meshlets,
-            );
+            )
+        } else {
+            None
+        };
+        self.bounds = match solid_bounds {
+            Some((min, max)) => Some(self.finish_bounds(min, max)),
+            None => self.compute_bounds(),
+        };
+    }
+
+    /// Finishes section bounds by folding `translucent` vertices and `BOUNDS_PAD`
+    /// onto precomputed solid vertex extrema.
+    fn finish_bounds(&self, min: [f32; 3], max: [f32; 3]) -> [glam::Vec3; 2] {
+        let mut min = glam::Vec3::from(min);
+        let mut max = glam::Vec3::from(max);
+        for v in &self.translucent {
+            let p = glam::Vec3::from(v.pos);
+            min = min.min(p);
+            max = max.max(p);
         }
+        let pad = glam::Vec3::splat(Self::BOUNDS_PAD);
+        [min - pad, max + pad]
+    }
+
+    /// Sorts the solid quads by the side they face for far-terrain (LOD) tiles,
+    /// without building near-section compact records or sub-section meshlets:
+    /// `Renderer::upload_lod` never registers LOD tiles in the mesh-shader
+    /// section store, and `lod::packed::lay_out` lays out the far-terrain
+    /// compact layout immediately after.
+    pub fn sort_solid_for_lod(&mut self) {
+        self.solid_tints.clear();
+        self.sides = sides::sort_sourced(
+            &mut self.solid,
+            &mut self.solid_tints,
+            &mut self.solid_sources,
+            &mut self.solid_looks,
+        );
+        self.bounds = self.compute_bounds();
+        self.packed.clear();
+        self.meshlets.clear();
+        self.packed_far = false;
     }
 
     /// Every face emitted since `start` belongs to this block, including multipart,
@@ -869,6 +1022,10 @@ pub struct MeshTables {
     /// By state, bit `d` set where its occlusion face toward direction `d` is the
     /// full block (`Info::face` 1): a face looking at it never shows.
     full_faces: Vec<u8>,
+    /// Per-state AO and light facts packed into one byte each (`lighting::AoInfo`),
+    /// keeping `lighting::ambient_occlusion`'s random neighbour lookups in L1D cache.
+    /// Empty if any state cannot be represented losslessly (falls back to `info`).
+    ao_info: Vec<lighting::AoInfo>,
     pub visibility: FaceVisibility,
     water_still: u16,
     water_flow: u16,
@@ -1171,6 +1328,7 @@ impl MeshTables {
                 .iter()
                 .map(|i| (0..6).fold(0, |bits, d| bits | u8::from(i.face[d] == 1) << d))
                 .collect(),
+            ao_info: lighting::AoInfo::build_table(&info),
             info,
             visibility,
             water_still: layer("minecraft:block/water_still")?,
@@ -1628,6 +1786,14 @@ const DIRECTIONS: [(Direction, [i32; 3], u8); 6] = [
 const fn direction_info(d: Direction) -> (Direction, [i32; 3], u8) {
     (d, d.normal(), d.opposite() as u8)
 }
+const _: () = {
+    assert!(Direction::Down as u8 == ModelDirection::Down as u8);
+    assert!(Direction::Up as u8 == ModelDirection::Up as u8);
+    assert!(Direction::North as u8 == ModelDirection::North as u8);
+    assert!(Direction::South as u8 == ModelDirection::South as u8);
+    assert!(Direction::West as u8 == ModelDirection::West as u8);
+    assert!(Direction::East as u8 == ModelDirection::East as u8);
+};
 /// `step_index` of each direction's normal, indexed like `DIRECTIONS`: the
 /// padded index of a block's neighbour is its own plus one of these.
 const OFFSETS: [isize; 6] = {
@@ -1651,6 +1817,7 @@ pub struct MeshScratch {
     /// is `isSolidRender` (`MeshTables::solid`).
     solid_rows: Vec<u32>,
     tints: TintScratch,
+    pub(crate) better_grass_mode: horizon_optifine::better_grass::Mode,
 }
 /// Fills `rows` with the padded section's `isSolidRender` blocks, one bit each (`MeshScratch::solid_rows`).
 fn solid_rows(pad: &Padded, solid: &[bool], rows: &mut Vec<u32>) {
@@ -2457,7 +2624,12 @@ impl Mesher<'_> {
         let info = &self.tables.info;
         let full_faces = &self.tables.full_faces;
         let catalog = &self.render.model_catalog;
-        let mut models = Vec::new();
+        let better_grass = self.render.better_grass.as_ref().and_then(|rules| {
+            let mode = rules.resolve(scratch.better_grass_mode);
+            (mode != horizon_optifine::better_grass::Mode::Off).then_some((rules, mode))
+        });
+        let cull_flags = catalog.cull_flags();
+        let mut model_slots: smallvec::SmallVec<[u32; 8]> = smallvec::SmallVec::new();
         for y in 0..16 {
             for z in 0..16 {
                 // The padded index of the row's x = 0 cell: `pi(x, y, z)` is
@@ -2523,43 +2695,31 @@ impl Mesher<'_> {
                     }
                     let world = BlockPos::new(center.x * 16 + x, base_y + y, center.z * 16 + z);
                     if catalog
-                        .models_at(BlockStateId(id), world, &mut models)
+                        .model_slots_at_small(BlockStateId(id), world, &mut model_slots)
                         .is_err()
                     {
                         continue;
                     }
-                    // ModelBlockRenderer: the first part decides smooth lighting
-                    // for all; light-emitting blocks are always lit flat.
-                    let Some(first) = models.first() else {
+                    let Some(&first_slot) = model_slots.first() else {
                         continue;
                     };
-                    let ao = self.smooth_lighting && state.emission == 0 && first.ambient_occlusion;
-                    let origin = match offset(state, world.x, world.z) {
-                        Some(o) => [
-                            x as f32 + o[0] as f32,
-                            y as f32 + o[1] as f32,
-                            z as f32 + o[2] as f32,
-                        ],
-                        None => [x as f32, y as f32, z as f32],
-                    };
-                    let mut cull_mask = 0u8;
-                    for model in &models {
-                        for face in &model.faces {
-                            if let Some(d) = face.quad.cull {
-                                cull_mask |= 1 << (d as u8);
-                            }
-                        }
+                    let mut combined_flags = CullFlags::EMPTY;
+                    for &slot in &model_slots {
+                        combined_flags = combined_flags.union(cull_flags[slot as usize]);
                     }
-                    let mut visible = [false; 6];
+                    let cull_mask = combined_flags.cull_mask();
+                    let has_uncullable = combined_flags.has_uncullable();
+                    let mut visible_mask = 0u8;
                     if cull_mask != 0 {
                         for (d, [dx, dy, dz], opposite) in DIRECTIONS {
-                            if cull_mask & (1 << (d as u8)) == 0 {
+                            let bit = 1u8 << (d as u8);
+                            if cull_mask & bit == 0 {
                                 continue;
                             }
                             let neighbor =
                                 pad.blocks[(cell as isize + OFFSETS[d as usize]) as usize];
                             if neighbor == 0 {
-                                visible[d as usize] = true;
+                                visible_mask |= bit;
                                 continue;
                             }
                             // `should_render_face`'s first test, without its lookups: a
@@ -2593,7 +2753,7 @@ impl Mesher<'_> {
                             if opaque_leaves || opaque_ice || culled_leaf {
                                 continue;
                             }
-                            visible[d as usize] = (state.leaves && state.face[d as usize] == 0)
+                            let show = (state.leaves && state.face[d as usize] == 0)
                                 || self
                                     .visibility
                                     .should_render_face(
@@ -2603,18 +2763,77 @@ impl Mesher<'_> {
                                         true,
                                     )
                                     .unwrap_or(true);
+                            if show {
+                                visible_mask |= bit;
+                            }
                         }
                     }
+                    if visible_mask == 0 && !has_uncullable {
+                        continue;
+                    }
+                    // ModelBlockRenderer: the first part decides smooth lighting
+                    // for all; light-emitting blocks are always lit flat.
+                    let Some(first) = catalog.model_by_slot(first_slot) else {
+                        continue;
+                    };
+                    let ao = self.smooth_lighting && state.emission == 0 && first.ambient_occlusion;
+                    let origin = match offset(state, world.x, world.z) {
+                        Some(o) => [
+                            x as f32 + o[0] as f32,
+                            y as f32 + o[1] as f32,
+                            z as f32 + o[2] as f32,
+                        ],
+                        None => [x as f32, y as f32, z as f32],
+                    };
                     let interior_leaf = state.leaves
                         && self.leaf_culling.is_interior()
                         && leaf.interior(self.leaf_culling, x, y, z);
                     let connected = &self.render.connected;
                     let start = [out.solid.len(), out.translucent.len()];
                     let mut tint0: Option<Option<u32>> = None;
-                    for model in &models {
+                    let ground = better_grass
+                        .and_then(|(rules, mode)| Some((rules, mode, rules.ground(id)?)));
+                    let mut replaced_sides = 0u8;
+                    for &slot in &model_slots {
+                        let flags = cull_flags[slot as usize];
+                        if (flags.cull_mask() & visible_mask) == 0 && !flags.has_uncullable() {
+                            continue;
+                        }
+                        let Some(model) = catalog.model_by_slot(slot) else {
+                            continue;
+                        };
                         for face in &model.faces {
-                            if face.quad.cull.is_some_and(|d| !visible[d as usize]) {
+                            if face
+                                .quad
+                                .cull
+                                .is_some_and(|d| visible_mask & (1u8 << (d as u8)) == 0)
+                            {
                                 continue;
+                            }
+                            let side = ground.and_then(|(rules, mode, ground)| {
+                                let facing = face.quad.cull?;
+                                if facing != face.quad.facing
+                                    || !ground.is_side(face.quad.positions, facing)
+                                {
+                                    return None;
+                                }
+                                let below = if mode == horizon_optifine::better_grass::Mode::Fast {
+                                    0
+                                } else {
+                                    let step = OFFSETS[facing as usize]
+                                        + OFFSETS[ModelDirection::Down as usize];
+                                    pad.blocks[(cell as isize + step) as usize]
+                                };
+                                Some((facing, rules.side(ground, mode, below)?))
+                            });
+                            if let Some((facing, _)) = side {
+                                // Grass's stock side has a base and a tinted overlay; the
+                                // Better Grass side supplies its own layers exactly once.
+                                let bit = 1 << facing as u8;
+                                if replaced_sides & bit != 0 {
+                                    continue;
+                                }
+                                replaced_sides |= bit;
                             }
                             // A pane's top and bottom strips between stacked panes, with
                             // connected textures.
@@ -2652,6 +2871,7 @@ impl Mesher<'_> {
                                 (id, state),
                                 world,
                                 interior_leaf,
+                                side.map(|(_, side)| side),
                             );
                         }
                     }
@@ -2699,6 +2919,7 @@ impl Mesher<'_> {
             (id, state),
             world,
             interior_leaf,
+            None,
         );
     }
     #[allow(clippy::too_many_arguments)]
@@ -2716,6 +2937,7 @@ impl Mesher<'_> {
         (id, state): (u32, &Info),
         world: BlockPos,
         interior_leaf: bool,
+        better_grass: Option<crate::better_grass::Side>,
     ) {
         let q = &face.quad;
         // A quad's own light (a model's glowing part) may raise the tier; whether it
@@ -2739,9 +2961,25 @@ impl Mesher<'_> {
         let shape = &face.shapes[usize::from(state.full)];
         // Grey level per vertex before tinting, vanilla light coords, and ambient occlusion factor.
         let (gray, coords, ao_factor) = if ao {
-            let info = &self.tables.info;
-            let (brightness, coords) =
-                lighting::ambient_occlusion(pad, info, state, pos, shape, q.facing);
+            let (brightness, coords) = if self.tables.ao_info.len() == self.tables.info.len() {
+                lighting::ambient_occlusion(
+                    pad,
+                    &self.tables.ao_info,
+                    self.tables.ao_info[id as usize],
+                    pos,
+                    shape,
+                    q.facing,
+                )
+            } else {
+                lighting::ambient_occlusion_full(
+                    pad,
+                    &self.tables.info,
+                    state,
+                    pos,
+                    shape,
+                    q.facing,
+                )
+            };
             let gray = if self.separate_ao {
                 [lighting::gray(directional); 4]
             } else {
@@ -2755,9 +2993,10 @@ impl Mesher<'_> {
             };
             ([lighting::gray(directional); 4], [coords; 4], [1.0f32; 4])
         };
-        let tint = if q.tint_index < 0 {
+        let tint_index = better_grass.map_or(q.tint_index, |side| side.tint);
+        let tint = if tint_index < 0 {
             None
-        } else if q.tint_index == 0 {
+        } else if tint_index == 0 {
             *tint0.get_or_insert_with(|| {
                 self.tables
                     .tint_at((id, state), 0, tints, pos, self.nether_shading, false)
@@ -2765,14 +3004,14 @@ impl Mesher<'_> {
         } else {
             self.tables.tint_at(
                 (id, state),
-                q.tint_index,
+                tint_index,
                 tints,
                 pos,
                 self.nether_shading,
                 false,
             )
         };
-        let tint = match q.color {
+        let tint = match q.color.filter(|_| better_grass.is_none()) {
             Some(c) => {
                 let t = tint.unwrap_or(0xFF_FFFF);
                 let channel = |s: u32| (t >> s & 255) * (c as u32 >> s & 255) / 255;
@@ -2801,23 +3040,38 @@ impl Mesher<'_> {
             }
         };
         let neighbour = |n: [i32; 3]| pad.blocks[(cell as isize + step_index(n)) as usize];
-        let fused = face.fusion.and_then(|rule| {
-            fusion.pick(
-                rule,
-                id,
-                CtmFace::ALL[q.facing as usize],
-                q.tint_index,
-                neighbour,
-                |s| {
-                    self.tables
-                        .info
-                        .get(s as usize)
-                        .is_some_and(|i| i.opaque_cube)
-                },
-                &mut push,
-            )
-        });
-        let pick = if let Some(pick) = fused {
+        let fused = face
+            .fusion
+            .filter(|_| better_grass.is_none())
+            .and_then(|rule| {
+                fusion.pick(
+                    rule,
+                    id,
+                    CtmFace::ALL[q.facing as usize],
+                    q.tint_index,
+                    neighbour,
+                    |s| {
+                        self.tables
+                            .info
+                            .get(s as usize)
+                            .is_some_and(|i| i.opaque_cube)
+                    },
+                    &mut push,
+                )
+            });
+        let pick = if let Some(side) = better_grass {
+            if let Some(TileLayer::Layer {
+                layer, translucent, ..
+            }) = side.overlay
+            {
+                push(crate::connected::Overlay {
+                    layer,
+                    translucent,
+                    tint: Some((0, None)),
+                });
+            }
+            Pick::Tile(side.tile)
+        } else if let Some(pick) = fused {
             pick
         } else if connected.is_empty() {
             Pick::Keep
@@ -2872,7 +3126,7 @@ impl Mesher<'_> {
         // land where the neighbours are: on a pane, tiles take the cube's own UVs.
         let standard = || q.positions.map(|p| standard_uv(q.facing, p));
         let tiled = !matches!(pick, Pick::Keep);
-        let corners = if state.pane && tiled {
+        let corners = if better_grass.is_some() || state.pane && tiled {
             vertices(tint, standard())
         } else {
             // The face's own UVs, already packed: no per-vertex rounding.
@@ -3035,13 +3289,18 @@ impl Mesher<'_> {
                 true => (&mut out.translucent_looks, out.translucent.len() / 4),
                 false => (&mut out.solid_looks, out.solid.len() / 4),
             };
-            looks.resize(quads - 1, QuadLook::default());
+            let prior = quads - 1;
+            if looks.len() != prior {
+                looks.resize(prior, QuadLook::default());
+            }
             looks.push(look);
         }
         if !translucent {
             // Quads other code put in `solid` (lava) have no tint known.
             let quad = out.solid.len() / 4 - 1;
-            out.solid_tints.resize(quad, packed::UNKNOWN_TINT);
+            if out.solid_tints.len() != quad {
+                out.solid_tints.resize(quad, packed::UNKNOWN_TINT);
+            }
             out.solid_tints.push(tint.unwrap_or(packed::WHITE));
         }
     }
@@ -3273,5 +3532,18 @@ mod quarter_tests {
         assert_eq!(standard_uv(D::North, [1.0, 1.0, 0.0]), [0.0, 0.0]);
         assert_eq!(standard_uv(D::East, [1.0, 0.0, 1.0]), [0.0, 1.0]);
         assert_eq!(standard_uv(D::Down, [0.0, 0.0, 1.0]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn note_sprite_layer_dedups_consecutive_and_nonconsecutive_layers() {
+        let mut mesh = SectionMesh::default();
+        mesh.note_sprite_layer(7);
+        mesh.note_sprite_layer(7);
+        mesh.note_sprite_layer(7 | OPAQUE_LAYER);
+        mesh.note_sprite_layer(3 | OPAQUE_LAYER);
+        mesh.note_sprite_layer(3);
+        mesh.note_sprite_layer(7);
+        mesh.note_sprite_layer(12);
+        assert_eq!(mesh.sprite_layers, [7, 3, 12]);
     }
 }

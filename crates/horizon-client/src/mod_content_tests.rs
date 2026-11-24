@@ -766,6 +766,8 @@ fn creative_tabs_keep_vanilla_items_missing_from_search() {
         block_entity_types: Vec::new(),
         block_entity_factories: BTreeMap::new(),
         menu_types: Vec::new(),
+        vanilla_contexts: BTreeMap::new(),
+        warnings: Vec::new(),
         states: 0,
         defaults: BTreeMap::new(),
         sounds: BTreeMap::new(),
@@ -2294,6 +2296,217 @@ fn folder_mod(dir: &Path, files: &[(&str, &str)]) -> ContentMod {
     }
 }
 
+#[test]
+fn content_mod_trims_keep_their_wire_ids_and_resolve_both_draw_paths() {
+    use crate::datapack::{DataPack, DataStore};
+    use crate::item_render::{ItemRenderer, LayerGeometry, stack_view};
+    use crate::trims::{TrimRegistry, TrimTexture};
+    use horizon_assets::item_model::{DisplayContext, NoEnv};
+    use horizon_assets::resource_source::{Resource, ResourceSource};
+    use horizon_core::nbt::Tag;
+    use horizon_protocol::{
+        buf::{Codec, Reader, Writer},
+        item::Slot,
+        packets::configuration::RegistryData,
+        registry::Dynamic,
+    };
+
+    let scratch = tempfile::tempdir().unwrap();
+    let base = scratch.path().join("base");
+    let registry_report = serde_json::json!({
+        "minecraft:item": {"entries": {"minecraft:diamond_chestplate": {"protocol_id": 0}}},
+        "minecraft:block": {"entries": {"minecraft:stone": {"protocol_id": 0}}},
+        "minecraft:data_component_type": {"entries": {
+            "minecraft:trim": {"protocol_id": horizon_protocol::item::component::TRIM}
+        }}
+    })
+    .to_string();
+    for (name, text) in [
+        ("horizon-resources.json", "{}"),
+        (
+            "facts.json",
+            r#"{"states":[["minecraft:stone"]],"defaults":{"minecraft:stone":0}}"#,
+        ),
+        (
+            "gameplay-facts.json",
+            r#"{"states":[{"item":"minecraft:stone"}]}"#,
+        ),
+        ("registries.json", registry_report.as_str()),
+        (
+            "items.json",
+            r#"{"minecraft:diamond_chestplate":{"minecraft:item_model":"trim_assets:chestplate"}}"#,
+        ),
+        (
+            "assets/minecraft/models/item/generated.json",
+            r#"{"parent":"minecraft:builtin/generated"}"#,
+        ),
+    ] {
+        let file = base.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+    let folder = scratch.path().join("trimmer");
+    let base_color = [180, 180, 180, 255];
+    let ruby_color = [230, 6, 42, 255];
+    for (name, color) in [
+        ("palettes/base", base_color),
+        ("palettes/trim/ruby", ruby_color),
+        ("trims/entity/humanoid/coast", base_color),
+        ("trims/items/chestplate", base_color),
+    ] {
+        let path = folder.join(format!("assets/trim_assets/textures/{name}.png"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut png = png::Encoder::new(fs::File::create(path).unwrap(), 1, 1);
+        png.set_color(png::ColorType::Rgba);
+        png.set_depth(png::BitDepth::Eight);
+        png.write_header()
+            .unwrap()
+            .write_image_data(&color)
+            .unwrap();
+    }
+    let mods = [folder_mod(
+        &folder,
+        &[
+            ("horizon-mod.toml", &manifest("trimmer", "\"trim_assets\"")),
+            (
+                "data/trim_assets/trim_material/gems/ruby.json",
+                r#"{"palette_id":"trim_assets:trim/ruby","description":"Ruby"}"#,
+            ),
+            (
+                "data/trim_assets/trim_pattern/coast.json",
+                r#"{"asset_id":"trim_assets:coast","description":"Coast","decal":false}"#,
+            ),
+            (
+                "data/trim_assets/loot_table/not_a_trim.json",
+                r#"{"type":"minecraft:empty","palette_id":"trim_assets:trim/ruby","asset_id":"trim_assets:coast"}"#,
+            ),
+            (
+                "assets/trim_assets/textures/trims/entity/humanoid/coast.png.mcmeta",
+                r#"{"palette":{"base_palette":"trim_assets:base"}}"#,
+            ),
+            (
+                "assets/minecraft/atlases/items.json",
+                r#"{"sources":[{"type":"minecraft:paletted_permutations","textures":["trim_assets:trims/items/chestplate"],"palette_key":"trim_assets:base","permutations":{"ruby":"trim_assets:trim/ruby"}}]}"#,
+            ),
+            (
+                "assets/trim_assets/items/chestplate.json",
+                r#"{"model":{"type":"minecraft:select","property":"minecraft:trim_material","cases":[{"when":"trim_assets:gems/ruby","model":{"type":"minecraft:model","model":"trim_assets:item/ruby_chestplate"}}],"fallback":{"type":"minecraft:empty"}}}"#,
+            ),
+            (
+                "assets/trim_assets/models/item/ruby_chestplate.json",
+                r#"{"parent":"minecraft:item/generated","textures":{"layer0":"trim_assets:trims/items/chestplate_ruby"}}"#,
+            ),
+        ],
+    )];
+    let cache = scratch.path().join("cache");
+    let prepared = resource_root_fixture(&base, Path::new(""), &mods, &cache).unwrap();
+    let root = resolved_resources(&base, prepared, Path::new(""), &mods, cache).unwrap();
+
+    let material = "trim_assets:gems/ruby";
+    let pattern = "trim_assets:coast";
+    let content = DataPack::from_source("horizon-content".into(), root.data_changes().clone());
+    let world = DataPack::from_source(
+        "world".into(),
+        ResourceSource::indexed(BTreeMap::from([(
+            "data/trim_assets/trim_material/gems/ruby.json".into(),
+            Resource::bytes(
+                br#"{"palette_id":"trim_assets:trim/ruby","description":"World Ruby"}"#.to_vec(),
+            ),
+        )])),
+    );
+    let files = DataStore::load(&[&content, &world]).files;
+    assert_eq!(files["trim_material/trim_assets:gems/ruby"].len(), 2);
+    assert!(files.contains_key("loot_table/trim_assets:not_a_trim"));
+    let files: Vec<_> = files.into_iter().collect();
+    let overlay = horizon_world::loot::PackOverlay::new(&files);
+    let item_data =
+        crate::test_resources::item_data(root.prepared(), DataLoadOrigin::ClientPreload).unwrap();
+    let sync = crate::lan::data::SyncData::load(
+        root.prepared(),
+        &overlay,
+        item_data.defaults(),
+        &crate::crafting::ResolvedSources::default(),
+    )
+    .unwrap();
+    let mut client = Dynamic::default();
+    for packet in sync.registry_packets(true, &crate::chunk::LevelShapes::VANILLA) {
+        let mut bytes = Writer::new();
+        RegistryData::write(&packet, &mut bytes);
+        client.add(RegistryData::read(&mut Reader::new(&bytes.data)).unwrap());
+    }
+    let ruby_id = client.id("minecraft:trim_material", material).unwrap();
+    assert_eq!(
+        client
+            .data("minecraft:trim_material", ruby_id)
+            .unwrap()
+            .get("description"),
+        Some(&Tag::String("World Ruby".into())),
+    );
+
+    let mut chestplate = crate::items::ItemStack::new("minecraft:diamond_chestplate", 1);
+    chestplate.data_mut().trim = Some((material.into(), pattern.into()));
+    let wire = crate::lan::guest::stack_to_network(|_| 0, |r, n| sync.id(r, n), &Some(chestplate));
+    let mut bytes = Writer::new();
+    Slot::write(&wire, &mut bytes);
+    let wire = Slot::read(&mut Reader::new(&bytes.data)).unwrap().unwrap();
+    let chestplate = crate::item_sync::from_network(&wire, &sync.builtin, &client);
+    let (material, pattern) =
+        crate::item_data::trim::named(chestplate.data().unwrap().trim.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        (material, pattern),
+        ("trim_assets:gems/ruby", "trim_assets:coast")
+    );
+
+    let source = root.source();
+    let registry = TrimRegistry::load(source);
+    let texture = TrimTexture::resolve(&registry, &[], material, pattern, "humanoid").unwrap();
+    assert_eq!(texture.generate(source), Some((1, 1, ruby_color.to_vec())));
+    assert!(
+        TrimTexture::resolve(
+            &registry,
+            &[],
+            "trim_assets:not_a_trim",
+            pattern,
+            "humanoid"
+        )
+        .is_none()
+    );
+
+    let renderer = ItemRenderer::load(&root, &item_data).unwrap();
+    let icon = renderer.resolve(
+        &stack_view(&chestplate),
+        DisplayContext::Gui,
+        None,
+        None,
+        0,
+        &NoEnv,
+    );
+    let [layer] = icon.layers.as_slice() else {
+        panic!("expected the ruby icon model");
+    };
+    let LayerGeometry::Quads(model) = &layer.geometry else {
+        panic!("expected baked item geometry");
+    };
+    let sprite = "trim_assets:trims/items/chestplate_ruby";
+    assert!(
+        model
+            .quads
+            .iter()
+            .any(|quad| quad.material.sprite == sprite)
+    );
+    let atlases = crate::atlas_sources::atlases(source);
+    let origins = crate::atlas_sources::list(
+        &atlases["minecraft:items"],
+        &crate::atlas_sources::list_textures(source),
+        &mut crate::atlas_sources::unasked,
+    );
+    let pixels = crate::atlas_sources::generate(&origins[sprite], &|texture, dir| {
+        let file = crate::atlas_sources::texture_resource(texture, dir);
+        crate::hud::decode_bytes(&source.read(&file).ok()?).ok()
+    });
+    assert_eq!(pixels, Some((1, 1, ruby_color.to_vec())));
+}
+
 /// The game mounts a flat package's entries as its checks read them: by the END record's
 /// count. One it lists past that count, outside the mod's namespaces, is never loaded.
 #[test]
@@ -3386,6 +3599,10 @@ fn signs_take_their_form_wood_and_wall_block_from_their_declaration() {
                 "data/signs/horizon/block/road_sign.json",
                 r#"{"template": "minecraft:stone"}"#,
             ),
+            (
+                "data/signs/horizon/block/notice_with_vanilla_wall.json",
+                r#"{"template": "minecraft:oak_sign"}"#,
+            ),
         ],
     );
     let root = resource_root_fixture(
@@ -3458,7 +3675,218 @@ fn signs_take_their_form_wood_and_wall_block_from_their_declaration() {
     // Vanilla's pair stays as it was.
     let oak = behaviours.item_binding("minecraft:oak_sign").unwrap();
     assert_eq!(oak.wall_block, id("minecraft:oak_wall_sign"));
+    let fallback = behaviours
+        .item_binding("signs:notice_with_vanilla_wall")
+        .unwrap();
+    assert_eq!(fallback.wall_block, oak.wall_block);
+    assert_eq!(fallback.attachment, oak.attachment);
     let _ = fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn content_wall_pairs_place_each_forms_own_state() {
+    use horizon_core::{
+        geometry::{Direction, Vec3},
+        position::BlockPos,
+        random::LegacyRandom,
+    };
+    use horizon_world::{
+        level::{
+            Behaviours, LevelAccess, LevelEvent, PlaceContext, PlaceOutcome, PlacementContext,
+            Ticks,
+        },
+        loot::PackOverlay,
+        registry::BlockStateId,
+    };
+    use std::cell::RefCell;
+
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-mod-wall-pairs-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let m = folder_mod(
+        &scratch.join("sconce"),
+        &[
+            ("horizon-mod.toml", &manifest("sconce", "")),
+            (
+                "data/sconce/horizon/block/floor.json",
+                r#"{"template":"minecraft:redstone_torch","wall_block":"sconce:wall"}"#,
+            ),
+            (
+                "data/sconce/horizon/block/wall.json",
+                r#"{"template":"minecraft:redstone_wall_torch","item":false}"#,
+            ),
+            (
+                "data/sconce/horizon/block/ceiling.json",
+                r#"{"template":"minecraft:lantern","wall_block":"sconce:ceiling_wall","attachment_direction":"up"}"#,
+            ),
+            (
+                "data/sconce/horizon/block/ceiling_wall.json",
+                r#"{"template":"minecraft:stone","item":false}"#,
+            ),
+        ],
+    );
+    let root = resource_root_fixture(&base, Path::new(""), &[m], &scratch.join("cache")).unwrap();
+    let registry = horizon_world::level::data::load_registry(&root).unwrap();
+    let facts = BlockFacts::load(&root, &registry).unwrap();
+    let b = Behaviours::load(&registry, &root).unwrap();
+    let default = |name| registry.default_state(name).unwrap();
+    let defaults = horizon_world::item_defaults::read(&root).unwrap();
+    let items = Items::load(&root, &registry, &facts, &PackOverlay::NONE, &defaults).unwrap();
+    for (wall, owner) in [
+        ("sconce:wall", "sconce:floor"),
+        ("sconce:ceiling_wall", "sconce:ceiling"),
+    ] {
+        let fact = facts.get(default(wall));
+        assert_eq!(&*fact.item, owner);
+        assert_eq!(&*fact.pick_item, owner);
+        assert_eq!(items.get(owner).unwrap().block, Some(default(owner)));
+        assert!(b.item_binding(wall).is_none());
+    }
+    assert_eq!(
+        b.item_binding("sconce:floor").unwrap().attachment,
+        Some(Direction::Down)
+    );
+    assert_eq!(
+        b.item_binding("sconce:ceiling").unwrap().attachment,
+        Some(Direction::Up)
+    );
+
+    let floor = default("sconce:floor");
+    let wall = default("sconce:wall");
+    let ceiling = default("sconce:ceiling");
+    let ceiling_wall = default("sconce:ceiling_wall");
+    let floor_chosen = b.table.set_bool(floor, b.props.lit, false);
+    let wall_chosen = b.table.set_bool(
+        b.table.set_dir(wall, b.props.facing, Direction::East),
+        b.props.lit,
+        false,
+    );
+    let ceiling_chosen = b.table.set_bool(ceiling, b.props.hanging, true);
+    assert_ne!(floor_chosen, floor);
+    assert_ne!(wall_chosen, wall);
+    assert_ne!(ceiling_chosen, ceiling);
+
+    // The same LevelAccess seam used by native block parts: each form may
+    // answer with one of its own states, before the common survival check.
+    struct Level {
+        air: BlockStateId,
+        blocks: std::collections::HashMap<BlockPos, BlockStateId>,
+        random: LegacyRandom,
+        answers: [(BlockStateId, BlockStateId); 3],
+        asked: RefCell<Vec<BlockStateId>>,
+    }
+    impl horizon_world::level::BlockEntityNeighbors for Level {}
+    impl LevelAccess for Level {
+        fn block_state(&self, pos: BlockPos) -> BlockStateId {
+            self.blocks.get(&pos).copied().unwrap_or(self.air)
+        }
+        fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
+            Some(self.blocks.insert(pos, state).unwrap_or(self.air))
+        }
+        fn is_loaded(&self, _: BlockPos) -> bool {
+            true
+        }
+        fn random(&mut self) -> &mut LegacyRandom {
+            &mut self.random
+        }
+        fn game_time(&self) -> i64 {
+            0
+        }
+        fn emit(&mut self, _: LevelEvent) {}
+        fn before_state_for_placement(
+            &self,
+            state: BlockStateId,
+            _: &PlacementContext,
+            _: horizon_world::fluid::FluidState,
+            answer: &mut Option<Option<BlockStateId>>,
+        ) {
+            self.asked.borrow_mut().push(state);
+            if let Some((_, chosen)) = self.answers.iter().find(|(s, _)| *s == state) {
+                *answer = Some(Some(*chosen));
+            }
+        }
+    }
+    let at = BlockPos::new(0, 70, 0);
+    let stone = default("minecraft:stone");
+    for (item, clicked, face, pitch, support, expected_wall, expected) in [
+        (
+            "sconce:floor",
+            BlockPos::new(0, 69, 0),
+            Direction::Up,
+            80.0,
+            true,
+            wall,
+            Some(floor_chosen),
+        ),
+        (
+            "sconce:floor",
+            BlockPos::new(-1, 70, 0),
+            Direction::East,
+            0.0,
+            true,
+            wall,
+            Some(wall_chosen),
+        ),
+        (
+            "sconce:ceiling",
+            BlockPos::new(0, 71, 0),
+            Direction::Down,
+            -80.0,
+            true,
+            ceiling_wall,
+            Some(ceiling_chosen),
+        ),
+        (
+            "sconce:ceiling",
+            BlockPos::new(-1, 70, 0),
+            Direction::East,
+            0.0,
+            true,
+            ceiling_wall,
+            Some(ceiling_wall),
+        ),
+        ("sconce:floor", at, Direction::Up, 80.0, false, wall, None),
+    ] {
+        let mut level = Level {
+            air: facts.air,
+            blocks: Default::default(),
+            random: LegacyRandom::new(1),
+            answers: [
+                (floor, floor_chosen),
+                (wall, wall_chosen),
+                (ceiling, ceiling_chosen),
+            ],
+            asked: RefCell::default(),
+        };
+        if support {
+            level.blocks.insert(clicked, stone);
+        }
+        let ctx = PlaceContext {
+            clicked_pos: clicked,
+            face,
+            hit: Vec3::new(f64::from(clicked.x) + 0.5, f64::from(clicked.y) + 0.5, 0.5),
+            inside: false,
+            yaw: 0.0,
+            pitch,
+            sneaking: false,
+            item: item.into(),
+            can_use_game_master_blocks: false,
+        };
+        let outcome = b.place_block(&mut level, &mut Ticks::default(), &ctx);
+        match expected {
+            Some(chosen) => assert!(
+                matches!(outcome, PlaceOutcome::Placed { pos, state } if pos == at && state == chosen),
+                "{item} on {face:?}"
+            ),
+            None => assert!(matches!(outcome, PlaceOutcome::Failed)),
+        }
+        assert_eq!(level.block_state(at), expected.unwrap_or(facts.air));
+        assert_eq!(level.asked.borrow().first(), Some(&expected_wall));
+    }
+    fs::remove_dir_all(scratch).unwrap();
 }
 
 /// A fence gate of a mod is a vanilla `FenceGateBlock` through its template, with

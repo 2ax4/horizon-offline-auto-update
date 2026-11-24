@@ -275,6 +275,28 @@ impl Entry {
         let Some(root) = &self.directory else {
             return Ok(());
         };
+        // The inventory may have been built before a player pinned this version. Keep the
+        // same lock used for edits until the version has been removed.
+        let _version_lock = if self.category == Category::SpareGameBuilds
+            && self.relative.parent() == Some(Path::new("versions"))
+        {
+            let tag = self
+                .relative
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| Error::Unsafe(self.path.clone()))?;
+            let lock =
+                instances::lock_store(&backend::data_dir()).map_err(std::io::Error::other)?;
+            let installed = backend::installed_checked().map_err(std::io::Error::other)?;
+            if let Some(instance) =
+                instances::version_user(&installed, tag).map_err(std::io::Error::other)?
+            {
+                return Err(Error::InstanceVersion(instance));
+            }
+            Some(lock)
+        } else {
+            None
+        };
         let access = self.access()?;
         if matches!(access, Access::LeasedGame) {
             return crate::cache_cleanup::delete_game_unit_in(
@@ -305,6 +327,42 @@ fn add(
 ) -> Result<(), Error> {
     entries.push(Entry::fixed(root, Path::new(relative), category)?);
     Ok(())
+}
+
+/// Detached trees can remain beside any managed cache after an interrupted removal: every
+/// `.trash-*` beside one of `entries`, or in one of the `extra` folders. A leftover beside a game's
+/// cache may hold the links the game made in that cache, so it takes that cache's rule: a link is
+/// counted as nothing and never followed (#18166). Every other leftover stays strict.
+fn leftovers(entries: &[Entry], extra: &[PathBuf]) -> Result<Vec<Entry>, Error> {
+    let parents: HashSet<_> = entries
+        .iter()
+        .filter_map(|entry| entry.path.parent().map(Path::to_owned))
+        .chain(extra.iter().cloned())
+        .collect();
+    let game_made: HashSet<_> = entries
+        .iter()
+        .filter(|entry| entry.links == Links::GameMade)
+        .filter_map(|entry| entry.path.parent().map(Path::to_owned))
+        .collect();
+    let mut found = Vec::new();
+    for parent in parents {
+        let root = Root::open(&parent)?;
+        if root.directory.is_none() {
+            continue;
+        }
+        for entry in fs::read_dir(&parent)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with(".trash-") {
+                let relative = PathBuf::from(entry.file_name());
+                let mut leftover = Entry::fixed(&root, &relative, Category::OtherCaches)?;
+                if game_made.contains(&parent) {
+                    leftover.links = Links::GameMade;
+                }
+                found.push(leftover);
+            }
+        }
+    }
+    Ok(found)
 }
 
 impl Storage {
@@ -461,32 +519,13 @@ impl Storage {
                 entry.instance = Some(root.path.clone());
             }
         }
-        // Detached trees can remain beside any managed cache after an interrupted removal.
-        let parents: HashSet<_> = entries
-            .iter()
-            .filter_map(|entry| entry.path.parent().map(Path::to_owned))
-            .chain([
-                self.root.clone(),
-                data.path.clone(),
-                data.path.join("versions"),
-            ])
-            .collect();
-        for parent in parents {
-            let root = Root::open(&parent)?;
-            if root.directory.is_none() {
-                continue;
-            }
-            for entry in fs::read_dir(&parent)? {
-                let entry = entry?;
-                if entry.file_name().to_string_lossy().starts_with(".trash-") {
-                    entries.push(Entry::fixed(
-                        &root,
-                        Path::new(&entry.file_name()),
-                        Category::OtherCaches,
-                    )?);
-                }
-            }
-        }
+        let extra = [
+            self.root.clone(),
+            data.path.clone(),
+            data.path.join("versions"),
+        ];
+        let found = leftovers(&entries, &extra)?;
+        entries.extend(found);
         Ok(entries)
     }
 
@@ -663,7 +702,10 @@ impl Storage {
                 match result {
                     Ok(()) => resurvey(&entries, &mut surveyed, index)?,
                     Err(
-                        error @ (Error::Busy | Error::UnprovenExclusion | Error::IncompleteUnit),
+                        error @ (Error::Busy
+                        | Error::UnprovenExclusion
+                        | Error::IncompleteUnit
+                        | Error::InstanceVersion(_)),
                     ) => {
                         resurvey(&entries, &mut surveyed, index)?;
                         row.kept.push(Kept {
@@ -817,7 +859,10 @@ impl Storage {
                 match result {
                     Ok(()) => {}
                     Err(
-                        error @ (Error::Busy | Error::UnprovenExclusion | Error::IncompleteUnit),
+                        error @ (Error::Busy
+                        | Error::UnprovenExclusion
+                        | Error::IncompleteUnit
+                        | Error::InstanceVersion(_)),
                     ) if retain => {
                         // Its size is taken once every clear has ended: a later one may remove
                         // files it shares (a `.trash-*` listed under two rows).
@@ -1116,6 +1161,58 @@ mod eviction_tests {
             Err(Error::Unsafe(_))
         ));
         let report = storage.apply(cache(Links::GameMade), None, false).unwrap();
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.category == Category::OtherCaches)
+            .unwrap();
+        assert!(row.bytes > 0);
+        assert!(atlas.exists());
+    }
+
+    /// #18166: a leftover beside a game's cache may hold the links the game made in that cache. It
+    /// takes that cache's rule, so the report counts it instead of refusing it, and never follows
+    /// the link. A leftover beside the launcher's own caches stays strict.
+    #[test]
+    fn a_leftover_beside_a_game_cache_takes_its_links() {
+        let home = crate::storage::tests::Home::new();
+        let outside = crate::storage::tests::Home::new();
+        let atlas = outside.seed("version/textures/atlas.png");
+        home.seed("instance/.horizon-cache/pack.json");
+        let pack = home.seed("instance/.trash-1/resourcepacks/0123456789abcdef/pack.json");
+        crate::storage::tests::link_dir(atlas.parent().unwrap(), &pack.with_file_name("textures"));
+        home.seed("launcher/cache/payload");
+        home.seed("launcher/.trash-2/payload");
+        let storage = Storage::at(&home.0).unwrap();
+        let root = Root::open(&home.0).unwrap();
+        let cache = |relative: &str, links: Links| {
+            let mut entry =
+                Entry::fixed(&root, Path::new(relative), Category::OtherCaches).unwrap();
+            entry.links = links;
+            entry
+        };
+        let leftover = |name: &str| {
+            let entries = [
+                cache("instance/.horizon-cache", Links::GameMade),
+                cache("launcher/cache", Links::Refused),
+            ];
+            let found = leftovers(&entries, &[]).unwrap();
+            found
+                .into_iter()
+                .filter(|entry| entry.path.ends_with(name))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(leftover(".trash-1")[0].links, Links::GameMade);
+        assert_eq!(leftover(".trash-2")[0].links, Links::Refused);
+        // The strict rule refuses it, as it did for every leftover.
+        let mut strict = leftover(".trash-1");
+        strict[0].links = Links::Refused;
+        assert!(matches!(
+            storage.apply(strict, None, false),
+            Err(Error::Unsafe(_))
+        ));
+        let report = storage.apply(leftover(".trash-1"), None, false).unwrap();
         let row = report
             .rows
             .iter()

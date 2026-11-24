@@ -5,6 +5,7 @@
 mod draw;
 mod pack_drop;
 
+use horizon_optifine::better_grass::Mode as BetterGrassMode;
 use std::time::Instant;
 
 pub use crate::settings::Opt;
@@ -232,6 +233,15 @@ impl Opt {
         })
     }
 
+    /// Documented agent handles used even when the option caption is translated.
+    pub(crate) fn agent_id(self) -> Option<&'static str> {
+        match self {
+            Opt::Fov => Some("fov"),
+            Opt::RenderDistance => Some("render-distance"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn caption(self) -> &'static str {
         match self {
             Opt::Fov => "options.fov",
@@ -263,6 +273,7 @@ impl Opt {
             Opt::Particles => "options.particles",
             Opt::EntityDistance => "options.entityDistanceScaling",
             Opt::EntityShadows => "options.entityShadows",
+            Opt::BetterGrass => "horizon.options.better_grass",
             Opt::BiomeBlend => "options.biomeBlendRadius",
             Opt::Preset => "options.graphics.preset",
             Opt::Mipmaps => "options.mipmapLevels",
@@ -327,6 +338,8 @@ impl Opt {
             // the namespace the client bundles (assets/horizon/lang).
             Opt::PadEnabled => "horizon.options.controller",
             Opt::PadVibration => "horizon.options.vibration",
+            Opt::PadVibrationStrength => "horizon.options.vibration_strength",
+            Opt::PadImpulseStrength => "horizon.options.impulse_strength",
             Opt::PadPlayInBackground => "horizon.options.play_in_background",
             Opt::PadAdaptiveTriggers => "horizon.options.adaptive_triggers",
             Opt::PadLightbar => "horizon.options.lightbar",
@@ -425,6 +438,9 @@ impl Opt {
             Opt::ChatHeightUnfocused => Kind::Slider(s.chat_height_unfocused),
             Opt::ChatLineSpacing => Kind::Slider(s.chat_line_spacing),
             Opt::PadLookSensitivity => Kind::Slider(s.controller.look_sensitivity),
+            // A strength is already 0..1: the slider's position is the value.
+            Opt::PadVibrationStrength => Kind::Slider(s.controller.vibration_strength),
+            Opt::PadImpulseStrength => Kind::Slider(s.controller.impulse_strength),
             Opt::PadPointerSpeed => unit(s.controller.pointer_speed, 0.25, 3.0),
             Opt::PadScrollSpeed => unit(s.controller.scroll_speed, 1.0, 36.0),
             Opt::PadRepeatDelay => unit(s.controller.repeat_delay, 0.1, 1.0),
@@ -504,6 +520,8 @@ impl Opt {
             Opt::NotificationDisplayTime => Some(95),
             Opt::PadMoveDeadzone | Opt::PadLookDeadzone => Some(50),
             Opt::PadTriggerThreshold => Some(80),
+            // 5% a step, so "100%" is one of them.
+            Opt::PadVibrationStrength | Opt::PadImpulseStrength => Some(20),
             Opt::SprintWindow => Some(10),
             _ => None,
         }
@@ -726,10 +744,16 @@ impl Opt {
                     )],
                 ),
             ),
-            Opt::PadMoveDeadzone | Opt::PadLookDeadzone | Opt::PadTriggerThreshold => {
+            Opt::PadMoveDeadzone
+            | Opt::PadLookDeadzone
+            | Opt::PadTriggerThreshold
+            | Opt::PadVibrationStrength
+            | Opt::PadImpulseStrength => {
                 let v = match self {
                     Opt::PadMoveDeadzone => s.controller.move_deadzone,
                     Opt::PadLookDeadzone => s.controller.look_deadzone,
+                    Opt::PadVibrationStrength => s.controller.vibration_strength,
+                    Opt::PadImpulseStrength => s.controller.impulse_strength,
                     _ => s.controller.trigger_threshold,
                 };
                 Text::translate(
@@ -817,6 +841,12 @@ impl Opt {
                 "options.particles.minimal",
             ][usize::from(s.particles.min(2))]),
             Opt::EntityShadows => on_off(s.entity_shadows),
+            Opt::BetterGrass => tr(match s.better_grass_mode() {
+                BetterGrassMode::Auto => "horizon.options.better_grass.auto",
+                BetterGrassMode::Off => "options.off",
+                BetterGrassMode::Fast => "options.clouds.fast",
+                BetterGrassMode::Fancy => "options.clouds.fancy",
+            }),
             Opt::Vignette => on_off(s.vignette),
             Opt::Autosave => on_off(s.autosave_indicator),
             Opt::CutoutLeaves => on_off(s.cutout_leaves),
@@ -1017,6 +1047,8 @@ impl Opt {
             Opt::PadMoveDeadzone => s.controller.move_deadzone = step(0.0, 50.0) / 100.0,
             Opt::PadLookDeadzone => s.controller.look_deadzone = step(0.0, 50.0) / 100.0,
             Opt::PadTriggerThreshold => s.controller.trigger_threshold = step(10.0, 90.0) / 100.0,
+            Opt::PadVibrationStrength => s.controller.vibration_strength = step(0.0, 20.0) / 20.0,
+            Opt::PadImpulseStrength => s.controller.impulse_strength = step(0.0, 20.0) / 20.0,
             Opt::SprintWindow => s.sprint_window = step(0.0, 10.0) as i32,
             Opt::Page(page, row) => pages::slide(page, row, v),
             _ => {}
@@ -1151,6 +1183,19 @@ impl Opt {
             }
             Opt::Particles => s.particles = next(s.particles, 3),
             Opt::EntityShadows => s.entity_shadows = !s.entity_shadows,
+            Opt::BetterGrass => {
+                let order = [
+                    BetterGrassMode::Auto,
+                    BetterGrassMode::Off,
+                    BetterGrassMode::Fast,
+                    BetterGrassMode::Fancy,
+                ];
+                let i = order
+                    .iter()
+                    .position(|&mode| mode == s.better_grass_mode())
+                    .unwrap();
+                s.better_grass = order[usize::from(next(i as u8, order.len() as u8))];
+            }
             Opt::Vignette => s.vignette = !s.vignette,
             Opt::Autosave => s.autosave_indicator = !s.autosave_indicator,
             Opt::CutoutLeaves => s.cutout_leaves = !s.cutout_leaves,
@@ -1466,7 +1511,7 @@ fn section_title(text: Text, y: f32, w: f32) -> Widget {
 }
 
 /// A registered key's binding as Controls shows it: its modifiers' key names, then its key's.
-fn binding_text(key: &str, modifiers: u32) -> Text {
+pub fn binding_text(key: &str, modifiers: u32) -> Text {
     let mut text = Text::empty();
     for (bit, name) in [
         (crate::mod_list::SHIFT, "key.keyboard.left.shift"),
@@ -2873,6 +2918,7 @@ impl OptionsUi {
                     Opt::Vignette,
                     Opt::AttackIndicator,
                     Opt::ChunkFade,
+                    Opt::BetterGrass,
                 ]));
                 self.filter_option_rows(rows)
             }
@@ -3933,6 +3979,7 @@ impl OptionsUi {
                 } else {
                     s.shader_options = None;
                 }
+                events.extend(self.shader.screen.flush_native(s));
             }
             Page::Language => {
                 if let Some(code) = self.language_choice.take()
@@ -7869,17 +7916,42 @@ mod tests {
                 Page::ModBrowser,
             ]
         );
-        // No AI hides the AI Agent page.
+        // No AI greys AI Agent... out and moves neither it nor the switch (#18635).
+        let agent_and_switch = |ui: &mut OptionsUi, s: &Settings| {
+            let (widgets, _, _, _) = ui.layout(s, 427.0, 240.0);
+            widgets
+                .into_iter()
+                .filter_map(|w| match w.kind {
+                    WKind::Button {
+                        act: act @ (Act::Push(Page::Agent) | Act::Extra(crate::extras::Item::NoAi)),
+                        active,
+                        ..
+                    } => Some((act, active, [w.x, w.y, w.w, w.h])),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
         let mut no_ai = Settings::default();
         no_ai.extras.no_ai = true;
-        let (widgets, _, _, _) = ui.layout(&no_ai, 427.0, 240.0);
-        assert!(!widgets.iter().any(|w| matches!(
-            &w.kind,
-            WKind::Button {
-                act: Act::Push(Page::Agent),
-                ..
-            }
-        )));
+        let off = agent_and_switch(&mut ui, &s);
+        let on = agent_and_switch(&mut ui, &no_ai);
+        let states = |buttons: &[(Act, bool, [f32; 4])]| -> Vec<(Act, bool)> {
+            buttons
+                .iter()
+                .map(|(act, active, _)| (act.clone(), *active))
+                .collect()
+        };
+        let agent = Act::Push(Page::Agent);
+        let switch = Act::Extra(crate::extras::Item::NoAi);
+        assert_eq!(
+            states(&off),
+            [(agent.clone(), true), (switch.clone(), true)]
+        );
+        assert_eq!(states(&on), [(agent, false), (switch, true)]);
+        let places = |buttons: &[(Act, bool, [f32; 4])]| -> Vec<[f32; 4]> {
+            buttons.iter().map(|b| b.2).collect()
+        };
+        assert_eq!(places(&on), places(&off));
         // The AI Agent page: the switch, Copy and the status the game sets.
         ui.push(Page::Agent);
         ui.agent_status = vec!["Waiting for an agent.".into()];
@@ -8247,6 +8319,8 @@ mod tests {
             Opt::PadMoveDeadzone,
             Opt::PadLookDeadzone,
             Opt::PadTriggerThreshold,
+            Opt::PadVibrationStrength,
+            Opt::PadImpulseStrength,
             Opt::SprintWindow,
         ];
         for opt in stepped_opts {

@@ -66,13 +66,41 @@ pub(super) fn set_up_surface(
             }
         });
     if log_step {
-        startup_step(format_args!(
-            "device ready; configuring the surface ({}x{} {:?}, {:?})",
-            config.width, config.height, config.format, config.present_mode
-        ));
+        log_configured(&config, Some("device ready; "));
     }
     Renderer::configure(device, surface, &config, None, device_lost)?;
     Ok((config, caps))
+}
+/// The swapchain's size, format and present mode as last logged.
+static LOGGED: std::sync::Mutex<Option<(u32, u32, wgpu::TextureFormat, wgpu::PresentMode)>> =
+    std::sync::Mutex::new(None);
+/// Logs the window surface's size, format and present mode: at the start (`start` leads the
+/// line, flushed as a startup step), and once after each configuration that changed one of
+/// them (fullscreen and back, a resize, VSync, HDR output): the start line alone left a
+/// reconfigured swapchain's present mode unknown.
+pub(super) fn log_configured(config: &wgpu::SurfaceConfiguration, start: Option<&str>) {
+    let key = (
+        config.width,
+        config.height,
+        config.format,
+        config.present_mode,
+    );
+    let changed = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(key)
+        != Some(key);
+    if start.is_none() && !changed {
+        return;
+    }
+    let line = format!(
+        "configuring the surface ({}x{} {:?}, {:?})",
+        config.width, config.height, config.format, config.present_mode
+    );
+    match start {
+        Some(lead) => startup_step(format_args!("{lead}{line}")),
+        None => log::info!("Horizon renderer: {line}"),
+    }
 }
 /// What `pick_adapter` knows of one of a backend's adapters.
 #[derive(Clone, Copy, Debug)]
@@ -117,27 +145,34 @@ pub(super) struct Adapted {
     pub(super) configured: Option<(wgpu::SurfaceConfiguration, wgpu::SurfaceCapabilities)>,
 }
 /// What the device has to offer from its creation: the sprite arrays' `layers`, and ray queries
-/// when the pack picked at startup declares `[ray_tracing]` (`rays`).
+/// (`rays`) when the Ray Tracing setting, `HORIZON_RAY_TRACING` and the pack picked at startup
+/// want them (`rt::query::wanted`).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DeviceNeeds {
     pub(super) layers: u32,
     pub(super) rays: bool,
 }
 impl DeviceNeeds {
-    /// Whether the device will be asked for a Shader Model 6.5 feature: ray queries
-    /// (`HORIZON_RAY_TRACING` and the picked pack, as `rt::query::features` decides) or mesh
-    /// shaders (`HORIZON_MESH_SHADER`). On DirectX 12, FXC can't compile those; DXC can.
+    /// Whether the device will be asked for a Shader Model 6.5 feature: ray queries (`rays`) or
+    /// mesh shaders (`HORIZON_MESH_SHADER`). On DirectX 12, FXC can't compile those; DXC can.
     pub(super) fn shader_model_6_5(self) -> bool {
-        super::rt::query::wanted(super::rt::query::switch(), self.rays)
-            || mesh_shader::switch() == mesh_shader::Switch::On
+        self.rays || mesh_shader::switch() == mesh_shader::Switch::On
     }
 }
 impl super::output::FrameRequest {
-    /// What a device opened for this request and `layers` sprite layers needs.
-    pub(super) fn needs(self, layers: u32) -> DeviceNeeds {
+    /// What a device opened for this request, under the `ray_tracing` setting, with `layers`
+    /// sprite layers needs.
+    pub(super) fn needs(
+        self,
+        layers: u32,
+        ray_tracing: crate::graphics::RayTracingMode,
+    ) -> DeviceNeeds {
         DeviceNeeds {
             layers,
-            rays: self.ray_tracing,
+            rays: super::rt::query::wanted(
+                super::rt::query::switch_with(ray_tracing),
+                self.ray_tracing,
+            ),
         }
     }
 }

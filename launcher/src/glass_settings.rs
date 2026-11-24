@@ -734,10 +734,10 @@ impl Launcher {
         let line = trf(
             "Launcher {launcher}, game {game}",
             &[
-                ("launcher", env!("CARGO_PKG_VERSION")),
+                ("launcher", backend::VERSION),
                 (
                     "game",
-                    self.settings.selected.as_deref().unwrap_or(&nightly),
+                    self.selected().map_or(nightly.as_str(), String::as_str),
                 ),
             ],
         )

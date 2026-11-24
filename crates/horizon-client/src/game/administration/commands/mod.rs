@@ -13,6 +13,7 @@ pub(super) mod execute;
 pub(super) mod extra;
 mod give;
 mod item_count;
+mod item_predicate;
 pub(in crate::game) mod items;
 mod misc;
 mod modprofile;
@@ -47,6 +48,23 @@ use horizon_protocol::packets::play::{self, Clientbound as C};
 use horizon_world::registry::BlockStateId;
 
 pub(super) type R<T> = Result<T, CommandError>;
+
+/// One execution of a guest's `/save-all`, deferred to the end of their turn:
+/// the feedback decisions `CommandSourceStack.sendSuccess` and
+/// `broadcastToAdmins` make when the command runs, which is not when the save
+/// happens.
+pub(in crate::game) struct DeferredSaveAll {
+    /// `getDisplayName` of the source that ran it, for its admin line.
+    pub who: Text,
+    /// `withSuppressedOutput`: the source hears nothing and tells nobody.
+    pub silent: bool,
+    /// `CommandSource.acceptsSuccess()`: the source takes the success line.
+    pub to_source: bool,
+    /// `GameRules.SEND_COMMAND_FEEDBACK`: the other operators hear it.
+    pub to_operators: bool,
+    /// `GameRules.LOG_ADMIN_COMMANDS`: a dedicated server's console logs it.
+    pub to_console: bool,
+}
 
 /// An entity a selector found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -412,6 +430,38 @@ impl Game<'_> {
     /// server the console when `log_admin_commands`. Queued while the
     /// command runs; `send_admin_feedback` sends it.
     pub(super) fn broadcast_to_admins(&mut self, message: Text) {
+        let who = self.admin_who();
+        let (to_operators, to_console) = self.admin_broadcast_rules(self.lan_acting.is_some());
+        self.broadcast_to_admins_read(who, to_operators, to_console, message);
+    }
+    /// The two game rules `broadcastToAdmins` reads, and whether a player's
+    /// command logs to a dedicated server's console: `player` is
+    /// `this.source != this.server`.
+    fn admin_broadcast_rules(&self, player: bool) -> (bool, bool) {
+        let ops = self
+            .ui
+            .rules
+            .bool_at(horizon_client::gamerules::vanilla::SEND_COMMAND_FEEDBACK);
+        // MinecraftServer.sendSystemMessage, unless the server is the source.
+        let console = self.console_broadcast.is_none()
+            && player
+            && self.is_dedicated_server()
+            && self
+                .ui
+                .rules
+                .bool_at(horizon_client::gamerules::vanilla::LOG_ADMIN_COMMANDS);
+        (ops, console)
+    }
+    /// `broadcast_to_admins` with the two game rules read when the command ran:
+    /// a guest's `/save-all` reports with the rules of its command, not of the
+    /// end of the turn.
+    pub(super) fn broadcast_to_admins_read(
+        &mut self,
+        who: Text,
+        to_operators: bool,
+        to_console: bool,
+        message: Text,
+    ) {
         let informs = match self.console_broadcast {
             Some(broadcast) => broadcast,
             None => self.lan_acting.is_some() || self.lan.is_some(),
@@ -423,32 +473,27 @@ impl Game<'_> {
         {
             return;
         }
-        let ops = self
-            .ui
-            .rules
-            .bool_at(horizon_client::gamerules::vanilla::SEND_COMMAND_FEEDBACK);
-        // MinecraftServer.sendSystemMessage, unless the server is the source.
-        let console = self.console_broadcast.is_none()
-            && self.lan_acting.is_some()
-            && self.is_dedicated_server()
-            && self
-                .ui
-                .rules
-                .bool_at(horizon_client::gamerules::vanilla::LOG_ADMIN_COMMANDS);
-        if !ops && !console {
+        if !to_operators && !to_console {
             return;
         }
-        // getDisplayName: the entity the command runs as (`execute as`), or
-        // the server's own source, "Server".
-        let who = match self.command_source.and_then(|s| s.entity) {
-            Some(entity) => self.target_name(entity),
-            None if self.console_broadcast.is_some() => self.server_name(),
-            None => self.player_display_name(),
-        };
         let line = Text::translate("chat.type.admin", &[who, message])
             .with_color(text::GRAY)
             .italic();
-        self.admin_feedback.push((line, ops, console));
+        self.admin_feedback
+            .push((line, to_operators, to_console));
+    }
+    /// What a guest's `/save-all` reports once their turn ends, read while the
+    /// source that ran it is current: `CommandSourceStack.sendSuccess` and
+    /// `broadcastToAdmins` decide from these the moment the command runs.
+    pub(super) fn deferred_save_all(&self) -> DeferredSaveAll {
+        let (to_operators, to_console) = self.admin_broadcast_rules(self.lan_acting.is_some());
+        DeferredSaveAll {
+            who: self.admin_who(),
+            silent: self.command_source.is_some_and(|s| s.silent),
+            to_source: self.accepts_success(),
+            to_operators,
+            to_console,
+        }
     }
     /// Player.getDisplayName: the name (team-formatted), suggesting a
     /// `/tell`, showing the player on hover, inserting the name.
@@ -577,8 +622,16 @@ impl Game<'_> {
             Target::Mob(id) => self.mob_command_name(id),
             other => {
                 // Entity.getDisplayName: the CustomName component, else the type.
+                // An ominous item spawner keeps its compound in its own `raw`.
                 let custom = super::native_entities::target_id(other)
-                    .and_then(|id| self.persist_raw(id))
+                    .and_then(|id| {
+                        self.persist_raw(id).or_else(|| {
+                            self.ominous_spawners
+                                .iter()
+                                .find(|s| s.id == id)
+                                .and_then(|s| s.raw.as_deref())
+                        })
+                    })
                     .and_then(|r| r.get("CustomName"));
                 if let Some(c) = custom {
                     return horizon_client::scoreboard::comp_text(
@@ -596,7 +649,13 @@ impl Game<'_> {
             return self.player_named(name).into_iter().collect();
         }
         if let Some(uuid) = s.uuid {
-            return self.target_by_uuid(uuid).into_iter().collect();
+            // `Level.getEntity`: a dead player's removed body is in no level.
+            // (EntityArgument.parse refuses a UUID in a players-only argument.)
+            return self
+                .target_by_uuid(uuid)
+                .filter(|&t| !self.player_body_removed(t))
+                .into_iter()
+                .collect();
         }
         let origin = {
             let p = self.source_position();
@@ -929,6 +988,34 @@ impl Game<'_> {
         self.enter_command_level(back);
         Some(result)
     }
+    /// [`Self::in_target_level`] for a command that reads the entity it was
+    /// given: a dead player whose body its level no longer holds
+    /// (`LivingEntity.tickDeath` removed it at its twentieth tick) is still
+    /// the `ServerPlayer` the selector returned (`@s`, a name, `@a`, `@p`,
+    /// `@r`), so it is read in its own level until it respawns.
+    pub(in crate::game) fn in_read_target_level<R>(
+        &mut self,
+        t: Target,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> Option<R> {
+        if self.resident_target_dimension(t).is_some() {
+            return self.in_target_level(t, f);
+        }
+        let conn = match t {
+            Target::Player => self.lan_acting?,
+            Target::Guest(conn) => conn,
+            _ => return None,
+        };
+        let guest = self.command_guest(conn).filter(|g| !g.body_present())?;
+        let dim = Dim::from_id(&guest.dimension);
+        if dim == self.dim {
+            return Some(f(self));
+        }
+        let back = self.enter_command_level(dim)?;
+        let result = f(self);
+        self.enter_command_level(back);
+        Some(result)
+    }
     pub(in crate::game) fn entity_tag_matches(&self, tag: &str, ty: &str) -> bool {
         let path = self.options.resources.join(format!(
             "data/minecraft/tags/entity_type/{}.json",
@@ -1219,7 +1306,7 @@ impl Game<'_> {
             .data()
             .and_then(|d| d.written.as_ref())
             .map(|w| w.title.clone())
-            .filter(|t| !t.trim().is_empty())
+            .filter(|t| !horizon_core::java_character::is_blank(t))
         {
             Text::literal(title)
         } else if item == "minecraft:shield"
@@ -1273,17 +1360,12 @@ impl Game<'_> {
             .with_component_fields(vec![("hover_event".into(), shown)])
     }
     fn cmd_give(&mut self, ctx: &Context) -> R<i32> {
-        let Some(Arg::Item(ItemInput { id, components, .. })) = ctx.get("item").cloned() else {
+        let Some(Arg::Item(input)) = ctx.get("item").cloned() else {
             return Ok(0);
         };
-        let (damage, extra) = match components
-            .as_deref()
-            .map(horizon_client::item_data::command_components)
-        {
-            Some(Ok(tag)) => horizon_client::item_data::decode_components_for_item(&id, Some(&tag)),
-            Some(Err(e)) => return Err(CommandError::new(Text::literal(e))),
-            None => (0, None),
-        };
+        // GiveCommand: `item.createItemStack(1, false)`, then copies of it.
+        let ItemStack { damage, extra, .. } = self.command_item_stack(&input, 1)?;
+        let id = input.id;
         let count = Self::int(ctx, "count").unwrap_or(1);
         let targets = self.entities(ctx, "targets", true)?;
         let max_stack = self.items().get(&id).map_or(64, |i| i.max_stack) as i32;
@@ -3391,6 +3473,7 @@ impl Game<'_> {
         self.feedback(Text::translate("commands.setworldspawn.success", &args));
         Ok(1)
     }
+    #[allow(dead_code)]
     fn item_matches(&self, predicate: &ItemInput, item: &str) -> bool {
         if predicate.any {
             return true;
@@ -3410,135 +3493,15 @@ impl Game<'_> {
         predicate.id == item
     }
     /// `ItemPredicateArgument`: the item test and its `[...]` component
-    /// tests (presence, `=` equality, `!` negation, `|` alternatives).
+    /// tests (presence, `=` equality, `~` sub-predicates, `!` negation, `|` alternatives).
     pub(super) fn stack_matches(&self, predicate: &ItemInput, stack: &ItemStack) -> bool {
-        if !self.item_matches(predicate, &stack.item) {
-            return false;
-        }
-        let Some(tests) = predicate.components.as_deref() else {
-            return true;
-        };
-        let inner = tests
-            .trim()
-            .strip_prefix('[')
-            .and_then(|t| t.strip_suffix(']'))
-            .unwrap_or("");
-        let components = match horizon_client::item_data::encode_components(stack) {
-            Some(horizon_core::nbt::Tag::Compound(c)) => c,
-            _ => Default::default(),
-        };
-        let test = |term: &str| -> bool {
-            let term = term.trim();
-            let (negated, term) = match term.strip_prefix('!') {
-                Some(t) => (true, t.trim()),
-                None => (false, term),
-            };
-            let split = term.find(['=', '~']).unwrap_or(term.len());
-            let id = term[..split].trim();
-            let id = if id.contains(':') {
-                id.to_owned()
-            } else {
-                format!("minecraft:{id}")
-            };
-            let present = components.get(&id.as_str().into());
-            let result = match term[split..].chars().next() {
-                // Both count wrappers in `ItemPredicateArgument` use the live
-                // stack count and the same integer bounds matcher.
-                Some('=' | '~') if id == "minecraft:count" => {
-                    let value = horizon_core::nbt::parse_snbt(term[split + 1..].trim());
-                    value.is_ok_and(|(v, _)| item_count::matches(stack.count, &v))
-                }
-                Some('=') => {
-                    let value = horizon_core::nbt::parse_snbt(term[split + 1..].trim())
-                        .ok()
-                        .map(|(t, _)| t);
-                    match (present, value) {
-                        (Some(have), Some(want)) => {
-                            horizon_client::nbt_path::compare_nbt(&want, Some(have))
-                                && horizon_client::nbt_path::compare_nbt(have, Some(&want))
-                        }
-                        _ => false,
-                    }
-                }
-                Some('~') => {
-                    // Component sub-predicates.
-                    let value = horizon_core::nbt::parse_snbt(term[split + 1..].trim())
-                        .ok()
-                        .map(|(t, _)| t);
-                    match (id.as_str(), value) {
-                        // `MinMaxBounds.Ints.matches`: DamagePredicate's damage-only
-                        // Int bounds shape; effective DAMAGE presence is required.
-                        // Other fields keep the entire existing predicate path.
-                        ("minecraft:damage", Some(ref v))
-                            if matches!(v, horizon_core::nbt::Tag::Compound(c) if c.len() == 1)
-                                && match v.get("damage") {
-                                    Some(horizon_core::nbt::Tag::Int(_)) => true,
-                                    Some(horizon_core::nbt::Tag::Compound(bounds)) => {
-                                        bounds.iter().all(|(key, value)| {
-                                            matches!(key.to_string_lossy().as_str(), "min" | "max")
-                                                && matches!(value, horizon_core::nbt::Tag::Int(_))
-                                        })
-                                    }
-                                    _ => false,
-                                } =>
-                        {
-                            let removed = stack
-                                .data()
-                                .is_some_and(|data| data.other("!minecraft:damage").is_some());
-                            let has_damage = !removed
-                                && (present.is_some()
-                                    || self.items().get(&stack.item).is_some_and(|item| {
-                                        item.components.iter().any(|c| c == "minecraft:damage")
-                                    }));
-                            let n = i64::from(stack.damage);
-                            has_damage
-                                && match v.get("damage").unwrap() {
-                                    horizon_core::nbt::Tag::Int(exact) => n == i64::from(*exact),
-                                    bounds => {
-                                        let get = |key| match bounds.get(key) {
-                                            Some(horizon_core::nbt::Tag::Int(value)) => {
-                                                Some(i64::from(*value))
-                                            }
-                                            _ => None,
-                                        };
-                                        get("min").is_none_or(|min| n >= min)
-                                            && get("max").is_none_or(|max| n <= max)
-                                    }
-                                }
-                        }
-                        (_, Some(v)) => present.is_some_and(|have| {
-                            horizon_client::nbt_path::compare_nbt(&v, Some(have))
-                        }),
-                        _ => false,
-                    }
-                }
-                // Count is a pseudo-component, not a catalog component.
-                _ if id == "minecraft:count" => present.is_some(),
-                _ => self.stack_component_present(stack, &id),
-            };
-            result != negated
-        };
-        split_top_level(inner, ',')
-            .iter()
-            .filter(|t| !t.trim().is_empty())
-            .all(|term| split_top_level(term, '|').iter().any(|alt| test(alt)))
+        item_predicate::stack_matches(self, predicate, stack)
     }
     /// `ItemPredicateArgument.createComponentExistencePredicate`: the stack's
     /// effective component presence, with its patch ahead of its prototype.
+    #[allow(dead_code)]
     fn stack_component_present(&self, stack: &ItemStack, id: &str) -> bool {
-        // Read the modeled patch before saved-default elision. A removal wins
-        // even when the actual item prototype supplies the component.
-        if let Some(patch) = horizon_client::item_data::components_tag(stack.damage, stack.data()) {
-            if patch.get(&format!("!{id}")).is_some() {
-                return false;
-            }
-            if patch.get(id).is_some() {
-                return true;
-            }
-        }
-        self.items()
-            .get(&stack.item)
-            .is_some_and(|item| item.components.iter().any(|key| key == id))
+        item_predicate::stack_component_present(self, stack, id)
     }
     fn cmd_clear(&mut self, ctx: &Context) -> R<i32> {
         let targets = if ctx.get("targets").is_some() {
@@ -3775,6 +3738,12 @@ impl Game<'_> {
         let Some(Arg::Resource(s)) = ctx.get("structure").cloned() else {
             return Ok(0);
         };
+        if !self.structure_exists(&s) {
+            return Err(CommandError::new(Text::tr(
+                "commands.locate.structure.invalid",
+                &[&s],
+            )));
+        }
         let names = self.structure_names(&s);
         let from = origin.map(|v| v.floor() as i32);
         let found = self.end.locator().and_then(|t| t.locate(&names, from, 100));
@@ -3802,6 +3771,30 @@ impl Game<'_> {
         ));
         Ok(distance)
     }
+    /// `LocateCommand.getHolders`: an id the structure registry lacks, or a
+    /// tag no source defines, is no structure at all.
+    fn structure_exists(&self, structure: &str) -> bool {
+        match structure.strip_prefix('#') {
+            Some(tag) => self.tag_exists("worldgen/structure", tag),
+            None => self
+                .ui
+                .registries
+                .ids("minecraft:worldgen/structure")
+                .iter()
+                .any(|id| id == structure),
+        }
+    }
+    /// Whether the game's files or a world pack define the tag of `registry`.
+    fn tag_exists(&self, registry: &str, tag: &str) -> bool {
+        let (ns, path) = tag.split_once(':').unwrap_or(("minecraft", tag));
+        self.tag_file(registry, ns, path).is_some_and(|f| f.is_file())
+            || self
+                .fns
+                .store
+                .files
+                .get(&format!("tags/{ns}:{registry}/{path}"))
+                .is_some_and(|files| !files.is_empty())
+    }
     /// The structures `LocateCommand.locateStructure` searches for: an id, or
     /// a `#tag`'s members.
     pub(super) fn structure_names(&self, structure: &str) -> Vec<String> {
@@ -3814,6 +3807,24 @@ impl Game<'_> {
     pub(super) fn structure_tag(&self, tag: &str) -> Vec<String> {
         self.tag_entries("worldgen/structure", tag)
     }
+    /// The game's file of tag `ns:path` of `registry`, or `None` when a part of
+    /// the id is no path segment vanilla would read (`FileUtil.isValidPathSegment`),
+    /// so a tag such as `#../..` never reaches outside the game's files.
+    fn tag_file(&self, registry: &str, ns: &str, path: &str) -> Option<std::path::PathBuf> {
+        let segment = |s: &str| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_')
+                })
+        };
+        (segment(ns) && path.split('/').all(segment)).then(|| {
+            self.options
+                .resources
+                .join(format!("data/{ns}/tags/{registry}/{path}.json"))
+        })
+    }
     /// The entries of a data pack tag of `registry`, nested tags expanded.
     pub(super) fn tag_entries(&self, registry: &str, tag: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -3824,10 +3835,7 @@ impl Game<'_> {
                 continue;
             }
             let (ns, path) = t.split_once(':').unwrap_or(("minecraft", &t));
-            let file = self
-                .options
-                .resources
-                .join(format!("data/{ns}/tags/{registry}/{path}.json"));
+            let file = self.tag_file(registry, ns, path);
             // The game's file and the world's packs' both count, entries
             // joined in resource-stack order; a pack file with `replace`
             // drops what the lower sources put in (`TagLoader.load`).
@@ -3839,8 +3847,8 @@ impl Game<'_> {
                 .into_iter()
                 .flatten()
                 .filter_map(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-            let parsed = std::fs::read(file)
-                .ok()
+            let parsed = file
+                .and_then(|f| std::fs::read(f).ok())
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
                 .into_iter()
                 .chain(packed);
@@ -3933,9 +3941,33 @@ impl Game<'_> {
                 }
                 Text::translate("chat.type.announcement", &[name, message])
             }
+            "me" if self.lan.is_some() && self.command_source.is_some_and(|s| s.entity.is_none()) => {
+                // EmoteCommands from a source that is no player (the console, a command block):
+                // every player gets it, an unsigned announcement like `say`'s, and the log keeps it.
+                let line = Text::translate("chat.type.emote", &[name.clone(), message.clone()]);
+                if let Some(host) = &self.lan {
+                    use horizon_client::lan::data::component_nbt;
+                    host.hub.broadcast_source_chat(
+                        "emote_command",
+                        component_nbt(&name.component()),
+                        component_nbt(&message.component()),
+                        None,
+                    );
+                }
+                if self.is_dedicated_server() {
+                    self.lan_log_event(horizon_client::lan::hub::HostEvent::Chat {
+                        line: line.plain(),
+                        secure: false,
+                    });
+                }
+                return Ok(1);
+            }
             "me" => Text::translate("chat.type.emote", &[name, message]),
             _ => {
-                let _ = self.entities(ctx, "targets", true)?;
+                let targets = self.entities(ctx, "targets", true)?;
+                if self.command_source.is_some_and(|s| s.entity.is_none()) {
+                    return Ok(self.whisper_from_source(&targets, &name, &message));
+                }
                 // Whispering to yourself: the incoming and outgoing lines.
                 let out = Text::translate(
                     "commands.message.display.outgoing",
@@ -3987,8 +4019,45 @@ impl Game<'_> {
         );
         Ok(1)
     }
+    /// `MsgCommand.sendMessage` from a source that is no player (the console, a command block): the
+    /// source is told the outgoing line of each target, and each player of the server gets the incoming
+    /// one. The count of targets is the command's result.
+    fn whisper_from_source(&mut self, targets: &[Target], name: &Text, message: &Text) -> i32 {
+        for &t in targets {
+            let outgoing = Text::translate(
+                "commands.message.display.outgoing",
+                &[self.target_name(t), message.clone()],
+            )
+            .with_color(text::GRAY)
+            .italic();
+            self.feedback_unbroadcast(outgoing);
+        }
+        let connections: Vec<u32> = targets
+            .iter()
+            .filter_map(|t| match t {
+                Target::Guest(conn) => Some(*conn),
+                _ => None,
+            })
+            .collect();
+        if let Some(host) = &self.lan {
+            let guests: Vec<usize> = host
+                .hub
+                .guests
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| connections.contains(&g.conn))
+                .map(|(k, _)| k)
+                .collect();
+            host.hub.whisper_from_source(
+                &guests,
+                horizon_client::lan::data::component_nbt(&name.component()),
+                &message.plain(),
+            );
+        }
+        targets.len() as i32
+    }
     /// MessageArgument: `@p`-style selectors in a message become names.
-    pub(super) fn expand_selectors(&mut self, raw: &str) -> Text {
+    pub(in crate::game) fn expand_selectors(&mut self, raw: &str) -> Text {
         let mut out = Text::empty();
         let mut rest = raw;
         while let Some(at) = rest.find('@') {

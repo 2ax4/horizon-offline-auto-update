@@ -10,9 +10,9 @@ the hook catalog (catalog.json, hook-notes.md) and the guest's generated hook di
   lists an entry the head still has; with --allow-added, added and changed entries are listed and pass
   (`cargo horizon-mod update` reports signature-hash changes for declared internals);
 - a path a native mod could declare without a kind that gains a second kind (E_INTERNAL_AMBIGUOUS), always;
-- any other difference in the generated files, except a catalog hook added with --allow-added, which explains its
-  generated catalog, new hook-notes sections (the others unchanged) and its own guest dispatch, and a host call added
-  with --allow-added, which explains its own guest forwarder and the guest's import numbers after it.
+- any other difference in the generated files, except an added hook's own catalog, note sections and dispatch,
+  or an added host call's guest forwarder and generated numbering, with --allow-added. An additive change
+  may also make an exact prose revision listed in tools/mod_api_hook_notes_updates.txt.
 The injection points' outputs (points.json, points_generated.rs) are never compared: `[[inject]]` and its points are
 removed (#19576), and a base that still writes them compares without them. The mod API's types and calls are the surface report's
 (tools/ci/surface_report.py), which runs beside this check.
@@ -63,6 +63,7 @@ MAX_DIFF_LINES = 120
 MAX_LISTED = 40
 ROOT_MARK = "<repository>"
 REMOVED = "tools/mod_api_removed_internals.txt"
+NOTE_UPDATES = "tools/mod_api_hook_notes_updates.txt"
 # Files the generator writes into the output folder that are not output: phase timings (and incremental-*/ or, from
 # older builds, interfaces-*/, its cache).
 SCRATCH_FILES = {"points-timing.txt"}
@@ -72,15 +73,26 @@ INTERNALS = "internals.json"
 STRICT_FILES = {"loops.json", INTERNALS}
 HOOK_CATALOG = "catalog.json"
 GUEST_WIRE = "wire_guest_generated.rs"
+NATIVE_HOOK_RECORDS = "native-hook-records.json"
 HOOK_FILES = {HOOK_CATALOG, "hook-notes.md", GUEST_WIRE}
 # The guest's `hook` function and its arms, one per export a mod is called through, in the generator's method order.
 GUEST_DISPATCH = "pub fn hook(id: u32,"
 GUEST_ARM = re.compile(r"^\d+ => \{.*?(?=^\d+ => \{|^_ =>)", re.MULTILINE | re.DOTALL)
-GUEST_HOOK_ARM = re.compile(r"\d+ => \{ let receiver = super::hooks\(\); ")
+GUEST_HOOK_ARM = re.compile(
+    r"\d+ => \{ let receiver = (?:"
+    r"super::hooks\(\)"
+    r"|crate::wire::guest::handler::<dyn crate\s*::\s*(?:Block|BlockEntity|Item|Menu|Fluid|Entity)Part>\(input\.take\(\)\?\)\?"
+    r"); "
+)
 GUEST_HOOK_CALL = re.compile(r"\blet answer = receiver\.([a-zA-Z0-9_]+)\(")
+HOOK_NAMES = re.compile(r"\bpub fn hook_name\(id: crate::HookId\) -> &'static str \{ match id \{ ([^\n]*) \} \}")
+HOOK_NAME = re.compile(r'crate::HookId::\w+ => "(\w+)",')
 WIRE_RECORD = re.compile(r"\b__wire_record_(\d+)\b")
 # A guest forwarder's host call: the import's name (with its signature hash) and the generator's position number for it.
 HOST_IMPORT = re.compile(r'host_import!\("([^"]+)", \d+u32')
+# A guest stub for a host call that has no wasm import (e.g. native-only methods guarded by cfg(not(wasm32))).
+GUEST_UNSUPPORTED = re.compile(r'^fn [a-zA-Z0-9_]+.*\{ crate::wire::guest::unsupported\("([^"]+)"\) \}\r?\n\Z')
+NATIVE_ONLY_CFG = '#[cfg(not(target_arch = "wasm32"))]'
 
 # The guest implementation of an area trait begins on its own line and each forwarder occupies one line.
 GUEST_HOST_IMPL = re.compile(r"^impl (?:\w+\s*::\s*)*\w+ for Guest \{\n", re.MULTILINE)
@@ -103,7 +115,7 @@ def is_scratch(relative):
 
 def snapshot_files(folder):
     found = {path.relative_to(folder).as_posix() for path in folder.rglob("*") if path.is_file()}
-    return {name for name in found if not is_scratch(name)} - POINT_FILES
+    return {name for name in found if not is_scratch(name)} - POINT_FILES - {NATIVE_HOOK_RECORDS}
 
 
 def diff_files(base_dir, head_dir, base_root=None, head_root=None):
@@ -137,15 +149,30 @@ def added_catalog_hooks(base_dir, head_dir):
     return after - before if {**head, "hooks": retained} == base else set()
 
 
-def guest_wire_without_hooks(guest, hooks, base, *, added_calls=False):
+def native_hook_records(path):
+    """Optional generator provenance, keyed by hook name, with half-open record index intervals."""
+    if not path.is_file():
+        return {}
+    intervals = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(intervals, dict) or any(
+            not isinstance(spans, list) or any(
+                not isinstance(span, list) or len(span) != 2
+                or any(type(index) is not int for index in span) or not 0 <= span[0] <= span[1]
+                for span in spans)
+            for spans in intervals.values()):
+        raise ValueError(f"{NATIVE_HOOK_RECORDS} has invalid index ranges")
+    return intervals
+
+
+def guest_wire_without_hooks(guest, hooks, base, *, added_calls=False, native_records=None):
     """The head's guest wire with the added hooks' names and dispatch arms removed and the generator's private record
     numbers they consumed closed, or None where no such removal turns it into `base`.
 
     A record number is the generator's index of a named type in the order it first meets them, method by method, and
-    the dispatch arms follow that order. A new hook's types take the numbers between the arms around its own: those its
-    arm references and, for an owned event (which has no record constructor), numbers no arm references. Each number the
-    head has more than the base below a retained reference must lie between the records of the arms before and after an
-    added one's; the retained text then has to match the base exactly.
+    the dispatch arms follow that order. Snapshot provenance names the exact numbers first allocated by native-only
+    hooks, including Part hooks whose trait methods do not follow global catalog order. Older snapshots only have the
+    full `hook_name` table and use the neighboring global arms there. Extra numbers must be explained by an added
+    hook's actual allocation or recognized dispatch window; the retained text then has to match the base exactly.
 
     Owned types are invisible here: an owned event or answer has no record constructor, and an answer's type is not
     even written in its arm. So an owned type an existing hook gains or loses inside an added hook's window is absorbed
@@ -153,18 +180,28 @@ def guest_wire_without_hooks(guest, hooks, base, *, added_calls=False):
     gains an output or changes its signature is breaking there. An added hook that is the first to use an owned type a
     later hook already used moves that type's number, so the later numbers shift by less than the ones just after it.
     That fails here: a number missing after the window looks the same as a later hook losing an owned type."""
+    catalog = HOOK_NAMES.search(guest)
     for name in hooks:
         guest, count = re.subn(rf'crate::HookId::\w+ => "{re.escape(name)}",', "", guest)
         if count != 1:
             return None
-    arms = list(GUEST_ARM.finditer(guest, max(guest.find(GUEST_DISPATCH), 0)))
+    dispatch = max(guest.find(GUEST_DISPATCH), 0)
+    arms = list(GUEST_ARM.finditer(guest, dispatch))
     references = [set(map(int, WIRE_RECORD.findall(arm[0]))) for arm in arms]
+    # The host calls' forwarders come before the dispatch and their types are numbered before any hook's, so they
+    # bound every window from below, also one ahead of the first retained arm.
+    before_dispatch = set(map(int, WIRE_RECORD.findall(guest[:dispatch])))
 
-    def added(arm):
-        call = GUEST_HOOK_CALL.search(arm[0])
-        return GUEST_HOOK_ARM.match(arm[0]) is not None and call is not None and call[1] in hooks
-
-    removed = [index for index, arm in enumerate(arms) if added(arm)]
+    retained_arms = {}
+    added_names = set()
+    removed = []
+    for index, arm in enumerate(arms):
+        call = GUEST_HOOK_CALL.search(arm[0]) if GUEST_HOOK_ARM.match(arm[0]) else None
+        if call and call[1] in hooks:
+            added_names.add(call[1])
+            removed.append(index)
+        elif call:
+            retained_arms.setdefault(call[1], set()).update(references[index])
     for index in reversed(removed):
         guest = guest[:arms[index].start()] + guest[arms[index].end():]
 
@@ -173,12 +210,29 @@ def guest_wire_without_hooks(guest, hooks, base, *, added_calls=False):
         # covers both additions while preserving the generated uses of every retained record.
         return records_in_order(guest)
 
-    windows = []
-    for index in removed:
-        low = max((n for j in range(index) if j not in removed for n in references[j]), default=-1)
-        high = min((n for j in range(index + 1, len(arms)) if j not in removed for n in references[j] if n > low),
-                   default=float("inf"))
-        windows.append((low, high))
+    def window(records, split):
+        low = max((n for refs in records[:split] for n in refs), default=-1)
+        high = min((n for refs in records[split:] for n in refs if n > low), default=float("inf"))
+        return low, high
+
+    removed_indices = set(removed)
+    retained = [before_dispatch] + [
+        refs if index not in removed_indices else () for index, refs in enumerate(references)]
+    windows = [window(retained, index + 1) for index in removed]
+    native_records = {} if native_records is None else native_records
+    native_hooks = hooks - added_names
+    unrecorded = native_hooks - native_records.keys()
+    if catalog and unrecorded:
+        # Native-only hooks have no dispatch position. Apply the same bounds to the retained arm
+        # records in catalog order, skipping other entries that have no guest-side records.
+        catalog_records = [before_dispatch]
+        splits = set()
+        for name in HOOK_NAME.findall(catalog[1]):
+            if name in retained_arms:
+                catalog_records.append(retained_arms[name])
+            elif name in unrecorded:
+                splits.add(len(catalog_records))
+        windows.extend(window(catalog_records, split) for split in splits)
 
     head_parts, base_parts = WIRE_RECORD.split(guest), WIRE_RECORD.split(base)
     if len(head_parts) != len(base_parts) or head_parts[::2] != base_parts[::2]:
@@ -188,7 +242,13 @@ def guest_wire_without_hooks(guest, hooks, base, *, added_calls=False):
         if pairs.setdefault(head_number, base_number) != base_number:
             return None
     used = sorted(pairs)
-    gaps = set().union(*(references[index] for index in removed)) - set(used)
+    used_numbers, last_used = set(used), used[-1] if used else 0
+    exact_gaps = {
+        n for name in native_hooks & native_records.keys()
+        for first, end in native_records[name] for n in range(first, min(end, last_used))
+        if n not in used_numbers
+    }
+    gaps = (set().union(*(references[index] for index in removed)) - used_numbers) | exact_gaps
     # Each retained number still above its base number absorbs the unreferenced numbers just below it. Which owned
     # types those were is not in this file: one an existing hook started to use there passes here, and only the
     # surface report sees it. A number the head lacks (a surplus below zero) fails, never absorbed.
@@ -198,7 +258,7 @@ def guest_wire_without_hooks(guest, hooks, base, *, added_calls=False):
         if surplus < 0 or len(free) < surplus:
             return None
         gaps.update(free)
-    if not all(any(low < gap < high for low, high in windows) for gap in gaps):
+    if not all(any(low < gap < high for low, high in windows) for gap in gaps - exact_gaps):
         return None
     gaps = sorted(gaps)
 
@@ -223,15 +283,47 @@ def note_sections(page):
     return ["".join(section).rstrip("\n") for section in sections]
 
 
-def notes_only_add_sections(base, head):
-    """Whether the head's hook notes are the base's with sections added: the text before the first section and every
-    base section stay, unchanged and in order. Which sections are an added hook's is not in the page (a hook's notes
-    may hold several), so an added section is not tied to its hook."""
+def load_note_updates(path):
+    """Read `OLD_SHA256 NEW_SHA256 #ISSUE ## Heading` entries for exact prose changes."""
+    revisions = set()
+    if not path.is_file():
+        return revisions
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        entry = re.fullmatch(r"([0-9a-f]{64})\s+([0-9a-f]{64})\s+#[1-9]\d*\s+(## .+)", line)
+        if not entry:
+            raise ValueError(f"{path}:{number}: write `OLD_SHA256 NEW_SHA256 #ISSUE ## Heading`")
+        old, new, heading = entry.groups()
+        key = (heading, old, new)
+        if old == new or key in revisions:
+            raise ValueError(f"{path}:{number}: repeated or unchanged note revision")
+        revisions.add(key)
+    return revisions
+
+
+def notes_only_add_sections(base, head, *, allow_new=True, revisions=()):
+    """Keep the preamble and every existing section in order, with only listed exact prose changes."""
     base, head = note_sections(base), note_sections(head)
-    if base[0] != head[0]:
+    if base[0] != head[0] or (not allow_new and len(base) != len(head)):
         return False
     remaining = iter(head[1:])
-    return all(any(section == other for other in remaining) for section in base[1:])
+    revisions = set(revisions)
+
+    def matches(section, other):
+        if section == other:
+            return True
+        heading = section.partition("\n")[0]
+        if revisions and heading == other.partition("\n")[0]:
+            key = (heading, hashlib.sha256(section.encode("utf-8")).hexdigest(),
+                   hashlib.sha256(other.encode("utf-8")).hexdigest())
+            if key in revisions:
+                revisions.remove(key)
+                return True
+        return False
+
+    return all(any(matches(section, other) for other in remaining) for section in base[1:])
 
 
 def guest_wire_without_calls(guest, base):
@@ -243,6 +335,11 @@ def guest_wire_without_calls(guest, base):
     with the game. An added call takes a position, so every later import's number moves by one. A changed or removed
     call loses its base name, and the base's forwarder for it is then missing from the head."""
     known = set(HOST_IMPORT.findall(base))
+    known_unsupported = {
+        match.group(1)
+        for line in base.splitlines(keepends=True)
+        if (match := GUEST_UNSUPPORTED.match(line))
+    }
     known_impls = set(GUEST_HOST_IMPL.findall(base))
     kept, added = [], set()
     new_impl, removed_forwarder = None, False
@@ -255,6 +352,13 @@ def guest_wire_without_calls(guest, base):
             if len(names) != 1:
                 return None, None, set()
             added.add(names[0])
+            if new_impl is not None:
+                removed_forwarder = True
+            continue
+        if not names and (stub := GUEST_UNSUPPORTED.match(line)) and stub.group(1) not in known_unsupported:
+            if kept and kept[-1].rstrip("\r\n") == NATIVE_ONLY_CFG:
+                kept.pop()
+            added.add(stub.group(1))
             if new_impl is not None:
                 removed_forwarder = True
             continue
@@ -301,11 +405,13 @@ def explained_additions(base_dir, head_dir, diffs, base_root, head_root):
     hooks = added_catalog_hooks(base_dir, head_dir) if HOOK_CATALOG in changed else set()
     if HOOK_CATALOG in changed and not hooks:
         return nothing
-    # A hook's notes are their own `## ` sections; an added hook adds sections and changes no other.
-    if "hook-notes.md" in changed and (not hooks or not notes_only_add_sections(
-            read_text(base_dir / "hook-notes.md", [base_root] if base_root else []),
-            read_text(head_dir / "hook-notes.md", [head_root] if head_root else []))):
-        return nothing
+    if "hook-notes.md" in changed:
+        revisions = load_note_updates(Path(head_root or ROOT) / NOTE_UPDATES)
+        if not notes_only_add_sections(
+                read_text(base_dir / "hook-notes.md", [base_root] if base_root else []),
+                read_text(head_dir / "hook-notes.md", [head_root] if head_root else []),
+                allow_new=bool(hooks), revisions=revisions):
+            return nothing
     calls = set()
     if GUEST_WIRE in changed:
         base = read_text(base_dir / GUEST_WIRE, [base_root] if base_root else [])
@@ -314,7 +420,13 @@ def explained_additions(base_dir, head_dir, diffs, base_root, head_root):
         if head is None:
             return nothing
         if hooks:
-            explained = guest_wire_without_hooks(head, hooks, base, added_calls=bool(calls))
+            try:
+                native_records = native_hook_records(head_dir / NATIVE_HOOK_RECORDS)
+            except ValueError as error:
+                print(f"Cannot read native hook record provenance: {error}")
+                return nothing
+            explained = guest_wire_without_hooks(
+                head, hooks, base, added_calls=bool(calls), native_records=native_records)
             if calls:
                 base = records_in_order(base)
         elif calls:

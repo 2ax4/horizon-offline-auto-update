@@ -52,6 +52,23 @@ pub trait EntitiesHost {
     /// for example whitelist or blacklist entries, which the game drops when unknown.
     #[access(Metadata)]
     fn entity_type_exists(&self, id: &str) -> bool;
+    /// Side: both.
+    /// Whether the entities of type `id` are `Enemy`s (`instanceof Enemy`), which a type's
+    /// class decides, not its category: the monsters, the slimes and magma cubes, the ghast,
+    /// phantom, shulker, hoglin and the ender dragon; not the zombie horse, camel husk or zombie
+    /// nautilus, though they are in the monster category. Golems and conduits pick their targets
+    /// by it, and spawn-control mods their hostile mobs. `id` is compared as written, as
+    /// `entity_type_exists` does; false for every other type and an unknown id.
+    #[access(WorldOnly)]
+    fn entity_type_is_enemy(&self, id: &str) -> bool;
+    /// Side: both.
+    /// Whether the entities of type `id` are `Animal`s (`instanceof Animal`): the mobs whose
+    /// class extends vanilla's `Animal`, the hoglin and the zombie horse included, the fish,
+    /// squids, dolphins, villagers and golems not. Spawn-control mods count passive mobs by it
+    /// (an `Animal` that is no `Enemy`). `id` is compared as written; false for every other type
+    /// and an unknown id.
+    #[access(WorldOnly)]
+    fn entity_type_is_animal(&self, id: &str) -> bool;
 }
 /// The server host's methods of the `entities` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
@@ -177,9 +194,10 @@ pub trait EntitiesBackend {
     /// for the kinds that don't turn. API 373.
     #[access(WorldOnly)]
     fn entity_rotation(&self, entity: EntityRef) -> Option<[f32; 2]>;
-    /// Side: server.
+    /// Side: both.
     /// The entity's resolved type key (`Entity.getType`). Compare keys directly;
-    /// request `key.id(host)` explicitly when its canonical name is needed. API 373.
+    /// request `key.id(host)` explicitly when its canonical name is needed.
+    /// On the client, reads the local player or a tracked entity's type. API 373.
     #[access(WorldOnly)]
     fn entity_kind(&self, entity: EntityRef) -> Option<EntityTypeKey>;
     /// Side: server.
@@ -357,10 +375,13 @@ pub trait EntitiesBackend {
     /// shulker bullet set it in their constructors and never clear it.
     #[access(WorldOnly)]
     fn entity_no_physics(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// What the entity rides (`Entity.getVehicle`): `None` when it rides
     /// nothing, its actual vehicle is retained off-level and has no resident handle,
-    /// or the supplied handle is stale. `is_passenger` still reports the relationship.
+    /// or the supplied handle is stale. On a client, reads the server's latest
+    /// passenger relationships (or the local player's ride), and returns `None`
+    /// when the vehicle is not tracked in the current client level.
+    /// `is_passenger` remains server-only.
     #[access(WorldOnly)]
     fn entity_vehicle(&self, entity: EntityRef) -> Option<EntityRef>;
     /// Side: server.
@@ -455,15 +476,17 @@ pub trait EntitiesBackend {
     /// False for non-player entities, None for a stale or unreachable handle.
     #[access(WorldOnly)]
     fn entity_is_shift_key_down(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity crouches (`Entity.isCrouching`: the crouching
     /// pose).
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_crouching(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity sprints (`Entity.isSprinting`): a player, or a
     /// cat or ocelot dashing after its target (their shared sprinting flag);
     /// false for the other kinds.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_sprinting(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
@@ -483,13 +506,15 @@ pub trait EntitiesBackend {
     /// client, reads its own copy as `entity_fluid_heights` does.
     #[access(WorldOnly)]
     fn entity_eye_fluid(&self, entity: EntityRef) -> Option<Option<String>>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity touched water at its last fluid update
     /// (`Entity.isInWater`): players and mobs.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_in_water(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity is in lava (`Entity.isInLava`): players and mobs.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_in_lava(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
@@ -545,10 +570,11 @@ pub trait EntitiesBackend {
     /// flag.
     #[access(WorldOnly)]
     fn entity_is_invisible(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// The entity's pose (`Entity.getPose`) as `Pose` names it: `standing`,
     /// `crouching`, `swimming`, `sleeping`, a warden's `roaring`... Kinds
     /// with no pose stand.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_pose(&self, entity: EntityRef) -> Option<&'static str>;
     /// Side: server.
@@ -578,6 +604,20 @@ pub trait EntitiesBackendMut {
     /// 386.
     #[access(WorldOnly)]
     fn entity_merge_nbt(&mut self, entity: EntityRef, nbt: Compound) -> bool;
+    /// Side: server.
+    /// Keeps the entity out of the level's saves (`saved` false) or puts it
+    /// back in (true, what every entity starts as): the autosave and the save
+    /// of its chunk's unload write the level without it, so it is gone at the
+    /// next start, and a chunk that unloads takes it away unwritten. For an
+    /// entity a mod owns and removes itself (a display that follows another
+    /// entity, a floating number): call it right after `summon`, so a crash
+    /// or an unload before the mod's own cleanup leaves nothing behind.
+    /// Whatever rides it is saved under it, so goes unsaved with it; an
+    /// entity that rides another is saved with its vehicle, so keep the
+    /// vehicle out. The entity gets the UUID the save will find it by. False
+    /// for a player and a stale handle.
+    #[access(WorldOnly)]
+    fn entity_set_saved(&mut self, entity: EntityRef, saved: bool) -> bool;
     /// Side: server.
     /// Adds tag `tag` (`Entity.addTag`): false when it has it already, holds
     /// 1024, its kind cannot store tags, or the handle is stale. API 386.

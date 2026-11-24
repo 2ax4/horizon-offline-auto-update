@@ -54,6 +54,10 @@ impl DirtySections {
         }
         had
     }
+    /// The dirty section indexes of column (x, z).
+    pub fn column(&self, x: i32, z: i32) -> SectionMask {
+        self.columns.get(&(x, z)).copied().unwrap_or_default()
+    }
     /// The dirty section indexes of column (x, z), removed.
     pub fn take_column(&mut self, x: i32, z: i32) -> SectionMask {
         self.columns.remove(&(x, z)).unwrap_or_default()
@@ -197,6 +201,21 @@ pub struct World {
     /// from the block entities after each tick: the collision queries read it
     /// (`ShulkerBoxBlockEntity.getBoundingBox`), as `moving_pistons` for pistons.
     pub shulkers: FxHashMap<[i32; 3], crate::block_entity_anim::Shulker>,
+}
+/// See [`World::region_stamp`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionStamp {
+    n: u8,
+    items: [(i32, i32, i32, u64, u32); RegionStamp::MOST],
+}
+impl RegionStamp {
+    /// The most sections (or missing columns) a stamp holds: a box of 16 blocks a side reaches 8.
+    pub const MOST: usize = 8;
+    fn push(&mut self, item: (i32, i32, i32, u64, u32)) -> Option<()> {
+        *self.items.get_mut(usize::from(self.n))? = item;
+        self.n += 1;
+        Some(())
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Weather {
@@ -487,22 +506,32 @@ impl World {
     pub fn end_player_edit(&mut self) {
         self.player_edit_depth = self.player_edit_depth.saturating_sub(1);
     }
-    /// Copy dirty sections whose center is within `max_dist_sq` of `camera_block` into
-    /// `immediate_sections` (vanilla `PrioritizeChunkUpdates.NEARBY`, 768.0 squared blocks),
-    /// stopping once `immediate_sections.len() > limit`.
-    pub fn mark_nearby_dirty_immediate(
-        &mut self,
+    /// Dirty sections whose center is within `max_dist_sq` of `camera_block` (vanilla
+    /// `PrioritizeChunkUpdates.NEARBY`, 768.0 squared blocks), nearest first, at most `limit`.
+    /// Returned apart from `immediate_sections` so the player's own edits are never budgeted.
+    pub fn nearby_dirty_sections(
+        &self,
         camera_block: [i32; 3],
         max_dist_sq: f64,
         limit: usize,
-    ) {
+    ) -> Vec<(i32, i32, i32)> {
         let bottom_y = self.bottom_y();
         let (cx0, cy0, cz0) = (
             f64::from(camera_block[0]),
             f64::from(camera_block[1]),
             f64::from(camera_block[2]),
         );
-        for ((cx, cz), sections) in self.dirty_sections.columns() {
+        // Only the columns whose centre can be within reach, not every dirty column loaded.
+        let reach = max_dist_sq.sqrt();
+        let columns = |c0: f64| {
+            ((c0 - 8.0 - reach) / 16.0).ceil() as i32..=((c0 - 8.0 + reach) / 16.0).floor() as i32
+        };
+        let mut nearby = Vec::new();
+        for (cx, cz) in columns(cx0).flat_map(|cx| columns(cz0).map(move |cz| (cx, cz))) {
+            let sections = self.dirty_sections.column(cx, cz);
+            if sections.is_empty() {
+                continue;
+            }
             let sx = f64::from(cx * 16 + 8) - cx0;
             let sz = f64::from(cz * 16 + 8) - cz0;
             let horiz = sx * sx + sz * sz;
@@ -511,14 +540,16 @@ impl World {
             }
             for sy in sections.iter().map(|s| s as i32) {
                 let sy_d = f64::from(bottom_y + sy * 16 + 8) - cy0;
-                if horiz + sy_d * sy_d <= max_dist_sq {
-                    self.immediate_sections.insert((cx, sy, cz));
-                    if self.immediate_sections.len() > limit {
-                        return;
-                    }
+                let dist_sq = horiz + sy_d * sy_d;
+                if dist_sq <= max_dist_sq {
+                    nearby.push((dist_sq, (cx, sy, cz)));
                 }
             }
         }
+        // Hash order differs run to run; the key breaks distance ties deterministically.
+        nearby.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        nearby.truncate(limit);
+        nearby.into_iter().map(|(_, key)| key).collect()
     }
     /// Resident storage write; marks the touched sections (and neighbours on
     /// section borders) for remeshing and the surrounding chunks for relighting.
@@ -672,6 +703,32 @@ impl World {
             None => self.air,
         }
     }
+    /// What a reader that looked at the blocks of the box `lo..=hi` (block coordinates) keeps to
+    /// know later that none of them was written: the identity and write count of each block
+    /// container the box reaches, and which chunk columns it found missing. `None` when the box
+    /// reaches more than [`RegionStamp::MOST`] sections. Equal stamps mean the same containers
+    /// with the same entries, so every read of the box answers as it did.
+    pub fn region_stamp(&self, lo: [i32; 3], hi: [i32; 3]) -> Option<RegionStamp> {
+        let mut stamp = RegionStamp {
+            n: 0,
+            items: [(0, 0, 0, 0, 0); RegionStamp::MOST],
+        };
+        for cx in lo[0] >> 4..=hi[0] >> 4 {
+            for cz in lo[2] >> 4..=hi[2] >> 4 {
+                let Some(chunk) = self.chunks.get_chunk(cx, cz) else {
+                    stamp.push((cx, cz, i32::MIN, 0, 0))?;
+                    continue;
+                };
+                for sy in lo[1] >> 4..=hi[1] >> 4 {
+                    if let Some(s) = chunk.section_index(sy << 4) {
+                        let (uid, edits) = chunk.sections[s].blocks.stamp();
+                        stamp.push((cx, cz, s as i32, uid, edits))?;
+                    }
+                }
+            }
+        }
+        Some(stamp)
+    }
     /// Whether a block of the box `lo..=hi` may match, from the palettes of
     /// the sections it reaches (a palette of the whole registry may hold
     /// anything): `false` means [`Self::block`] matches in none of its cells,
@@ -713,6 +770,18 @@ impl World {
     ) -> std::sync::Arc<Vec<(crate::block_entities::Pos, u32)>> {
         let (chunks, air) = (&self.chunks, self.air);
         self.block_entities.tickers(|(x, y, z)| {
+            chunks
+                .get_chunk(x >> 4, z >> 4)
+                .map_or(air, |chunk| chunk.block(x & 15, y, z & 15))
+                .0
+        })
+    }
+    /// Awake subset of [`Self::block_entity_tickers`], cached until tickers or sleep set changes.
+    pub fn awake_block_entity_tickers(
+        &mut self,
+    ) -> std::sync::Arc<Vec<(crate::block_entities::Pos, u32, u64)>> {
+        let (chunks, air) = (&self.chunks, self.air);
+        self.block_entities.awake_tickers(|(x, y, z)| {
             chunks
                 .get_chunk(x >> 4, z >> 4)
                 .map_or(air, |chunk| chunk.block(x & 15, y, z & 15))
@@ -784,45 +853,97 @@ impl World {
             .1
             .get("lock")
     }
-    /// `LockCode.addToTag` for a tag a command gives a container (`setblock`,
-    /// `data merge`): the tag it was set with keeps the lock, so `data get`
-    /// shows it, a player's open checks it and the save writes it.
+    /// The tag a modelled block entity was loaded or set with: the fields
+    /// Horizon keeps outside its model (`components`, `lock`, a container's
+    /// name) survive on it for a save or a loot roll.
+    pub fn block_entity_source(&self, key: (i32, i32, i32)) -> Option<&horizon_core::nbt::Tag> {
+        self.chunks
+            .get(&(key.0 >> 4, key.2 >> 4))?
+            .saved
+            .as_ref()?
+            .block_entity_sources
+            .iter()
+            .find(|(p, _)| *p == key)
+            .map(|(_, tag)| tag)
+    }
+    /// Updates a container's lock without changing its stored components.
     pub fn set_block_lock(&mut self, key: (i32, i32, i32), tag: &horizon_core::nbt::Tag) {
+        self.update_block_entity_metadata(key, tag, false);
+    }
+
+    /// `BlockEntity.loadWithComponents`: keep the explicit map beside the model.
+    /// An absent or empty map clears the previous one.
+    pub fn set_block_entity_metadata(
+        &mut self,
+        key: (i32, i32, i32),
+        tag: &horizon_core::nbt::Tag,
+    ) -> bool {
+        self.update_block_entity_metadata(key, tag, true)
+    }
+
+    fn update_block_entity_metadata(
+        &mut self,
+        key: (i32, i32, i32),
+        tag: &horizon_core::nbt::Tag,
+        load_components: bool,
+    ) -> bool {
         use horizon_core::nbt::Tag;
-        let lock = tag.get("lock").and_then(|lock| match lock {
-            Tag::Compound(_) => Some(lock.clone()),
-            _ => None,
-        });
-        let mut tag = tag.clone();
-        if let Tag::Compound(map) = &mut tag {
-            map.remove(&"LootTable".into());
-            map.remove(&"LootTableSeed".into());
+        let lock = tag
+            .get("lock")
+            .filter(|lock| matches!(lock, Tag::Compound(_)));
+        let components = tag
+            .get("components")
+            .filter(|map| matches!(map, Tag::Compound(map) if !map.is_empty()));
+        let source = self.block_entity_source(key);
+        let lock_changed = source.and_then(|tag| tag.get("lock")) != lock;
+        let components_changed = load_components
+            && source
+                .and_then(|tag| tag.get("components"))
+                .filter(|map| matches!(map, Tag::Compound(map) if !map.is_empty()))
+                != components;
+        if !lock_changed && !components_changed {
+            return false;
         }
         self.with_chunk_extras(key, |extras| {
             let at = extras
                 .block_entity_sources
                 .iter()
                 .position(|(p, _)| *p == key);
-            match at {
-                Some(i) => {
-                    if let Tag::Compound(source) = &mut extras.block_entity_sources[i].1 {
-                        match lock {
-                            Some(lock) => {
-                                source.insert("lock".into(), lock);
-                            }
-                            None => {
-                                source.remove(&"lock".into());
+            if let Some(i) = at {
+                if let Tag::Compound(source) = &mut extras.block_entity_sources[i].1 {
+                    for (field, value, changed) in [
+                        ("lock", lock, lock_changed),
+                        ("components", components, components_changed),
+                    ] {
+                        if changed {
+                            match value {
+                                Some(value) => {
+                                    source.insert(field.into(), value.clone());
+                                }
+                                None => {
+                                    source.remove(&field.into());
+                                }
                             }
                         }
                     }
+                    // A runtime stack-limit override may have created a source
+                    // record with no type or position yet.
+                    for field in ["id", "x", "y", "z"] {
+                        if let Some(value) = tag.get(field) {
+                            source.entry(field.into()).or_insert_with(|| value.clone());
+                        }
+                    }
                 }
-                // A container set at runtime has no source yet: the tag the
-                // command gave is the one it was set with, `id` and position
-                // included (the save checks the id before merging).
-                None if lock.is_some() => extras.block_entity_sources.push((key, tag.clone())),
-                None => {}
+            } else {
+                let mut source = tag.clone();
+                if let Tag::Compound(map) = &mut source {
+                    map.remove(&"LootTable".into());
+                    map.remove(&"LootTableSeed".into());
+                }
+                extras.block_entity_sources.push((key, source));
             }
         });
+        true
     }
     /// The fields Horizon keeps beside a block entity's model, for a journal: the tag it was
     /// loaded or set with (its `lock`) and its pending loot metadata.
@@ -1118,4 +1239,65 @@ mod tests {
 pub struct BlockEntityExtras {
     pub source: Option<horizon_core::nbt::Tag>,
     pub pending_loot: Option<crate::chunk::PendingContainerLoot>,
+}
+
+#[cfg(test)]
+mod region_stamp_tests {
+    use super::*;
+    use crate::chunk::Chunk;
+    use std::sync::Arc;
+
+    fn world() -> World {
+        let mut w = World::new(BlockStateId(0), 0);
+        for (x, z) in [(0, 0), (1, 0), (0, 1), (1, 1), (5, 5)] {
+            w.chunks.insert((x, z), Arc::new(Chunk::empty(x, z)));
+        }
+        w
+    }
+
+    /// A stamp changes when a block of the box is written (even to the same value's neighbour in
+    /// its section), when a chunk of the box is replaced or appears, and not for a write in a
+    /// section the box does not reach.
+    #[test]
+    fn a_region_stamp_follows_the_writes_of_its_sections() {
+        let mut w = world();
+        let (lo, hi) = ([10, 0, 10], [20, 3, 20]);
+        let a = w.region_stamp(lo, hi).unwrap();
+        assert_eq!(a, w.region_stamp(lo, hi).unwrap(), "nothing written");
+        w.set(80, 0, 80, BlockStateId(1)).unwrap();
+        assert_eq!(a, w.region_stamp(lo, hi).unwrap(), "a write in chunk 5,5");
+        w.set(12, 100, 12, BlockStateId(1)).unwrap();
+        assert_eq!(
+            a,
+            w.region_stamp(lo, hi).unwrap(),
+            "a write in another section of the column"
+        );
+        w.set(12, 1, 12, BlockStateId(1)).unwrap();
+        let b = w.region_stamp(lo, hi).unwrap();
+        assert_ne!(a, b, "a write in the box's section");
+        w.set(12, 1, 12, BlockStateId(0)).unwrap();
+        assert_ne!(
+            b,
+            w.region_stamp(lo, hi).unwrap(),
+            "written back is still a write"
+        );
+        // A chunk replaced by an equal copy is another container.
+        let before = w.region_stamp(lo, hi).unwrap();
+        let copy = Arc::new(Chunk::empty(0, 0));
+        w.chunks.insert((0, 0), copy);
+        assert_ne!(before, w.region_stamp(lo, hi).unwrap(), "a chunk replaced");
+        // A column that is missing, then loaded.
+        let far = ([200, 0, 200], [201, 3, 201]);
+        let missing = w.region_stamp(far.0, far.1).unwrap();
+        w.chunks.insert((12, 12), Arc::new(Chunk::empty(12, 12)));
+        assert_ne!(
+            missing,
+            w.region_stamp(far.0, far.1).unwrap(),
+            "a column loaded"
+        );
+        assert!(
+            w.region_stamp([0, -64, 0], [40, 300, 40]).is_none(),
+            "a box of too many sections"
+        );
+    }
 }

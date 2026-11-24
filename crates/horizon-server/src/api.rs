@@ -151,8 +151,8 @@ pub const ROUTES: [Route; 32] = [
     Route {
         method: "POST",
         path: "/api/v1/restore",
-        takes: "`{\"name\": \"<backup>\", \"dimension\": \"minecraft:the_nether\"}` (`dimension` optional)",
-        answers: "`{\"name\": \"<backup>\", \"dimension\": \"<id>\" or null}`",
+        takes: "`{\"name\": \"<backup>\", \"dimension\": \"minecraft:the_nether\"}` (`name` must be a nonblank string; `dimension` is optional)",
+        answers: "`{\"name\": \"<backup>\", \"dimension\": \"<id>\" or null}`; `400` if no backup name is given",
         what: "Restart the game with that backup's world, or only one dimension of it (what it replaces is kept in backups/)",
     },
     Route {
@@ -465,7 +465,16 @@ impl Shared {
             update.busy = Some("Looking for the newest release".into());
         }
         if let Some(tag) = tag {
-            if !install.release(&tag).is_dir() || tag.contains(['/', '\\']) {
+            // A plain release name, as `update::unpack` requires: ".." is a folder without a slash, and
+            // would point `current` at the install's root.
+            // On Windows `releases\C:` joins to the drive-relative path `C:`, so a tag with a colon
+            // is refused too, and it must be exactly one normal path component.
+            let mut parts = std::path::Path::new(&tag).components();
+            let plain = !tag.starts_with('.')
+                && !tag.contains(['/', '\\', ':'])
+                && matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                && parts.next().is_none();
+            if !plain || !install.release(&tag).is_dir() {
                 self.update.lock().unwrap().busy = None;
                 return Err(format!(
                     "{tag} isn't installed (`horizon-server update` downloads it)"
@@ -774,7 +783,14 @@ pub fn route(shared: &Arc<Shared>, request: &Request) -> Response {
         }
         ("POST", "/api/v1/restore") => {
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
-            match backup::find(&shared.dir, body["name"].as_str().unwrap_or_default()) {
+            let Some(name) = body["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            else {
+                return Response::error(400, "a backup name is required");
+            };
+            match backup::find(&shared.dir, name) {
                 Ok(name) => {
                     let dimension = match body["dimension"].as_str() {
                         None => None,
@@ -1055,6 +1071,40 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_update_names_a_release_not_a_folder_around_it() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("horizon-server-update-tag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("releases/v2")).unwrap();
+        let dir = root.join("server");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = Shared::with_install(&dir, Some(Install { root: root.clone() }));
+        for tag in ["..", ".", "", ".hidden", "v2/../v2", "..\\x", "C:", "C:x"] {
+            let err = shared
+                .start_update(Some(tag.into()), Duration::from_secs(1))
+                .unwrap_err();
+            assert!(err.contains("isn't installed"), "{tag:?}: {err}");
+            assert!(shared.update.lock().unwrap().pending.is_none(), "{tag:?}");
+        }
+        shared
+            .start_update(Some("v2".into()), Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            shared
+                .update
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .map(|p| p.0.as_str()),
+            Some("v2")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn tokens_compare_whole() {
@@ -1661,6 +1711,7 @@ mod tests {
             "api.allow_public",
             "panel.bind",
             "properties.enable-rcon",
+            "anticheat.strikes=",
         ] {
             let (status, _) = call(
                 "PATCH",
@@ -1711,6 +1762,42 @@ mod tests {
         );
         assert!(backup::list(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn restore_requires_a_nonblank_backup_name() {
+        let root = std::env::temp_dir().join(format!(
+            "horizon-server-restore-validation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("backups")).unwrap();
+        // One backup: a blank name used to match it as a prefix and restore it (#20180).
+        std::fs::write(root.join("backups/2026-01-01_00-00-00-manual.zip"), b"zip").unwrap();
+        let shared = Shared::with_install(&root, None);
+        for body in [
+            "",
+            "{}",
+            r#"{"name":null}"#,
+            r#"{"name":42}"#,
+            r#"{"name":""}"#,
+            r#"{"name":" "}"#,
+        ] {
+            let response = route(
+                &shared,
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/v1/restore".into(),
+                    query: String::new(),
+                    headers: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                },
+            );
+            assert_eq!(response.status, 400, "{body:?}");
+            assert!(shared.restore.lock().unwrap().is_none(), "{body:?}");
+            assert!(!shared.restart.load(Ordering::SeqCst), "{body:?}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn backup_reply(mut response: Response) -> Value {

@@ -1,5 +1,6 @@
 import contextlib
 import io
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -286,6 +287,27 @@ class CompareTests(unittest.TestCase):
         status, text = self.run_compare(base, {**head, "hook-notes.md": NOTES + "\n## Added\n\nNew.\n"},
                                         allow_added=True)
         self.assertEqual(status, 0, text)
+
+    def test_scoped_part_hook_addition_preserves_existing_guest_dispatch(self):
+        old_hook = {"name": "existing", "neoforge": "existing event"}
+        new_hook = {"name": "can_place_item", "scope": "block_entity", "neoforge": "none"}
+        old_arm = ('12 => { let receiver = super::hooks(); let p = crate::__wire_record_52(value);\n'
+                   ' let answer = receiver.existing(&p); out.put_owned(answer); }\n')
+        new_arm = ('27 => { let receiver = crate::wire::guest::handler::<dyn crate :: BlockEntityPart>(input.take()?)?;'
+                   ' let p = crate::__wire_record_52(value);\n'
+                   ' let answer = receiver.can_place_item(&mut p); out.put_owned(answer); }\n')
+        old_name = 'crate::HookId::Existing => "existing",'
+        new_name = 'crate::HookId::CanPlaceItem => "can_place_item",'
+        fallback = '_ => return Err(crate::wire::WireError::Tag(id)) }\n'
+        base = {"catalog.json": json.dumps({"hooks": [old_hook]}), "hook-notes.md": NOTES,
+                "wire_guest_generated.rs": old_name + "\n" + old_arm + fallback}
+        head = {"catalog.json": json.dumps({"hooks": [new_hook, old_hook]}), "hook-notes.md": NOTES,
+                "wire_guest_generated.rs": new_name + old_name + "\n" + new_arm
+                + old_arm.replace("_52", "_53") + fallback}
+        for allowed in (True, False):
+            with self.subTest(allow_added=allowed):
+                status, text = self.run_compare(base, head, allow_added=allowed)
+                self.assertEqual(status, 0 if allowed else 1, text)
         # An added hook explains new note sections, not an edit to an existing hook's or the general notes.
         for notes in (NOTES.replace("Old.", "Edited.") + "\n## Added\n", NOTES.replace("General.", "Edited.")
                       + "\n## Added\n", "# Hook notes\n\n## Added\n"):
@@ -299,7 +321,8 @@ class CompareTests(unittest.TestCase):
         before, effect, nested, outer = records
         names = ('crate::HookId::DimensionTransitionScreenDraw => "dimension_transition_screen_draw",'
                  + ('crate::HookId::DragonFightWon => "dragon_fight_won",' if added_name else "")
-                 + 'crate::HookId::EffectParticleModification => "effect_particle_modification",')
+                 + 'crate::HookId::EffectParticleModification => "effect_particle_modification",'
+                 'crate::HookId::EnchantmentLevelSet => "enchantment_level_set",')
         arms = [
             ('1914093287 => { let receiver = super::hooks(); let p1_0: f32 = input.take()?;\n'
              f'let mut p1 = crate::__wire_record_{before}(p1_0);\n'
@@ -333,7 +356,7 @@ class CompareTests(unittest.TestCase):
                     'let mut p1 = crate::__wire_record_858(p1_0);\n let answer = receiver.dragon_fight_won(&host, '
                     '&mut p1); out.put_owned(answer); out.put(&p1.level); }\n')
 
-    def compare_hook_addition(self, head_records, added_arm, edit=lambda text: text):
+    def compare_hook_addition(self, head_records, added_arm, edit=lambda text: text, native_records=None):
         """The gate's status for the base's dispatch against one with `added_arm` and `head_records`."""
         old_hook = {"name": "dimension_transition_screen_draw", "neoforge": "none"}
         new_hook = {"name": "dragon_fight_won", "neoforge": "none"}
@@ -341,6 +364,8 @@ class CompareTests(unittest.TestCase):
                 "wire_guest_generated.rs": self.guest_dispatch((857, 858, 862, 861))}
         head = {"catalog.json": json.dumps({"hooks": [old_hook, new_hook]}),
                 "wire_guest_generated.rs": edit(self.guest_dispatch(head_records, added_arm, added_name=True))}
+        if native_records is not None:
+            head["native-hook-records.json"] = json.dumps(native_records)
         return self.run_compare(base, head, allow_added=True)[0]
 
     def test_an_added_hook_with_a_borrowed_event_passes(self):
@@ -352,6 +377,53 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(self.compare_hook_addition((857, 859, 863, 862), self.OWNED_ARM), 0)
         with self.subTest("the event and a new owned type only it uses: two numbers"):
             self.assertEqual(self.compare_hook_addition((857, 860, 864, 863), self.OWNED_ARM), 0)
+
+    def test_an_added_native_only_hook_can_shift_later_records(self):
+        # #20252: new native-only types consume three numbers without a guest dispatch arm.
+        self.assertEqual(self.compare_hook_addition((857, 861, 865, 864), None), 0)
+
+    def test_an_added_native_only_hook_only_explains_its_catalog_window(self):
+        cases = {
+            "an existing arm's text": ((857, 861, 865, 864), lambda text: text.replace("out.put(&p1.visible);", "")),
+            "an existing HookId mapping": ((857, 861, 865, 864), lambda text: text.replace(
+                "HookId::EffectParticleModification", "HookId::Different")),
+            "a shift before the native-only hook": ((860, 861, 865, 864), lambda text: text),
+            "a shift after the next arm": ((857, 858, 865, 864), lambda text: text),
+        }
+        for name, (records, edit) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.compare_hook_addition(records, None, edit), 1)
+
+    def test_a_native_only_hook_first_in_the_catalog_does_not_explain_a_shifted_host_call_record(self):
+        # The window ahead of the first retained arm starts above the host calls' records, not at -1.
+        def guest(prefix, records, added_name=False):
+            text = self.guest_dispatch(records, added_name=added_name)
+            if added_name:
+                text = text.replace('crate::HookId::DragonFightWon => "dragon_fight_won",', "").replace(
+                    "match id { ", 'match id { crate::HookId::DragonFightWon => "dragon_fight_won",', 1)
+            return f"fn raw(&self) -> u32 {{ crate::__wire_record_{prefix}(0) }}\n" + text
+
+        old_hook = {"name": "dimension_transition_screen_draw", "neoforge": "none"}
+        new_hook = {"name": "dragon_fight_won", "neoforge": "none"}
+        base = {"catalog.json": json.dumps({"hooks": [old_hook]}),
+                "wire_guest_generated.rs": guest(850, (857, 858, 862, 861))}
+        for prefix, records, status in ((850, (858, 859, 863, 862), 0), (851, (858, 859, 863, 862), 1)):
+            with self.subTest(prefix=prefix, records=records):
+                head = {"catalog.json": json.dumps({"hooks": [new_hook, old_hook]}),
+                        "wire_guest_generated.rs": guest(prefix, records, added_name=True)}
+                self.assertEqual(self.run_compare(base, head, allow_added=True)[0], status)
+
+    def test_native_part_hook_records_use_generator_provenance_not_global_order(self):
+        provenance = {"dragon_fight_won": [[859, 861]]}
+        self.assertEqual(self.compare_hook_addition((857, 858, 864, 863), None, native_records=provenance), 0)
+        for records, data in (
+                ((857, 859, 864, 863), provenance),
+                ((857, 858, 865, 864), provenance),
+                ((857, 858, 864, 863), {"existing_hook": [[859, 861]]}),
+                ((857, 858, 864, 863), {"dragon_fight_won": [[-1, 861]]}),
+        ):
+            with self.subTest(records=records, provenance=data):
+                self.assertEqual(self.compare_hook_addition(records, None, native_records=data), 1)
 
     def test_an_owned_type_an_existing_hook_gains_beside_an_added_hook_is_not_seen_here(self):
         # Not coverage: dimension_transition_screen_draw's answer going from () to a new owned type takes 858 and
@@ -452,6 +524,53 @@ class CompareTests(unittest.TestCase):
             with self.subTest(name):
                 status, text = self.run_compare(base, {"hook-notes.md": NOTES, **files}, allow_added=True)
                 self.assertEqual(status, 1, text)
+
+    def test_reviewed_note_revision_does_not_exempt_other_changes(self):
+        root = Snapshots(self)
+        admitted = Path(root.tmp.name, gate.NOTE_UPDATES)
+        admitted.parent.mkdir()
+        revised = NOTES.replace("Old.", "Corrected.")
+        before, after = (page[page.index("## Existing"):].rstrip("\n") for page in (NOTES, revised))
+        admitted.write_text(
+            f"{sha256(before.encode()).hexdigest()} {sha256(after.encode()).hexdigest()} #18648 ## Existing\n"
+        )
+        base_wire = self.forwarders(self.BASE_CALLS)
+        addition = self.forwarders([*self.BASE_CALLS, ("Players::raw#dd", 1101)])
+        for name, notes, wire, allowed in [
+            ("exact revision", revised, addition, 0),
+            ("other text", revised.replace("Corrected.", "Different."), addition, 1),
+            ("renamed section", revised.replace("## Existing", "## Other"), addition, 1),
+            ("unrelated section", revised + "\n## Other\n\nNew.\n", addition, 1),
+            ("edited retained dispatch", revised, addition.replace("receiver.existing", "receiver.other"), 1),
+            ("no API addition", revised, base_wire, 1),
+        ]:
+            with self.subTest(name):
+                status, text = root.run(
+                    {"hook-notes.md": NOTES, "wire_guest_generated.rs": base_wire},
+                    {"hook-notes.md": notes, "wire_guest_generated.rs": wire},
+                    head_root=Path(root.tmp.name), allow_added=True,
+                )
+                self.assertEqual(status, allowed, text)
+
+    def test_an_added_native_only_unsupported_stub_passes_with_the_flag(self):
+        stub = ('#[cfg(not(target_arch = "wasm32"))]\n'
+                'fn tool_break_block(&mut self, p0: u32) -> bool '
+                '{ crate::wire::guest::unsupported("BackendMut::tool_break_block") }\n')
+        existing_stub = ('#[cfg(not(target_arch = "wasm32"))]\n'
+                         'fn existing_native(&self) -> bool '
+                         '{ crate::wire::guest::unsupported("BackendMut::existing_native") }\n')
+        base_wire = self.forwarders(self.BASE_CALLS).replace("\n}\n", "\n" + existing_stub + "}\n", 1)
+        head_wire = base_wire.replace("\n}\n", "\n" + stub + "}\n", 1)
+        status, text = self.run_compare({"wire_guest_generated.rs": base_wire},
+                                        {"wire_guest_generated.rs": head_wire}, allow_added=True)
+        self.assertEqual(status, 0, text)
+        self.assertIn("Host calls added (accepted): BackendMut::tool_break_block", text)
+        self.assertEqual(self.run_compare({"wire_guest_generated.rs": base_wire},
+                                          {"wire_guest_generated.rs": head_wire}, allow_added=False)[0], 1)
+        # Editing an existing unsupported stub still fails.
+        edited = head_wire.replace("fn existing_native(&self) -> bool", "fn existing_native(&self) -> u32")
+        self.assertEqual(self.run_compare({"wire_guest_generated.rs": base_wire},
+                                          {"wire_guest_generated.rs": edited}, allow_added=True)[0], 1)
 
     def test_a_loops_json_difference_fails_with_the_flag(self):
         status, _ = self.run_compare({"loops.json": NO_LOOPS}, {"loops.json": json.dumps({"loops": [], "x": 1})}, allow_added=True)

@@ -891,7 +891,7 @@ impl Game<'_> {
             self.particles.add(&options, at, [0.0; 3]);
             self.lan_send_particles(super::lan_particles::QueuedParticle {
                 dimension: self.dim.id(),
-                options,
+                options: options.into(),
                 state: None,
                 at,
                 spread: [0.0; 3],
@@ -1117,6 +1117,12 @@ impl Game<'_> {
                     if cancel {
                         return;
                     }
+                    horizon_client::hunger::native_living_heal_cause(
+                        &self.loop_context,
+                        player.entity_id as u32,
+                        "magic",
+                        amount,
+                    );
                 }
                 EffectAction::Heal(amount)
             }

@@ -1,6 +1,7 @@
 //! `apply_packet`: one play packet from the server, applied to the window's game.
 
 use super::*;
+use mod_api::DimensionTransitionCause;
 
 impl Game<'_> {
     pub(super) fn apply_packet_body(&mut self, packet: C) -> Result<()> {
@@ -93,7 +94,9 @@ impl Game<'_> {
                     // handleLogin makes a new ClientLevel: its predictions count from 0.
                     r.sequence = 0;
                     r.own_invisible = false;
+                    r.own_glowing = false;
                     r.own_on_fire = false;
+                    r.own_pose = None;
                     r.online_mode = p.online_mode;
                     r.levels.clone_from(&p.levels);
                     r.enforces_secure_chat = p.enforces_secure_chat;
@@ -128,8 +131,12 @@ impl Game<'_> {
                 // and ClientPacketListener.broadcastClientInformation sends it
                 // again only when an option changes it.
                 self.remote_chat_login();
-                if let Some(remote) = &self.remote {
-                    self.native_client_player_logging_in(p.player_id, remote.profile);
+                if let Some(remote) = &mut self.remote {
+                    remote
+                        .level_load
+                        .set_transition_cause(DimensionTransitionCause::Login);
+                    let profile = remote.profile;
+                    self.native_client_player_logging_in(p.player_id, profile);
                 }
             }
             C::Respawn(p) => {
@@ -163,7 +170,9 @@ impl Game<'_> {
                     self.experience.score = 0;
                     if let Some(r) = self.remote.as_mut() {
                         r.own_invisible = false;
+                        r.own_glowing = false;
                         r.own_on_fire = false;
+                        r.own_pose = None;
                         r.local_entity_silent = false;
                     }
                 }
@@ -200,6 +209,12 @@ impl Game<'_> {
                 let before: std::collections::HashSet<u32> =
                     self.mobs.iter().map(|m| m.id).collect();
                 if let Some(r) = self.remote.as_mut() {
+                    let cause = if died {
+                        DimensionTransitionCause::DeathRespawn
+                    } else {
+                        DimensionTransitionCause::Travel
+                    };
+                    r.level_load.set_transition_cause(cause);
                     r.ticked_before_player = before;
                 }
                 if dimension_changed {
@@ -702,6 +717,8 @@ impl Game<'_> {
                             // Its invisible bit (Entity.isInvisible): the
                             // Invisibility effect's, or a plugin's that hides
                             // the real body under a pose (arismoko/horizon#3788).
+                            // Its glowing bit: the Glowing tag's or effect's, for
+                            // the outline of the player's own body (#18838).
                             (0, Value::Byte(flags)) => {
                                 if let Some(pl) = self.player.as_mut() {
                                     pl.sprinting = flags & 0x08 != 0;
@@ -720,6 +737,7 @@ impl Game<'_> {
                                 let on_fire = flags & 0x01 != 0;
                                 if let Some(r) = self.remote.as_mut() {
                                     r.own_invisible = flags & 0x20 != 0;
+                                    r.own_glowing = flags & 0x40 != 0;
                                     let was_on_fire =
                                         std::mem::replace(&mut r.own_on_fire, on_fire);
                                     // The server put the fire out: the
@@ -758,6 +776,14 @@ impl Game<'_> {
                             (13, Value::Int(count)) => {
                                 if let Some(r) = self.remote.as_mut() {
                                     r.own_stingers = *count;
+                                }
+                            }
+                            // Entity.DATA_POSE: kept for the third-person body until the next
+                            // pose packet or a change of the local pose replaces it.
+                            (6, Value::Id(pose)) => {
+                                let local = self.player.as_ref().map(|p| p.pose);
+                                if let (Some(r), Some(local)) = (self.remote.as_mut(), local) {
+                                    r.own_pose = Some((crate::pose::Pose::from_id(*pose), local));
                                 }
                             }
                             (19 | 20, Value::Id(v)) => {
@@ -841,7 +867,10 @@ impl Game<'_> {
                     .map(|(slot, stack)| {
                         (
                             *slot,
-                            stack.as_ref().map(|s| self.item_name(s.item)),
+                            stack
+                                .as_ref()
+                                .filter(|s| s.count > 0)
+                                .map(|s| self.item_name(s.item)),
                             self.to_stack(stack),
                         )
                     })
@@ -864,7 +893,10 @@ impl Game<'_> {
                         m.extra.charged = charged;
                     }
                     for (slot, item, stack) in items {
-                        let stack = stack.or_else(|| item.map(|item| ItemStack::new(&item, 1)));
+                        let stack = stack.or_else(|| {
+                            item.filter(|item| &**item != "minecraft:air")
+                                .map(|item| ItemStack::new(&item, 1))
+                        });
                         m.set_equipment_stack(slot as usize, stack);
                     }
                 }

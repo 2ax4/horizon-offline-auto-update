@@ -47,6 +47,48 @@ forms rebake from current resources on every successful load. Resolve result ids
 `model_baking_completed`; reload invalidates old handles and failed reloads retain them.
 This API bakes quads only, not a mod-defined baked result type.
 
+## Wrapping already baked geometry
+
+Native client mods can implement `modify_baking_result` to inspect or reshape the block and
+standalone models of the candidate resource load, including native-loader faces. The hook runs on
+the resource loader after rotation and UV lock, before connected textures are derived and before
+the renderer receives the catalog. It runs at startup and on every rebake; a later stage can
+still fail. For a handle into a successfully published catalog, use `model_baking_completed`.
+
+```rust,ignore
+fn modify_baking_result(
+    &self,
+    _: &mod_api::RegistrationContext,
+    event: &mut mod_api::ModifyBakingResultEvent<'_, '_>,
+) {
+    use mod_api::{BakedModelKey, BakedQuadChange};
+
+    let key = BakedModelKey::Standalone("mymod:block/panel");
+    if event.models.model(key).is_none() {
+        return;
+    }
+    event.models.edit_quads(key, |quad| {
+        if quad.sprite == "mymod:block/temporary_cover" {
+            BakedQuadChange::Remove
+        } else {
+            BakedQuadChange::Keep
+        }
+    }).expect("the named panel exists");
+}
+```
+
+For block models, use `BakedModelKey::Variant` with the model's namespaced identifier, XYZ quarter
+turns and UV-lock flag. `visit_block_state` takes a block identifier and its full set of properties
+sorted by name; it visits every weighted alternative and each matching multipart part. The
+borrowed quads contain positions and sprite-relative UVs in vertex order, sprite ids, culling and
+shading metadata. The borrow cannot outlive the hook.
+
+Edits affect the shared bake, not just the state you used to find it. A replacement keeps the
+original quad's sprite, tint and lighting; it can change the positions, UVs and cull face. Invalid
+replacement geometry leaves the model untouched. Edits are visible to later listeners for that
+load and do not accumulate across reloads. This hook does not change item-stack model selection,
+add per-position ModelData or call a mod once models are drawing.
+
 
 ## Terrain materials in a block entity
 
@@ -197,6 +239,36 @@ Typed humanoid parts have separate storage, so all twelve fit alongside the eigh
 - The body loses the part, and so do the layers drawn on the body's own model, as vanilla's
   `getParentModel()` layers do: a villager's type, profession and level, a spider's eyes. The
   armour, held items and other layers keep every part, and the cape, a layer of its own, stays.
+- In `render_player_pre`, `hidden.hide_named("cape")` leaves out the player's cape instead (vanilla's
+  `showCape`): what a mod's armour over the back needs, as Mekanism's MekaSuit hides it.
+
+## A player's skin for your own model
+
+A mod that builds a player's model itself (a 3D map drawing every player from above, a
+portrait) textures it from the player's skin with `player_skin(entity)`. The answer says
+where the skin (64x64) and the cape (64x32, `None` without one) lie in the GUI atlas,
+the atlas entity quads sample (`WorldDrawn::atlas` in a native render mod), and whether
+the model is slim (3-pixel arms). It is the skin this client draws: the downloaded one
+once it is in the atlas, the profile's default until then, and for the local player the
+cape follows the Skin Customization option. Downloaded skins share a few atlas slots, so
+a region holds for the frame you ask in; ask each frame you draw. A mannequin answers
+like a player, and every other entity answers `None`.
+
+## Drawing the player's arms with a held item
+
+In `render_hand`, call `host.local_player_arm_skin()` to get `(sprite, slim)` for
+the local player. The key is the current first-person arm's atlas sprite: pass it
+directly to `event.draw.model_part(part, sprite, 0xFFFFFF)`. If the player's skin
+isn't in the atlas, the key uses the same Steve fallback as the ordinary arm
+without changing `slim`. Skip drawing if the call returns `None`; read it again
+when drawing rather than caching the key across frames.
+
+Bake `minecraft:player_slim#main` and `minecraft:player#main` once with `bake_layer`
+and choose the layer by `slim`. `event.render.hand` distinguishes the main and off
+hand; the main arm is left when `host.gui_options().main_hand_left` is true,
+and the off arm is the opposite. Pose the part in the draw context's hand space
+(blocks, +x right, +y up, -z away). Return `Flow::Continue` to keep the default
+held item in addition to the arm you drew.
 
 ## Text and animation in block entities
 

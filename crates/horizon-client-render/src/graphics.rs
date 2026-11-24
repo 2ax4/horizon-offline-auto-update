@@ -536,16 +536,6 @@ impl Upscaling {
     }
 }
 
-static REDUCED_SUGGESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Whether the settings suggest Reduced far detail: set when the renderer
-/// starts, on the GPUs `lod_capped` names (far terrain slows them most).
-pub fn suggest_reduced_far_detail(on: bool) {
-    REDUCED_SUGGESTED.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-pub fn reduced_far_detail_suggested() -> bool {
-    REDUCED_SUGGESTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// The Screenshot Quality choices, times the game's resolution.
 pub const SCREENSHOT_QUALITIES: [u32; 4] = [1, 2, 4, 8];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -601,6 +591,42 @@ impl HdrLook {
     }
     fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|look| look.name() == value)
+    }
+}
+
+/// When hardware ray queries (`EXPERIMENTAL_RAY_QUERY`) and the ray-tracing acceleration scene
+/// are requested and built (`horizon-graphics.txt` `rayTracing`; `auto` by default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RayTracingMode {
+    /// Follows the picked shader pack: enabled when its manifest declares `[ray_tracing]`.
+    #[default]
+    Auto,
+    /// Always requests ray queries at startup and keeps the ray scene ready.
+    On,
+    /// Disables hardware ray queries and the ray scene even if a pack declares `[ray_tracing]`.
+    Off,
+}
+impl RayTracingMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::On, Self::Off];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::On => "On",
+            Self::Off => "Off",
+        }
+    }
+    fn parse(value: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.name() == value)
+            .unwrap_or_default()
     }
 }
 
@@ -765,29 +791,7 @@ pub fn gpu_culling_lost() -> bool {
     GPU_CULLING_LOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The farthest LOD Distance, in chunks, on integrated GPUs other than
-/// Apple's: they share the CPU's memory bandwidth, and past it far terrain
-/// costs them more frame time than it is worth.
-pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
-/// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
-/// are integrated too, with memory and bandwidth enough for every distance.
-pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
-    info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
-}
-/// A LOD distance as far terrain uses it on this adapter.
-pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
-    let distance = distance.min(crate::lod::MAX_CHUNKS);
-    if lod_capped(info) {
-        distance.min(INTEGRATED_LOD_DISTANCE)
-    } else {
-        distance
-    }
-}
 impl Graphics {
-    /// `lod_distance` as far terrain uses it on this adapter.
-    pub fn lod_distance_on(&self, info: &wgpu::AdapterInfo) -> u32 {
-        lod_distance_capped(self.lod_distance, info)
-    }
     /// Whether the selected packs leave vanilla's block models in place.
     /// Horizon's occlusion assumptions (entity and leaf culling) hold only
     /// for those: a pack can replace an opaque cube's model or a leaf's.
@@ -877,6 +881,9 @@ pub struct Graphics {
     /// The block textures' video memory (their top mip level), in MiB; 0 leaves it to
     /// Horizon (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources next load.
     pub texture_budget_mib: u32,
+    /// The LabPBR maps' video memory (their top mip level), in MiB; 0 leaves it to Horizon:
+    /// a quarter of the block textures' budget. Applies when resources next load.
+    pub pbr_budget_mib: u32,
     pub sky: bool,
     pub fog: bool,
     pub weather: bool,
@@ -953,6 +960,9 @@ pub struct Graphics {
     /// pack uniforms still match. Off by default: vanilla loaders redraw every frame
     /// (or every `shadowInterval`), and a hit with a stale key shows old shadows.
     pub shadow_cache: bool,
+    /// Whether hardware ray tracing (`EXPERIMENTAL_RAY_QUERY` and `RayScene`) follows the pack
+    /// (`auto`), is always requested (`on`), or stays disabled (`off`).
+    pub ray_tracing: RayTracingMode,
     /// The graphics API (Windows only; see `GraphicsApi`).
     pub api: GraphicsApi,
     /// Backend hold after a GPU search watchdog timeout (`gfx::safe_start`): applied in memory
@@ -997,6 +1007,7 @@ impl Default for Graphics {
             chunk_updates: 0,
             upload_budget_kib: 0,
             texture_budget_mib: 0,
+            pbr_budget_mib: 0,
             sky: true,
             fog: true,
             weather: true,
@@ -1028,6 +1039,7 @@ impl Default for Graphics {
             safe_start: None,
             battery: false,
             shadow_cache: false,
+            ray_tracing: RayTracingMode::Auto,
             api: GraphicsApi::Auto,
             watchdog_api: None,
             watchdog_driver: None,
@@ -1164,6 +1176,9 @@ impl Graphics {
                 "textureBudgetMiB" => {
                     g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
                 }
+                "pbrBudgetMiB" => {
+                    g.pbr_budget_mib = number(g.pbr_budget_mib).min(16384);
+                }
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
                 "weather" => g.weather = flag(g.weather),
@@ -1212,6 +1227,7 @@ impl Graphics {
                 "safeStart" => g.safe_start = Some(value.to_owned()),
                 "batteryMode" => g.battery = flag(g.battery),
                 "shadowCache" => g.shadow_cache = flag(g.shadow_cache),
+                "rayTracing" => g.ray_tracing = RayTracingMode::parse(value),
                 "batchTranslucent" => g.translucent_batching = flag(g.translucent_batching),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "watchdogApi" => g.watchdog_api = GraphicsApi::from_name(value),
@@ -1249,7 +1265,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrColorBoost:{}\nhdrLook:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ngpuCulling:{}\nparallelTick:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\npbrBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrColorBoost:{}\nhdrLook:{}\nbatteryMode:{}\nshadowCache:{}\nrayTracing:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ngpuCulling:{}\nparallelTick:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1269,6 +1285,7 @@ impl Graphics {
             self.chunk_updates,
             self.upload_budget_kib,
             self.texture_budget_mib,
+            self.pbr_budget_mib,
             bool_text(self.sky),
             bool_text(self.fog),
             bool_text(self.weather),
@@ -1303,6 +1320,7 @@ impl Graphics {
             self.hdr_look.name(),
             bool_text(self.battery),
             bool_text(self.shadow_cache),
+            self.ray_tracing.name(),
             self.api.name(),
             self.shader_pack,
             bool_text(self.translucent_batching),
@@ -1672,6 +1690,7 @@ mod tests {
             chunk_updates: 12,
             upload_budget_kib: 4096,
             texture_budget_mib: 1536,
+            pbr_budget_mib: 384,
             sky: false,
             fog: false,
             weather: false,
@@ -1705,6 +1724,7 @@ mod tests {
             safe_start: Some("Dx12 10de:25a9 NVIDIA GeForce RTX 2050; ; 32.0.16.2124".into()),
             battery: true,
             shadow_cache: true,
+            ray_tracing: RayTracingMode::On,
             api: GraphicsApi::Dx12,
             watchdog_api: Some(GraphicsApi::OpenGl),
             watchdog_driver: Some("Dx12 10de:25a9 NVIDIA GeForce RTX 2050; ; 32.0.16.2124".into()),
@@ -1862,6 +1882,20 @@ mod tests {
     }
 
     #[test]
+    fn the_pbr_budget_round_trips_and_clamps_like_the_texture_budget() {
+        let g = Graphics::parse("textureBudgetMiB:256\npbrBudgetMiB:8\n");
+        assert_eq!(g.texture_budget_mib, 256);
+        assert_eq!(g.pbr_budget_mib, 8);
+        assert_eq!(Graphics::parse(&g.serialize()), g);
+        // 0 leaves the maps to Horizon, off the scale it clamps.
+        assert_eq!(Graphics::parse("pbrBudgetMiB:0\n").pbr_budget_mib, 0);
+        assert_eq!(
+            Graphics::parse("pbrBudgetMiB:16385\n").pbr_budget_mib,
+            16384
+        );
+    }
+
+    #[test]
     fn peak_scale_steps_by_50_to_2000_then_by_500_to_10000() {
         let scale: Vec<u32> = (0..=PEAK_STEPS).map(peak_nits_at).collect();
         let fine: Vec<u32> = (200..=2000).step_by(50).collect();
@@ -1958,48 +1992,6 @@ mod tests {
             "removing the server pack restores the selected local mode"
         );
         assert!(g.vanilla_models_with_server_packs(selected, []));
-    }
-
-    #[test]
-    fn integrated_gpus_other_than_apple_cap_the_lod_distance() {
-        let adapter = |name: &str, device_type| wgpu::AdapterInfo {
-            name: name.into(),
-            vendor: 0,
-            device: 0,
-            device_type,
-            device_pci_bus_id: String::new(),
-            driver: String::new(),
-            driver_info: String::new(),
-            backend: wgpu::Backend::Vulkan,
-            subgroup_min_size: 0,
-            subgroup_max_size: 0,
-            transient_saves_memory: None,
-            limit_bucket: None,
-        };
-        let hd620 = adapter(
-            "Intel(R) HD Graphics 620 (KBL GT2)",
-            wgpu::DeviceType::IntegratedGpu,
-        );
-        let m4 = adapter("Apple M4 Pro", wgpu::DeviceType::IntegratedGpu);
-        let discrete = adapter("NVIDIA GeForce RTX 4070", wgpu::DeviceType::DiscreteGpu);
-        for (distance, capped) in [(0, 0), (64, 64), (128, 128), (256, 128), (1024, 128)] {
-            let g = Graphics {
-                lod_distance: distance,
-                ..Graphics::default()
-            };
-            assert_eq!(g.lod_distance_on(&hd620), capped);
-            assert_eq!(g.lod_distance_on(&m4), distance);
-            assert_eq!(g.lod_distance_on(&discrete), distance);
-        }
-        assert!(
-            crate::graphics_ui::rows()
-                .into_iter()
-                .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, rows)| rows))
-                .any(|r| r
-                    .text
-                    .contains(&format!("{INTEGRATED_LOD_DISTANCE} chunks"))),
-            "the LOD Distance description names the cap"
-        );
     }
 
     #[test]

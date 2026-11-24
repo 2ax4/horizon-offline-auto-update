@@ -215,6 +215,9 @@ pub struct EntityMemory {
     /// spawner, a shulker bullet): the value replaces the kind's constructor
     /// default and is never saved.
     pub(super) no_physics: HashMap<u32, bool>,
+    /// The entities a mod kept out of the saves (`entity_set_saved`), by id;
+    /// forgotten with the entity.
+    pub(super) unsaved: HashSet<u32>,
     /// Entities of types Horizon does not simulate, kept per chunk and
     /// written back unchanged.
     unknown: HashMap<(i32, i32), Vec<Tag>>,
@@ -746,13 +749,15 @@ impl Game<'_> {
             self.tick_chunks.wait(key);
         }
         // The saved list is consumed: later saves take the scheduler's ticks.
-        if loaded && let Some(c) = self.world.chunks.get_mut(&key) {
-            let c = Arc::make_mut(c);
-            if let Some(s) = c.saved.as_mut() {
-                let s = Arc::make_mut(s);
-                s.block_ticks.clear();
-                s.fluid_ticks.clear();
-            }
+        if loaded {
+            self.world.chunks.mutate_chunk(key, |c| {
+                let c = Arc::make_mut(c);
+                if let Some(s) = c.saved.as_mut() {
+                    let s = Arc::make_mut(s);
+                    s.block_ticks.clear();
+                    s.fluid_ticks.clear();
+                }
+            });
         }
         // PistonMovingBlockEntity.loadAdditional: blocks saved mid-move carry
         // on moving; later saves take them from the level (arismoko/horizon#3310).
@@ -768,7 +773,7 @@ impl Game<'_> {
         for &(pos, piston) in &pistons {
             self.restore_moving_piston(pos, piston, saved.as_deref());
         }
-        if let Some(c) = self.world.chunks.get_mut(&key) {
+        self.world.chunks.mutate_chunk(key, |c| {
             let c = Arc::make_mut(c);
             if let Some(s) = c.saved.as_mut() {
                 Arc::make_mut(s).block_entities.retain(|tag| {
@@ -776,7 +781,7 @@ impl Game<'_> {
                     !pistons.iter().any(|(p, _)| [p.x, p.y, p.z] == at)
                 });
             }
-        }
+        });
     }
     /// `PistonMovingBlockEntity.loadAdditional`, for a `minecraft:piston`
     /// entity whose block is still a moving piston.
@@ -1021,6 +1026,10 @@ impl Game<'_> {
     ) {
         self.next_entity += 1;
         if let Some(mut a) = entity_nbt::armor_stand_from_nbt(&tag, self.next_entity) {
+            a.equipment
+                .iter_mut()
+                .flatten()
+                .for_each(|stack| self.clean_stack(stack));
             a.live
                 .retain_supplier(&self.motion.attributes, "minecraft:armor_stand");
             if let Some(state) = transferred {
@@ -1102,7 +1111,10 @@ impl Game<'_> {
     ) {
         self.next_entity += 1;
         if let Some(mut f) = entity_nbt::item_frame_from_nbt(&tag, self.next_entity) {
-            let item = f.item.take();
+            let mut item = f.item.take();
+            if let Some(stack) = item.as_mut() {
+                self.clean_stack(stack);
+            }
             f.set_item(item);
             if let Some(state) = transferred {
                 self.adopt_transferred_entity_state(f.id, state);
@@ -1461,6 +1473,11 @@ impl Game<'_> {
     ) -> Option<(Tag, u32, [i32; 4])> {
         let vehicle = vehicle?;
         let root = parent_vehicle_root(vehicle, others, |id| self.vehicle_of(id))?;
+        // A root vehicle a mod kept out of the saves (`entity_set_saved`) is not in the
+        // rider's file either, or it would come back with the player.
+        if self.persist.unsaved.contains(&root) {
+            return None;
+        }
         let entity = self.vehicle_tree_nbt(root)?;
         let attach = self.uuid_for(vehicle);
         Some((root_vehicle_tag(attach, entity), root, attach))
@@ -1589,6 +1606,7 @@ impl Game<'_> {
         self.entity_attachments.remove(&id);
         self.persist.raw.remove(&id);
         self.persist.no_physics.remove(&id);
+        self.persist.unsaved.remove(&id);
     }
     /// Detach a travelling entity without discarding its in-memory attachments.
     pub(super) fn detach_entity(&mut self, id: u32) {
@@ -1606,9 +1624,14 @@ impl Game<'_> {
     }
     /// `Entity.applyEffectsFromBlocks` on a fire-immune entity that is not
     /// burning (`EndCrystal.tick`): the loaded `Fire` is reset to
-    /// `-getFireImmuneTicks()`, which is 0.
+    /// `-getFireImmuneTicks()`, which is 0. Only a crystal that ticked: one in
+    /// an entity-ticking chunk.
     pub(super) fn clear_crystal_fire(&mut self) {
+        let ticking = self.entity_ticking_area();
         for c in &self.crystals {
+            if !ticking(c.position.x.floor() as i32, c.position.z.floor() as i32) {
+                continue;
+            }
             let key = anon_key("minecraft:end_crystal", c.position);
             if let Some((_, Tag::Compound(raw))) = self.persist.anon.get_mut(&key)
                 && let Some(fire) = raw.get_mut(&"Fire".into())
@@ -1646,6 +1669,14 @@ impl Game<'_> {
             if let Some(v) = tag.get(key) {
                 map.insert(key.into(), v.clone());
             }
+        }
+        // `Entity.saveWithoutId` writes `TicksFrozen` only while it is positive,
+        // and only a `LivingEntity` thaws, so these entities keep it unchanged.
+        // Read as an int (`NumericTag.intValue`) and written back as one, whatever tag type was loaded.
+        if let Some(ticks) = horizon_client::save::number(tag.get("TicksFrozen"))
+            && ticks as i32 > 0
+        {
+            map.insert("TicksFrozen".into(), Tag::Int(ticks as i32));
         }
         if !map.is_empty() {
             self.persist.raw.insert(id, Tag::Compound(map));
@@ -2205,10 +2236,11 @@ impl Game<'_> {
         keys.contains(&chunk_of(o.position)).then(|| {
             let raw = anon_raw(&self.persist, "minecraft:experience_orb", o.position);
             let uuid = saved_uuid(&self.persist, o.id);
-            let tag = with_raw(
+            let mut tag = with_raw(
                 with_raw(entity_nbt::orb_to_nbt(o, uuid), raw.as_ref()),
                 self.persist.raw.get(&o.id),
             );
+            self.save_portal_cooldown(o.id, &mut tag);
             (chunk_of(o.position), tag)
         })
     }
@@ -2378,7 +2410,8 @@ impl Game<'_> {
         let a = &self.armor_stands[i];
         keys.contains(&chunk_of(a.position)).then(|| {
             let uuid = self.saved_uuid_or_random(a.id);
-            let tag = entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&a.id));
+            let mut tag = entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&a.id));
+            self.save_portal_cooldown(a.id, &mut tag);
             (chunk_of(a.position), tag)
         })
     }

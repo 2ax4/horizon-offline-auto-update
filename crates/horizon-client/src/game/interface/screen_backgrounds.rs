@@ -53,6 +53,20 @@ impl Game<'_> {
         self.native_dimension_transition_screen_draw(screen, reason, progress, batch);
         true
     }
+    /// The cause of the currently selected mod screen's client load.
+    pub(super) fn dimension_transition_cause(
+        &self,
+        screen: &str,
+    ) -> Option<mod_api::DimensionTransitionCause> {
+        let load = &self.remote.as_ref()?.level_load;
+        let selected =
+            horizon_client_render::dimension_transition::screen(load.transition_screen()?)?;
+        if selected == screen {
+            load.transition_cause()
+        } else {
+            None
+        }
+    }
     /// `LevelLoadingScreen.extractBackground`.
     pub(super) fn draw_level_loading_background(
         &self,
@@ -225,14 +239,14 @@ impl Game<'_> {
         &self,
         batch: &HudBatch,
     ) -> Option<mod_api::ScreenView<'_>> {
-        if self.screen != Screen::Playing
-            || self.screen_over_playing()
-            || self.remote_loading()
-            || !self.screen_render_listened()
-        {
+        if !self.screen_render_listened() || !self.title_screen_render_uncovered() {
             return None;
         }
         self.title_screen_view(batch)
+    }
+
+    pub(super) fn title_screen_render_uncovered(&self) -> bool {
+        self.screen == Screen::Playing && !self.screen_over_playing() && !self.remote_loading()
     }
 }
 

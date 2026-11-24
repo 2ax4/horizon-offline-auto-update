@@ -1411,6 +1411,65 @@ impl SidebarLine {
     }
 }
 
+/// What one viewer is sent in place of an entity's data (`player_send_entity_data`). Each field
+/// left `None` (and `remove_custom_name` left false) is not sent, so the viewer keeps what it has.
+/// Each field is replaced on its own and the server keeps no per-viewer override: a later change
+/// the server sends for one field (flags, say) shows its real value again while the other fields
+/// replaced here stay as sent.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct EntityViewData {
+    /// A custom name to show (`Entity.DATA_CUSTOM_NAME`).
+    pub custom_name: Option<Text>,
+    /// Shows no custom name at all; with `custom_name` set it refuses as `Conflict`.
+    pub remove_custom_name: bool,
+    /// Whether the name shows at any distance (`Entity.DATA_CUSTOM_NAME_VISIBLE`).
+    pub custom_name_visible: Option<bool>,
+    /// The shared flags byte (`Entity.DATA_SHARED_FLAGS_ID`): bit 0 on fire, 1 crouching,
+    /// 3 sprinting, 4 swimming, 5 invisible, 6 glowing, 7 gliding. The whole byte replaces the
+    /// one the viewer has, so a mod that changes one bit sends the others it wants kept.
+    pub flags: Option<u8>,
+    /// The pose the viewer draws (`Entity.DATA_POSE`).
+    pub pose: Option<Pose>,
+}
+impl EntityViewData {
+    /// Data that changes nothing yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Why `player_send_entity_data` sent nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum EntityViewError {
+    /// The call was made on a client; this is the server's.
+    Client,
+    /// The viewer handle no longer identifies a player in the server's list.
+    Stale,
+    /// The viewer has no connection to send to (a fake player).
+    NoConnection,
+    /// The entity handle no longer names an entity in the world.
+    StaleEntity,
+    /// No field of the data is set.
+    Empty,
+    /// `custom_name` is set together with `remove_custom_name`.
+    Conflict,
+    /// The custom name is a text the boundary refuses (nested too deep, malformed...).
+    Text(TextFormError),
+    /// The custom name would not encode within the network limits (a string over 65,535 bytes of
+    /// modified UTF-8, or more than the client's network NBT quota); the client would drop the
+    /// connection, so nothing is sent.
+    TooLarge,
+}
+impl crate::NoBackend for EntityViewError {
+    fn no_backend() -> Self {
+        Self::Stale
+    }
+}
+
 /// A player's server-side abilities (`Abilities`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -1612,6 +1671,86 @@ pub enum WantedPositionError {
     NonFiniteSpeed,
 }
 impl NoBackend for WantedPositionError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}
+
+/// A scoreboard team by name, as `team` and `add_team` return it. A handle resolves again on each call:
+/// it reads as `None` or `false` once the team is removed, and for a handle of an earlier open.
+#[derive(horizon_mod_api_macros::Wire)]
+#[wire(internal_field_layouts)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+pub struct TeamRef {
+    pub(crate) epoch: WorldEpoch,
+    pub(crate) name: String,
+}
+
+/// The sixteen chat colours a team can take (`ChatFormatting` colours, `PlayerTeam.setColor`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum TeamColor {
+    /// `black`.
+    Black,
+    /// `dark_blue`.
+    DarkBlue,
+    /// `dark_green`.
+    DarkGreen,
+    /// `dark_aqua`.
+    DarkAqua,
+    /// `dark_red`.
+    DarkRed,
+    /// `dark_purple`.
+    DarkPurple,
+    /// `gold`.
+    Gold,
+    /// `gray`.
+    Gray,
+    /// `dark_gray`.
+    DarkGray,
+    /// `blue`.
+    Blue,
+    /// `green`.
+    Green,
+    /// `aqua`.
+    Aqua,
+    /// `red`.
+    Red,
+    /// `light_purple`.
+    LightPurple,
+    /// `yellow`.
+    Yellow,
+    /// `white`.
+    White,
+}
+
+/// Who or what a team holds: the scoreboard keeps a player by name and any other entity by UUID.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum ScoreHolder {
+    /// A player, by their name.
+    Player(PlayerRef),
+    /// An entity, by its UUID (a player's name for a player).
+    Entity(EntityRef),
+    /// A name as written: what `/team join <team> <name>` takes, an offline player's included.
+    Name(String),
+}
+
+/// Why a team call was refused. Nothing changes then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum TeamError {
+    /// The host has no game backend (for example, a mod test double).
+    Unavailable,
+    /// The team handle is stale: the team is gone, or the handle is of an earlier open.
+    Stale,
+    /// A team of that name exists.
+    NameTaken,
+    /// The holder is not a player or entity the scoreboard can key, or is not there.
+    UnknownHolder,
+}
+impl NoBackend for TeamError {
     fn no_backend() -> Self {
         Self::Unavailable
     }

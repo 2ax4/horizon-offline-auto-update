@@ -129,7 +129,6 @@ impl Game<'_> {
                 .add(ty.strip_prefix("minecraft:").unwrap_or(&ty), &key, n);
         }
     }
-
     /// `PlayerList.removeAll`: every player who joined leaves with the world.
     pub(super) fn award_leave_game_to_all(&mut self) {
         let Some(host) = self.lan.as_ref() else {
@@ -531,18 +530,22 @@ pub(super) fn mob_meta_sync(
             defaults.push((19, serializer::BYTE, Value::Byte(0)));
         }
         "minecraft:parrot" => {
+            tame_owner_meta(e.owner, meta, defaults);
             // TamableAnimal.DATA_FLAGS_ID: in the sitting pose 1, tame 4.
             let flags = i8::from(e.sitting_pose) | if e.tame { 4 } else { 0 };
             if flags != 0 {
                 meta.push((18, serializer::BYTE, Value::Byte(flags)));
             }
+            defaults.push((18, serializer::BYTE, Value::Byte(0)));
         }
         "minecraft:cat" | "minecraft:wolf" => {
+            tame_owner_meta(e.owner, meta, defaults);
             // TamableAnimal.DATA_FLAGS_ID: in the sitting pose 1, tame 4.
             let flags = i8::from(e.sitting_pose) | if e.tame { 4 } else { 0 };
             if flags != 0 {
                 meta.push((18, serializer::BYTE, Value::Byte(flags)));
             }
+            defaults.push((18, serializer::BYTE, Value::Byte(0)));
             let (index, registry, name) = if kind == "minecraft:cat" {
                 let v = horizon_client::mobs::tame::CAT_VARIANTS[(e.variant as usize).min(10)];
                 (20, "minecraft:cat_variant", v)
@@ -990,6 +993,27 @@ pub(super) fn mob_meta_sync(
     }
 }
 
+/// `TamableAnimal.DATA_OWNERUUID_ID`: the owner reference follows the flags
+/// for parrots, cats and wolves and defaults to an empty optional value.
+fn tame_owner_meta(
+    owner: Option<[i32; 4]>,
+    meta: &mut Vec<(u8, i32, Value)>,
+    defaults: &mut Vec<(u8, i32, Value)>,
+) {
+    if let Some(owner) = owner {
+        meta.push((
+            19,
+            serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+            Value::OptUuid(Some(playerdata::ints_uuid(owner))),
+        ));
+    }
+    defaults.push((
+        19,
+        serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+        Value::OptUuid(None),
+    ));
+}
+
 /// AbstractVillager.DATA_UNHAPPY_COUNTER (after AgeableMob's two): the head
 /// shake of a villager saying no counts it down from 40.
 use super::villager_client::unhappy_counter;
@@ -1102,7 +1126,6 @@ impl Game<'_> {
                 [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5]
             })
     }
-
     /// MinecraftServer.setRespawnData: every placed player hears a changed world spawn.
     pub(super) fn lan_broadcast_world_spawn(&self) {
         if let Some(host) = &self.lan {
@@ -1115,7 +1138,6 @@ impl Game<'_> {
             }
         }
     }
-
     /// `horizon-ctl lan ...`.
     pub(super) fn lan_control(&mut self, words: &[&str]) -> Result<Option<serde_json::Value>> {
         use serde_json::json;
@@ -2454,6 +2476,13 @@ impl Game<'_> {
                         self.run_guest_commands();
                     }
                 }
+                // handleClientTickEnd's movement reset, in packet order behind the
+                // MoveVehicle the hub queued for this drain (a rider's move of the tick).
+                HostEvent::TickEnd(conn) => {
+                    if let Some(host) = self.lan.as_mut() {
+                        host.hub.client_tick_end(conn);
+                    }
+                }
                 HostEvent::Jump { conn, from, yaw } => {
                     self.guest_jump(conn, from, yaw);
                 }
@@ -2625,7 +2654,6 @@ impl Game<'_> {
         self.lan = Some(host);
         self.flush_attachment_sync();
     }
-
     /// Deliver start/stop callbacks before sounds and attachment snapshots.
     /// A callback can spawn another entity, whose pairing is part of the same
     /// operation, as a nested ChunkMap.addEntity would be in vanilla.
@@ -2644,7 +2672,6 @@ impl Game<'_> {
                 .expect("the hub is back after the tracking events");
         }
     }
-
     /// Pair late arrivals before a sound flush as well as at the end of the
     /// tick. The counter prevents taking or draining an entity's state twice.
     pub(super) fn lan_pair_joined(&mut self, host: &mut LanHost) {
@@ -2813,12 +2840,14 @@ impl Game<'_> {
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
-            // An entity that left the level since the last tick (a snowball
-            // that hit) is dropped by the tracker below: its event goes out
-            // first, as `Level.broadcastEntityEvent` precedes the discard.
+            // Break events precede equipment updates; events of removed entities
+            // precede their discard, as in Level.broadcastEntityEvent.
             let (gone, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.lan_entity_events)
                 .into_iter()
-                .partition(|(id, ..)| !entities.iter().any(|e| e.id == *id));
+                .partition(|(id, event)| {
+                    horizon_client::mobs::item_break::equipment_break_slot(*event).is_some()
+                        || !entities.iter().any(|e| e.id == *id)
+                });
             self.lan_entity_events = later;
             for (id, event) in gone {
                 host.hub.entity_event(id, event);
@@ -2977,6 +3006,8 @@ impl Game<'_> {
         entities: &[EntityState],
         spawn: [f64; 3],
     ) {
+        // The player's stacks are built against this world's item prototypes.
+        let prototypes = self.items().component_defaults.clone();
         let Some(host) = self.lan.as_mut() else {
             return;
         };
@@ -2990,8 +3021,8 @@ impl Game<'_> {
             // PlayerList.loadPlayerData: the owner gets the world's player file,
             // everyone else their own.
             let known = match owner.filter(|o| o.uuid == g.uuid) {
-                Some(o) => playerdata::load_owner(g, &root, o.saved.take().as_deref()),
-                None => playerdata::load(g, &root),
+                Some(o) => playerdata::load_owner(g, &root, o.saved.take().as_deref(), &prototypes),
+                None => playerdata::load(g, &root, &prototypes),
             };
             // `PlayerList.placeNewPlayer`: a saved level the world no longer has is the Overworld.
             if !levels.has(&g.dimension) {
@@ -3252,6 +3283,23 @@ impl Game<'_> {
         self.break_sound_at(stack, at);
         self.eat_particles(stack, 5);
     }
+    /// `LivingEntity.onEquippedItemBroken` for a mob: the slot's break event to the
+    /// guests, and, in a window that is its own client, `breakItem` of the stack that
+    /// broke here — its own copy of the mob has already lost it (the clients the event
+    /// precedes still have it, `remote_equipment_break`).
+    pub(super) fn mob_equipment_broke(
+        &mut self,
+        id: u32,
+        slot: horizon_core::equipment_slot::EquipmentSlot,
+        stack: &horizon_client::items::ItemStack,
+        at: [f64; 3],
+    ) {
+        let event = horizon_client::mobs::item_break::equipment_break_event(slot);
+        self.lan_entity_event(id as i32, event, at);
+        if self.options.execution_role.is_client() {
+            self.mob_break_item(id as i32, stack, at);
+        }
+    }
     /// `ServerPlayer.crit` (or `magicCrit` when `magic`): this window's
     /// emitter, and an animation for the attacker's client and observers once
     /// the hub is back in place.
@@ -3411,8 +3459,16 @@ impl Game<'_> {
                 && !dead
                 && old.and_then(|o| o.2).is_none_or(|before| time < before)
             {
-                host.hub
-                    .swing(m.id as i32, i32::from(m.swing_is_off_hand()), at, None);
+                // The packet names the hand and the animation the swing started
+                // with; the swing records the arm, so the main hand is the
+                // right one unless the mob is left-handed.
+                host.hub.swing(
+                    m.id as i32,
+                    m.swing_is_off_hand(),
+                    m.anim.swing_animation,
+                    at,
+                    None,
+                );
             }
             seen.insert(m.id, (m.hurt_time, dead, swing));
         }
@@ -3479,6 +3535,8 @@ impl Game<'_> {
             )
             .chain(self.portal_ticket_areas())
             .chain(self.viewed_extra())
+            // The chunk the world spawn search is waiting for after a reset, which no player has loaded.
+            .chain(self.world_spawn_search_area())
             .collect();
     }
 
@@ -4386,6 +4444,49 @@ mod tests {
             meta.contains(&(13, serializer::INT, Value::Int(2))),
             "{meta:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn tamable_owner_is_sent_and_can_be_cleared() {
+        let hub = meta_hub("TamableOwnerMetaTest");
+        let owner = [1, 2, 3, 4];
+        let expected = Value::OptUuid(Some(0x00000001000000020000000300000004));
+        for kind in ["minecraft:parrot", "minecraft:cat", "minecraft:wolf"] {
+            let mut mob = mob_of(kind)
+                .unwrap_or_else(|| panic!("prepared mob data missing for {kind}"));
+            mob.extra.tame = true;
+            mob.extra.owner = Some(owner);
+            let metadata = |mob: &Mob| {
+                let (mut meta, mut defaults) = (Vec::new(), Vec::new());
+                super::mob_meta(mob, &hub, None, 0, &mut meta, &mut defaults);
+                (meta, defaults)
+            };
+
+            let (meta, defaults) = metadata(&mob);
+            assert!(
+                meta.contains(&(
+                    19,
+                    serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+                    expected.clone(),
+                )),
+                "{kind}: {meta:?}"
+            );
+            assert!(defaults.contains(&(
+                19,
+                serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+                Value::OptUuid(None)
+            )));
+
+            mob.extra.owner = None;
+            let (meta, defaults) = metadata(&mob);
+            assert!(meta.iter().all(|entry| entry.0 != 19), "{kind}: {meta:?}");
+            assert!(defaults.contains(&(
+                19,
+                serializer::OPTIONAL_LIVING_ENTITY_REFERENCE,
+                Value::OptUuid(None)
+            )));
+        }
     }
 
     /// A mod's custom name and its visibility reach the tracking players
@@ -5415,10 +5516,16 @@ pub(crate) mod world_spawn_sync_tests {
             // RespawnData.of(level.dimension(), ..): the same block set from the
             // End is a changed RespawnData, sent with the End as its dimension.
             game.as_console(|game| {
-                assert!(game.run_command("execute in minecraft:the_end run setworldspawn 100 140 -20"))
+                assert!(
+                    game.run_command("execute in minecraft:the_end run setworldspawn 100 140 -20")
+                )
             });
             let sent = spawns(&rx);
-            assert_eq!(sent.len(), 1, "a spawn that only changes dimension is broadcast");
+            assert_eq!(
+                sent.len(),
+                1,
+                "a spawn that only changes dimension is broadcast"
+            );
             assert_eq!(sent[0].pos.dimension, "minecraft:the_end");
             assert_eq!(sent[0].pos.pos, [100, 140, -20]);
             game.as_console(|game| {
@@ -5656,7 +5763,7 @@ mod mob_pickup_sync_tests {
 }
 
 #[cfg(test)]
-mod mob_swing_sync_tests {
+pub(super) mod mob_swing_sync_tests {
     use super::*;
     use horizon_client::{
         first_person::SwingAnimation,
@@ -5665,14 +5772,17 @@ mod mob_swing_sync_tests {
     use std::sync::{Arc, atomic::AtomicI32, mpsc};
 
     /// A server with one placed guest beside the mobs.
-    fn guest_at(game: &mut Game<'_>, at: [f64; 3]) -> mpsc::Receiver<Out> {
+    pub(in crate::game) fn guest_at(game: &mut Game<'_>, at: [f64; 3]) -> mpsc::Receiver<Out> {
         game.lan_host(
             LanSettings {
                 port: 0,
                 guest_commands: true,
                 force_game_mode: false,
             },
-            NetConfig::loopback(0, String::new(), 2),
+            NetConfig {
+                listen: false,
+                ..NetConfig::loopback(0, String::new(), 2)
+            },
             HubConfig {
                 default_game_mode: 0,
                 guest_commands: true,
@@ -5713,7 +5823,7 @@ mod mob_swing_sync_tests {
         rx
     }
 
-    fn swings(rx: &mpsc::Receiver<Out>) -> Vec<play::SwingAnimation> {
+    pub(super) fn swings(rx: &mpsc::Receiver<Out>) -> Vec<play::SwingAnimation> {
         rx.try_iter()
             .flat_map(|out| match out {
                 Out::Packet(body) => vec![body],
@@ -6021,7 +6131,9 @@ mod merchant_restock_tests {
         game.set_allow_commands(true);
         let rx = super::world_spawn_sync_tests::host_for(&mut game);
         let mut host = game.lan.take().unwrap();
-        host.hub.guests.update(0, |guest| guest.dimension = "minecraft:overworld".into());
+        host.hub
+            .guests
+            .update(0, |guest| guest.dimension = "minecraft:overworld".into());
         game.lan = Some(host);
         assert!(game.run_command(concat!(
             "summon villager 0.5 80 2.5 {NoAI:1b,Silent:1b,Xp:20,",
@@ -6075,9 +6187,13 @@ mod merchant_restock_tests {
         live.offers[0].uses = 0;
         live.offers[0].demand = 12;
         game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
-            guest.effects.add(horizon_client::effects::EffectInstance::new(
-                "hero_of_the_village", 1000, 0,
-            ));
+            guest
+                .effects
+                .add(horizon_client::effects::EffectInstance::new(
+                    "hero_of_the_village",
+                    1000,
+                    0,
+                ));
         });
         game.merchant_restocked(id);
         let restocked = offers();

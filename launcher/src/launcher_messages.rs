@@ -51,8 +51,7 @@ impl Launcher {
                     self.notes.clear();
                 }
                 Msg::StableRetry(next) => {
-                    // The same download under its new build: it stays the instance's, and keeps
-                    // the version picked on Versions.
+                    // The same download under its new tag still belongs to the instance's update.
                     if self.stable_install.take().is_some() {
                         self.instance_install = Some(next.tag.clone());
                         self.stable_install = Some(next);
@@ -186,8 +185,9 @@ impl Launcher {
                     self.installing = None;
                     self.bar = (0., 0.);
                     self.installed = backend::installed();
-                    let as_update = self.update_install.take().filter(|t| *t == tag);
+                    let as_update = self.update_install.take_if(|t| *t == tag);
                     let for_instance = self.instance_install.take_if(|t| *t == tag).is_some();
+                    let manual_target = self.manual_install_for.take();
                     let stable = self.stable_install.take_if(|r| r.tag == tag);
                     if let (Ok(()), Some(started)) = (&result, self.install_started.take()) {
                         let name = if as_update.is_some() {
@@ -215,12 +215,8 @@ impl Launcher {
                                 .filter(|t| **t != tag)
                                 .cloned()
                                 .collect();
-                            // Judged on the selection as saved now, not when the download
-                            // started: a version picked on Versions or with `settings
-                            // selected-version` meanwhile stays picked. A file from before
-                            // `following` is read against the list before this install.
-                            // A saved selection that isn't installed is the one the window
-                            // replaced at start: the window's stays then.
+                            // Keep compatibility fields current for older launchers, including
+                            // changes saved by the command line during the download.
                             let saved = Settings::load_for_install(&before);
                             if self.settings_save_error.is_none()
                                 && saved
@@ -242,21 +238,35 @@ impl Launcher {
                                             && i.version.as_deref() == Some(tag.as_str())
                                     })
                             });
-                            self.settings.apply_install(
-                                &tag,
-                                &before,
-                                &self.installed,
-                                backend::InstallCause {
-                                    update: as_update.is_some(),
-                                    instance,
-                                },
-                            );
-                            // Pruning reads settings from disk: protect the selection only once
-                            // it has been saved there. A failed save leaves all versions in place.
-                            if self.save_settings() {
+                            let saved = if let Some(target) = manual_target {
+                                match horizon_launcher::instances::finish_manual_install(
+                                    &target, &tag,
+                                ) {
+                                    Ok(()) => {
+                                        self.reload_instances();
+                                        true
+                                    }
+                                    Err(e) => {
+                                        self.install_error = Some((tag.clone(), e));
+                                        false
+                                    }
+                                }
+                            } else {
+                                self.settings.apply_install(
+                                    &tag,
+                                    &before,
+                                    &self.installed,
+                                    backend::InstallCause {
+                                        update: as_update.is_some(),
+                                        instance,
+                                    },
+                                );
+                                self.save_settings()
+                            };
+                            if saved {
                                 let tx = self.tx.clone();
                                 std::thread::spawn(move || {
-                                    let _ = tx.send(Msg::Pruned(backend::prune_old_versions()));
+                                    let _ = tx.send(Msg::Pruned(backend::prune_old_versions(&tag)));
                                 });
                             }
                         }
@@ -268,9 +278,7 @@ impl Launcher {
                             self.install_error = Some((tag, e));
                         }
                     }
-                    if let Some(next) = self.install_next.take() {
-                        self.install_for_instance(next);
-                    }
+                    self.start_next_install();
                     // After the selection and the queued install: a build waiting for this
                     // install sees both.
                     self.native_look_again(None, None);
@@ -285,6 +293,7 @@ impl Launcher {
                     if let Err(e) = result {
                         self.install_error = Some((tag, e));
                     }
+                    self.start_next_install();
                 }
                 Msg::DiskUse(disk) => self.disk = disk,
                 Msg::Storage(result) => self.storage_arrived(result),
@@ -292,8 +301,8 @@ impl Launcher {
                     self.importing_build = false;
                     self.installed = backend::installed();
                     match result {
-                        // `build_import::import` saved the selection; this keeps the window's copy.
-                        Ok(tag) => self.settings.pick(tag),
+                        // Import already used the build for the selected instance on disk.
+                        Ok(_) => self.reload_instances(),
                         Err(e) => self.import_error = Some(e),
                     }
                 }
@@ -463,6 +472,7 @@ impl Launcher {
                                 tag.map(|t| backend::prepared_in(&t)),
                                 self.prepare_error.clone(),
                             );
+                            self.start_next_install();
                             self.native_look_again(ended.as_deref(), error.as_deref());
                         }
                         Job::Client => {
@@ -508,7 +518,23 @@ impl Launcher {
                             } else {
                                 None
                             };
+                            // The game may have changed its graphics settings, or the launcher
+                            // just did: the instance's notice is read again.
+                            self.api_notice.replace(None);
                             if let Some((crashed, api)) = switched {
+                                let line = format!(
+                                    "Horizon launcher: the {crashed} renderer crashed while starting in {}, so graphicsApi was switched from auto to {api}",
+                                    home.display()
+                                );
+                                // Windows only, as the record and the notice are.
+                                if std::env::consts::OS == "windows" {
+                                    eprintln!("{line}");
+                                    console_page::keep_line(
+                                        &mut self.prepare_log,
+                                        &mut self.log_revision,
+                                        line,
+                                    );
+                                }
                                 self.client_error = Some(trf(
                                     "Horizon's {crashed} renderer crashed while starting on this \
                                      graphics card, so the game now uses {api}. Press Play to \

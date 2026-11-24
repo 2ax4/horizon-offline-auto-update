@@ -73,7 +73,8 @@ alone, with a warning. The check is still reported on the head.
 
 Failed harnesses' logs are uploaded as the `parity-logs` artifact.
 
-**Hosted parity.** A maintainer can also run harnesses on Blacksmith's runners, away from the Mac mini:
+**Hosted parity.** A push to main runs the full hosted selection on Blacksmith's runners, away from the Mac mini,
+at most every 3 hours, and a maintainer can run harnesses there too:
 `gh workflow run parity-hosted.yml --ref <branch> -f harnesses="..."`, or `-f base=<commit>` for what the branch's
 changes reach. The data comes encrypted from the maintainers' private `horizon-rust/vanilla-data`. The only thing
 that leaves the runner is the harness logs: the first-attempt and failure logs, holding compared values, log tails and
@@ -718,6 +719,11 @@ release.
   5 minutes, or the oldest 1 hour: a fix to installs or updates starts its release at most ~70 minutes after it
   merges, as the decision runs every 10 minutes, then builds and publishes), `release-now`, `skip-release` and
   `RELEASES_PAUSED`.
+- A fix merged through a security advisory's private fork has no pull request, so the decision doesn't count it.
+  Release it by hand: `gh workflow run launcher --ref main -f dry_run=false -f force=true`, but only after the
+  `checks` run on the fix's commit on `main` has passed. The dispatch releases the newest commit on `main` whose
+  `checks` passed, so one sent earlier ships a commit without the fix. Confirm the release's commit contains the
+  fix, then publish the advisory.
 - The tag is `launcher@X.Y.Z` on the release line (`launcher@0.2.0` first; the game and the launcher count their
   patches separately). Without `.github/release-line.txt`, `launcher-vX.Y.Z`: the patch after the last launcher tag,
   or the next minor (`X.Y+1.0`) when one of those pull requests is labelled `feature`. `launcher-v0.2.0` was taken
@@ -795,7 +801,7 @@ Online5277 since 2026-10-27, levzzz5154 since 2026-10-28) and for Ludovic, with 
   linking the comment that asked; a refusal answers too. Claims are their own workflow
   (`.github/workflows/claim-command.yml`, `tools/ci/claim_command.py`), open to everyone for their own claim.
 - **Refused.** Any label with `release` in its name (`release-now`, `release-blocker`, `skip-release`) and
-  `full-parity`; anything on Ludovic's own issues and pull requests; a merged pull request; a locked thread; more
+  `full-parity`, `run-parity`, and removing `needs-proof` (adding it is fine); anything on Ludovic's own issues and pull requests; a merged pull request; a locked thread; more
   than 60 actions per reviewer in 24 hours (counted from the workflow's own comments).
 - **Safety.** Same as `/nightly`: main's copy of the workflow runs, no pull request's code is checked out or run,
   the comment reaches the script as env vars, and the token has `issues` and `pull-requests` write only.

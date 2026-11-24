@@ -902,36 +902,17 @@ fn max_chained_neighbor_updates_limits_a_chain_and_a_negative_value_lifts_it() {
 /// the ones after it are dropped without a line.
 #[test]
 fn passing_max_chained_neighbor_updates_logs_one_error_with_the_first_skipped_position() {
-    struct Lines(std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>);
-    impl log::Log for Lines {
-        fn enabled(&self, metadata: &log::Metadata) -> bool {
-            metadata.level() == log::Level::Error
-        }
-        fn log(&self, record: &log::Record) {
-            if self.enabled(record.metadata()) {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push((std::thread::current().id(), record.args().to_string()));
-            }
-        }
-        fn flush(&self) {}
-    }
-    static LINES: Lines = Lines(std::sync::Mutex::new(Vec::new()));
     let Some(f) = fixture() else { return };
-    log::set_logger(&LINES).expect("no other test installs a logger");
-    log::set_max_level(log::LevelFilter::Error);
+    // The crate's one test logger: this thread's errors only, as the tests run side by side.
+    crate::test_log::capture();
     wires_broken_by_updates(f, Some(1));
-    // Only this test's thread: the tests of the crate run side by side.
-    let me = std::thread::current().id();
-    let mine: Vec<String> = LINES
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(thread, _)| *thread == me)
-        .map(|(_, line)| line.clone())
-        .collect();
+    let mine: Vec<String> = crate::test_log::with_records(|records| {
+        records
+            .iter()
+            .filter(|(level, _)| *level == log::Level::Error)
+            .map(|(_, line)| line.clone())
+            .collect()
+    });
     assert_eq!(
         mine,
         ["Too many chained neighbor updates. Skipping the rest. First skipped position: 1, 63, 0"]
@@ -3583,6 +3564,39 @@ fn open_shulker_box_supports_only_through_its_base_plate() {
             "open box facing {facing:?} lid side"
         );
     }
+}
+
+#[test]
+fn an_open_shulker_box_stops_conducting_redstone_but_a_closed_one_and_stone_do() {
+    let mut w = world!();
+    let box_pos = BlockPos::new(0, 1, 0);
+    let stone_pos = BlockPos::new(2, 1, 0);
+    w.put(box_pos, w.id("shulker_box", &[("facing", "up")]));
+    w.put(stone_pos, w.id("stone", &[]));
+    w.level.shulker_closed.remove(&box_pos);
+    let box_state = w.get(box_pos);
+    let stone_state = w.get(stone_pos);
+    {
+        let sim = w.b().sim(&mut w.level, &mut w.ticks);
+        assert!(
+            sim.is_redstone_conductor(box_state, box_pos),
+            "a closed box is a full cube"
+        );
+        assert!(
+            sim.is_redstone_conductor(stone_state, stone_pos),
+            "a full block still conducts"
+        );
+    }
+    w.level.shulker_closed.insert(box_pos, false);
+    let sim = w.b().sim(&mut w.level, &mut w.ticks);
+    assert!(
+        !sim.is_redstone_conductor(box_state, box_pos),
+        "an open lid takes the box out of the full cube"
+    );
+    assert!(
+        sim.is_redstone_conductor(stone_state, stone_pos),
+        "the open box does not change its neighbours"
+    );
 }
 
 #[test]

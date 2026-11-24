@@ -740,6 +740,15 @@ pub fn shown_address(address: &str) -> String {
     }
 }
 
+/// A disconnect reason as the log keeps it. The player sees the address they typed in the
+/// "invalid address" refusal; the log, which a bug report carries, gets `<server>` instead.
+pub fn logged_reason(reason: &str, key: Option<&str>) -> String {
+    match key {
+        Some("horizon.multiplayer.invalid_address") => "Invalid server address: <server>".into(),
+        _ => reason.to_owned(),
+    }
+}
+
 /// The relay the player set (`friendsRelay` in horizon.txt, beside
 /// options.txt), else the resolver's (`HORIZON_RELAY_URL`). None by default.
 pub fn friends_relay_setting() -> Option<String> {
@@ -1007,7 +1016,12 @@ fn run(
         let (host, port, token) = match address.strip_prefix(FRIEND) {
             Some(code) => join_friend(code, lang, send)?,
             None => {
-                let Some(target) = parse_address(address) else {
+                let target = if lan {
+                    lan_target(address)
+                } else {
+                    parse_address(address)
+                };
+                let Some(target) = target else {
                     // A refusal: never retried (`horizon.multiplayer
                     // .invalid_address` is in reconnect's key list).
                     return Err(Reason::keyed_arg(
@@ -1552,12 +1566,11 @@ fn configure(
                 };
                 // Horizon servers use the client brand to negotiate their extensions.
                 // Announce those only after the server identifies itself as Horizon.
+                // Velocity appends " (Velocity)" to the brand the server announced.
                 if p.channel == "minecraft:brand"
                     && horizon_protocol::buf::Reader::new(&p.data)
                         .string(32767)
-                        .ok()
-                        .as_deref()
-                        == Some("horizon")
+                        .is_ok_and(|brand| horizon_server_brand(&brand))
                 {
                     if let Some(control) = negotiation.require_protocol() {
                         send_control(control, &mut build_sent)?;
@@ -1687,6 +1700,14 @@ fn configure(
     }
 }
 
+/// A server brand this client negotiates Horizon's protocol with. Velocity
+/// appends ` (Velocity)` to the brand the server sent, so we accept both
+/// `"horizon"` and `"horizon (Velocity)"` explicitly without matching
+/// arbitrary `"horizon (...)"` prefixes.
+fn horizon_server_brand(brand: &str) -> bool {
+    matches!(brand, "horizon" | "horizon (Velocity)")
+}
+
 /// A failed `horizon:payloads` negotiation. In the first configuration it names the server's
 /// build (`None`: one from before builds were named, so older) and this one, unless they are the
 /// same; a reconfiguration keeps the negotiation's own error.
@@ -1788,6 +1809,8 @@ fn append_json_text(v: &serde_json::Value, lang: &Language, out: &mut String, de
             if let Some(t) = o.get("text").and_then(serde_json::Value::as_str) {
                 push_capped(out, t);
             } else if let Some(key) = o.get("translate").and_then(serde_json::Value::as_str) {
+                // One budget for all the arguments, as in `horizon_protocol::text::plain`.
+                let mut room = MAX_TEXT;
                 let args: Vec<String> = o
                     .get("with")
                     .and_then(serde_json::Value::as_array)
@@ -1795,7 +1818,10 @@ fn append_json_text(v: &serde_json::Value, lang: &Language, out: &mut String, de
                         a.iter()
                             .map(|e| {
                                 let mut s = String::new();
-                                append_json_text(e, lang, &mut s, depth + 1);
+                                if room > 0 {
+                                    append_json_text(e, lang, &mut s, depth + 1);
+                                    room = room.saturating_sub(s.len());
+                                }
                                 s
                             })
                             .collect()
@@ -1969,8 +1995,55 @@ fn continues_after_failed_join(lan: bool, signed_in: bool) -> bool {
     lan && signed_in
 }
 
+/// Where a LAN game's join leads: only an IP and a port from 1 to 65535 (the
+/// multiplayer list passes the sender's IP and the announced port). Anything
+/// else is an invalid address, so a LAN announcement never starts a host name
+/// or SRV lookup.
+fn lan_target(address: &str) -> Option<(String, u16)> {
+    let target: std::net::SocketAddr = address.parse().ok()?;
+    (target.port() != 0).then(|| (target.ip().to_string(), target.port()))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lan_join_takes_only_an_ip_and_a_port() {
+        use super::lan_target;
+        assert_eq!(
+            lan_target("192.168.1.10:25565"),
+            Some(("192.168.1.10".to_owned(), 25565))
+        );
+        assert_eq!(
+            lan_target("[fe80::1]:25566"),
+            Some(("fe80::1".to_owned(), 25566))
+        );
+        for refused in [
+            "192.168.1.10:",
+            "10.0.0.2:x",
+            "10.0.0.2:0",
+            "10.0.0.2:80:evil.example",
+            "10.0.0.2:evil.example:80",
+            "evil.example:25565",
+            "localhost:25565",
+            "",
+        ] {
+            assert_eq!(lan_target(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_refused_address_stays_out_of_the_logged_reason() {
+        // The text is in the player's language and holds what they typed; the key says which
+        // refusal it is.
+        let shown = "Ungültige Serveradresse: my-smp.example.com:99999";
+        let key = Some("horizon.multiplayer.invalid_address");
+        assert_eq!(
+            logged_reason(shown, key),
+            "Invalid server address: <server>"
+        );
+        assert_eq!(logged_reason("Timed out", None), "Timed out");
+    }
+
     #[test]
     fn older_servers_are_on_unless_the_variable_is_zero() {
         use std::ffi::OsStr;
@@ -2272,7 +2345,14 @@ mod tests {
 
     #[test]
     fn configuration_keeps_mod_lists_private_until_the_server_identifies_as_horizon() {
-        for server_brand in ["vanilla", "horizon"] {
+        for (server_brand, expected_mods) in [
+            ("vanilla", false),
+            ("vanilla (Velocity)", false),
+            ("horizon (custom)", false),
+            ("horizon (Proxy)", false),
+            ("horizon", true),
+            ("horizon (Velocity)", true),
+        ] {
             let (root, data) = empty_item_data(&format!("mod-list-{server_brand}"));
             let (client, server) = horizon_protocol::connection::Pipe::pair();
             let (mut reader, writer) = Connection::local(client).split();
@@ -2333,7 +2413,7 @@ mod tests {
                     .encode(),
                 )
                 .unwrap();
-            if server_brand == "horizon" {
+            if expected_mods {
                 use horizon_protocol::payload_negotiation::{CHANNEL, Control};
                 server
                     .send(
@@ -2383,8 +2463,8 @@ mod tests {
                     _ => {}
                 }
             }
-            assert_eq!(declared_mods, server_brand == "horizon");
-            assert_eq!(saw_offer, server_brand == "horizon");
+            assert_eq!(declared_mods, expected_mods, "{server_brand}");
+            assert_eq!(saw_offer, expected_mods, "{server_brand}");
             server
                 .send(&cfg::Clientbound::FinishConfiguration(Empty).encode())
                 .unwrap();
@@ -2558,6 +2638,18 @@ mod tests {
         assert_eq!(r.entries[2].data, None);
     }
 
+    #[test]
+    fn a_velocity_suffix_is_still_a_horizon_server() {
+        assert!(horizon_server_brand("horizon"));
+        assert!(horizon_server_brand("horizon (Velocity)"));
+        assert!(!horizon_server_brand("horizon (custom)"));
+        assert!(!horizon_server_brand("horizon (Proxy)"));
+        assert!(!horizon_server_brand("vanilla"));
+        assert!(!horizon_server_brand("horizonx"));
+        assert!(!horizon_server_brand("horizon("));
+        assert!(!horizon_server_brand(""));
+    }
+
     /// Launchers find the last server joined in `latest.log` by vanilla's line.
     #[test]
     fn the_connecting_line_is_vanillas() {
@@ -2580,11 +2672,13 @@ mod tests {
     #[ignore = "daily"]
     fn direct_login_preserves_hostname_and_negotiates_brand() {
         let (root, data) = empty_item_data("brand");
-        for server_brand in [
-            b"\x07vanilla".as_slice(),
-            b"\x07horizon",
-            b"\x05Paper",
-            b"\xff",
+        for (server_brand, expects_offer) in [
+            (b"\x07vanilla".as_slice(), false),
+            (b"\x12vanilla (Velocity)", false),
+            (b"\x07horizon", true),
+            (b"\x12horizon (Velocity)", true),
+            (b"\x05Paper", false),
+            (b"\xff", false),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -2673,7 +2767,7 @@ mod tests {
                 drop(session);
                 continue;
             }
-            if server_brand == b"\x07horizon" {
+            if expects_offer {
                 use horizon_protocol::payload_negotiation::{CHANNEL, Control};
                 server
                     .send(
@@ -2691,8 +2785,16 @@ mod tests {
                         .encode(),
                 )
                 .unwrap();
-            if server_brand == b"\x07horizon" {
+            if expects_offer {
                 use horizon_protocol::payload_negotiation::{CHANNEL, Control, Manifest};
+                let (id, body) = server.recv().unwrap();
+                assert_eq!(
+                    cfg::Serverbound::decode(id, &body).unwrap(),
+                    cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                        channel: crate::build_mismatch::CHANNEL.into(),
+                        data: crate::build_mismatch::encode(&crate::build_mismatch::this_build()),
+                    })
+                );
                 let (id, body) = server.recv().unwrap();
                 assert_eq!(
                     cfg::Serverbound::decode(id, &body).unwrap(),
@@ -2747,7 +2849,7 @@ mod tests {
                     packet => panic!("unexpected configuration reply: {packet:?}"),
                 }
             }
-            assert_eq!(saw_protocol_offer, server_brand == b"\x07horizon");
+            assert_eq!(saw_protocol_offer, expects_offer, "{server_brand:?}");
             drop(server);
             drop(session);
         }

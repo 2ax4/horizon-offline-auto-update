@@ -8,10 +8,12 @@
 
 use glam::{Mat4, Vec3};
 use horizon_shader_api::{
-    Frame as FrameInputs, Primaries, StageKind, check::CheckedStage, stages::GROUP,
+    Frame as FrameInputs, Primaries, StageKind,
+    check::CheckedStage,
+    stages::{GROUP, POST_OPAQUE_COLOR_BINDING, POST_OPAQUE_DEPTH_BINDING},
 };
 
-use super::Frame;
+use super::{Frame, external::OpaqueCopy};
 
 pub(super) const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
@@ -304,6 +306,8 @@ pub struct NativePost {
     /// The pack's textures.
     textures: Vec<(wgpu::TextureView, wgpu::Sampler)>,
     frame: wgpu::Buffer,
+    /// The depth and color before translucent terrain, for a pack with `post_opaque`.
+    opaque: Option<(wgpu::TextureView, wgpu::TextureView)>,
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     /// Two targets of the world's size, written in turn (none with a single pass).
@@ -746,23 +750,23 @@ impl NativeFrame {
 
     /// Keeps the opaque copies the size of the world's depth `depth` and, where the world's
     /// colour `color` can be copied (the scaled target, not the window's own), its size and
-    /// format; the group is made again when they change. Nothing for a pack that doesn't read
-    /// them.
+    /// format; returns whether the textures and their bindings changed. Nothing for a pack
+    /// that doesn't read them.
     pub fn fit_opaque(
         &mut self,
         device: &wgpu::Device,
         depth: &wgpu::Texture,
         color: Option<&wgpu::Texture>,
-    ) {
+    ) -> bool {
         if !self.reads_opaque {
-            return;
+            return false;
         }
         let size = [depth.width(), depth.height()];
         let color_size = color.map_or([1, 1], |c| [c.width(), c.height()]);
         let color_fits = [self.opaque_color.width(), self.opaque_color.height()] == color_size;
         let depth_fits = [self.opaque_depth.width(), self.opaque_depth.height()] == size;
         if depth_fits && color_fits {
-            return;
+            return false;
         }
         if !color_fits {
             self.opaque_color = color_copy(device, color_size);
@@ -771,17 +775,33 @@ impl NativeFrame {
             self.opaque_depth = depth_copy(device, size);
         }
         self.regroup(device);
+        true
     }
 
-    /// Fills `opaque_color` from the world's colour `color`, decoded.
-    pub fn copy_opaque(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        color: &wgpu::TextureView,
-    ) {
-        let to = self.opaque_color.create_view(&Default::default());
-        self.decoder.run(device, encoder, color, &to);
+    fn opaque_views(&self) -> (wgpu::TextureView, wgpu::TextureView) {
+        (
+            self.opaque_depth.create_view(&Default::default()),
+            self.opaque_color.create_view(&Default::default()),
+        )
+    }
+
+    /// Capture the world's reversed depth and decode its color to linear light.
+    pub(super) fn copy_world_opaque(&self, copy: OpaqueCopy<'_>) {
+        let OpaqueCopy {
+            device,
+            encoder,
+            depth,
+            color,
+        } = copy;
+        encoder.copy_texture_to_texture(
+            depth.as_image_copy(),
+            self.opaque_depth.as_image_copy(),
+            depth.size(),
+        );
+        if let Some(color) = color {
+            let to = self.opaque_color.create_view(&Default::default());
+            self.decoder.run(device, encoder, color, &to);
+        }
     }
 
     /// The water mirror `view` as the material reads it: decoded into a copy.
@@ -1110,6 +1130,7 @@ impl NativePost {
     /// store runs the compute ones) with the option values `constants`, the last onto `picture`,
     /// and `tonemap` (else Horizon's) onto a screen of `format`. Errors name the pass wgpu
     /// refused.
+    #[cfg(test)]
     pub fn new(
         device: &wgpu::Device,
         stages: Vec<CheckedStage>,
@@ -1119,6 +1140,29 @@ impl NativePost {
         frame: &NativeFrame,
         tonemap: Option<&CheckedStage>,
     ) -> Result<Self, String> {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        Self::new_cancellable(
+            device, stages, manifest, constants, format, frame, tonemap, &cancel,
+        )
+        .map_err(|e| match e {
+            super::native_pack::BuildError::Refused(reason) => reason,
+            super::native_pack::BuildError::Cancelled => "cancelled".into(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_cancellable(
+        device: &wgpu::Device,
+        stages: Vec<CheckedStage>,
+        manifest: &horizon_shader_api::Manifest,
+        constants: &[(String, f64)],
+        format: wgpu::TextureFormat,
+        frame: &NativeFrame,
+        tonemap: Option<&CheckedStage>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Self, super::native_pack::BuildError> {
+        use super::native_pack::BuildError;
+        use std::sync::atomic::Ordering;
         let targets = manifest.post_targets();
         let plan = plan(&kept::outputs(manifest, &targets));
         let float = wgpu::TextureSampleType::Float { filterable: true };
@@ -1135,12 +1179,19 @@ impl NativePost {
             texture_entry(10, float),
             texture_entry(11, wgpu::TextureSampleType::Uint),
         ];
+        if manifest.post_opaque {
+            entries.extend([
+                texture_entry(POST_OPAQUE_DEPTH_BINDING, wgpu::TextureSampleType::Depth),
+                texture_entry(POST_OPAQUE_COLOR_BINDING, float),
+            ]);
+        }
         entries.extend(pack_texture_entries(frame.textures.len()));
         entries
             .extend((0..targets.len() as u32).map(|j| {
                 texture_entry(horizon_shader_api::stages::POST_TARGET_BINDING + j, float)
             }));
-        let (stages, kept) = kept::chain(device, manifest, stages, &entries, constants)?;
+        let (stages, kept) =
+            kept::chain_cancellable(device, manifest, stages, &entries, constants, cancel)?;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Native shader pack post"),
             entries: &entries,
@@ -1154,6 +1205,9 @@ impl NativePost {
         });
         let mut passes = Vec::with_capacity(stages.len());
         for (i, stage) in stages.into_iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(BuildError::Cancelled);
+            }
             let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
             let target = kept::target(&kept, plan[i].writes);
@@ -1162,9 +1216,12 @@ impl NativePost {
             let pipeline = post_pipeline(device, label, layout, stage.module, constants, target);
             let internal = pollster::block_on(internal.pop());
             if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
-                return Err(format!("{}: {e}", stage.file));
+                return Err(BuildError::Refused(format!("{}: {e}", stage.file)));
             }
             passes.push((stage.label, pipeline));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(BuildError::Cancelled);
         }
         let source = tonemap.map_or_else(
             || StageKind::Tonemap.prelude() + DEFAULT_TONEMAP,
@@ -1172,7 +1229,7 @@ impl NativePost {
         ) + &tonemap_entries(tonemap.is_none());
         let file = tonemap.map_or("<tonemap>", |s| s.file.as_str());
         let module = naga::front::wgsl::parse_str(&source)
-            .map_err(|e| format!("{file}: {}", e.emit_to_string(&source)))?;
+            .map_err(|e| BuildError::Refused(format!("{file}: {}", e.emit_to_string(&source))))?;
         let present = present_constants(&module, constants);
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -1188,7 +1245,7 @@ impl NativePost {
         let pipeline = fullscreen_pipeline(device, "Tonemap", &module, stages, format, &present);
         let internal = pollster::block_on(internal.pop());
         if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
-            return Err(format!("{file}: {e}"));
+            return Err(BuildError::Refused(format!("{file}: {e}")));
         }
         let display = Display {
             decoder: frame.decoder.clone(),
@@ -1213,6 +1270,7 @@ impl NativePost {
             traced: None,
             textures: frame.textures.clone(),
             frame: frame.buffer.clone(),
+            opaque: manifest.post_opaque.then(|| frame.opaque_views()),
             shadow: (
                 frame.shadow_map.view.clone(),
                 frame.shadow_map.sampler.clone(),
@@ -1265,6 +1323,14 @@ impl NativePost {
     pub(super) fn reset_history(&mut self) {
         self.named = None;
         self.groups = None;
+    }
+
+    /// The world targets were resized. Drop post groups which still bind the old copies.
+    pub(super) fn refresh_opaque(&mut self, frame: &NativeFrame) {
+        if self.opaque.is_some() {
+            self.opaque = Some(frame.opaque_views());
+            self.groups = None;
+        }
     }
 
     fn prepare(
@@ -1421,6 +1487,18 @@ impl NativePost {
                     resource: wgpu::BindingResource::TextureView(&self.shadow.3),
                 },
             ];
+            if let Some((depth, color)) = &self.opaque {
+                entries.extend([
+                    wgpu::BindGroupEntry {
+                        binding: POST_OPAQUE_DEPTH_BINDING,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: POST_OPAQUE_COLOR_BINDING,
+                        resource: wgpu::BindingResource::TextureView(color),
+                    },
+                ]);
+            }
             entries.extend(pack_texture_group_entries(&self.textures));
             // The pack's targets, a blank one in place of the one this pass writes.
             if let Some((_, views)) = &self.named {
@@ -2236,7 +2314,7 @@ api = \"0.2\"
     }
 
     /// Two passes: the first doubles the world's light (over 1, so the half-float target must
-    /// keep it) times an option, the second halves it and writes the depth as blue.
+    /// keep it) times an option, the second halves it and reads both depth snapshots.
     #[test]
     fn passes_chain_through_half_float_targets_with_options_and_depth() {
         let _gpu = crate::gfx::test_gpu::lock();
@@ -2244,16 +2322,27 @@ api = \"0.2\"
             return;
         };
         let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
+            post_opaque = true\n\
             [[post]]\nfile = \"a.wgsl\"\n[[post]]\nfile = \"b.wgsl\"\n\
             [[options]]\nid = \"gain\"\nname = \"Gain\"\ntype = \"float\"\ndefault = 0.0\nmin = 0.0\nmax = 2.0\n";
         let a = "override gain: f32;\nfn post(input: PostInput) -> vec4<f32> { return vec4<f32>(input.color.rgb * 2.0 * gain, 1.0); }\n";
-        let b = "fn post(input: PostInput) -> vec4<f32> { return vec4<f32>(input.color.rg * 0.5, input.depth, 1.0); }\n";
+        let b = "
+            fn post(input: PostInput) -> vec4<f32> {
+                if input.pixel.x < 1.0 {
+                    return vec4<f32>(input.color.rg * 0.5, input.depth, 1.0);
+                }
+                let texel = vec2<i32>(input.pixel);
+                let color = textureLoad(opaque_color, texel, 0);
+                let depth = textureLoad(opaque_depth, texel, 0);
+                return vec4<f32>(color.r, depth, input.depth, 1.0);
+            }";
         let files = [(MANIFEST, manifest), ("a.wgsl", a), ("b.wgsl", b)]
             .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
             .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let frame = sdr_frame(&device, &queue);
+        let mut frame = sdr_frame(&device, &queue);
+        frame.reads_opaque = true;
         let mut post = NativePost::new(
             &device,
             report.stages,
@@ -2268,40 +2357,56 @@ api = \"0.2\"
 
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let color = texture(&device, format, usage).create_view(&Default::default());
-        let depth = texture(&device, wgpu::TextureFormat::Depth32Float, usage)
-            .create_view(&Default::default());
+        let depth_texture = texture(
+            &device,
+            wgpu::TextureFormat::Depth32Float,
+            usage | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth = depth_texture.create_view(&Default::default());
         let screen = texture(
             &device,
             format,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         );
         let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &color,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.8,
-                        g: 0.4,
-                        b: 0.2,
-                        a: 1.0,
+        let clear = |encoder: &mut wgpu::CommandEncoder, r, z| {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r,
+                            g: 0.4,
+                            b: 0.2,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(z),
+                        store: wgpu::StoreOp::Store,
                     }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0.5),
-                    store: wgpu::StoreOp::Store,
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
+                ..Default::default()
+            });
+        };
+        assert!(frame.fit_opaque(&device, &depth_texture, Some(color.texture())));
+        post.refresh_opaque(&frame);
+        clear(&mut encoder, 0.4, 0.25);
+        frame.copy_world_opaque(OpaqueCopy {
+            device: &device,
+            encoder: &mut encoder,
+            depth: &depth_texture,
+            color: Some(&color),
         });
+        clear(&mut encoder, 0.8, 0.5);
         let view = screen.create_view(&Default::default());
         post.run(
             &device,
@@ -2335,11 +2440,19 @@ api = \"0.2\"
             .slice(..)
             .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let pixel = buffer.slice(..).get_mapped_range().unwrap()[..4].to_vec();
+        let pixels = buffer.slice(..).get_mapped_range().unwrap();
+        let pixel = &pixels[..4];
         let near = |got: u8, want: u8| got.abs_diff(want) <= 1;
         // The world's red and green as they went in, the depth 0.5 as light, encoded (186).
         assert!(
             near(pixel[0], 204) && near(pixel[1], 102) && near(pixel[2], 186) && pixel[3] == 255,
+            "{pixel:?}"
+        );
+        // Red comes from before translucency (0.4), green from its reversed depth (0.25)
+        // encoded to 8-bit (136), and blue from the final depth (0.5 encoded to 186).
+        let pixel = &pixels[4..8];
+        assert!(
+            near(pixel[0], 102) && near(pixel[1], 136) && near(pixel[2], 186) && pixel[3] == 255,
             "{pixel:?}"
         );
     }
@@ -2977,7 +3090,7 @@ api = \"0.2\"
         let screen = sized(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
         let screen_view = screen.create_view(&Default::default());
         let mut show = |pixels: &[u8]| {
-            world_post.jitter(window, true, Mat4::IDENTITY, DVec3::ZERO);
+            world_post.jitter(window, true, false, Mat4::IDENTITY, DVec3::ZERO);
             let (color, depth) = world_post.prepare(&device, window, true, false).unwrap();
             queue.write_texture(
                 source.as_image_copy(),
@@ -3085,7 +3198,7 @@ api = \"0.2\"
         const WINDOW: u32 = 8;
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let window = [WINDOW, WINDOW];
-        world_post.jitter(window, true, Mat4::IDENTITY, DVec3::ZERO);
+        world_post.jitter(window, true, false, Mat4::IDENTITY, DVec3::ZERO);
         let (color, depth) = world_post.prepare(device, window, true, false).unwrap();
         let size = world_post.size().unwrap();
         let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;

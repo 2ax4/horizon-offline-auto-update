@@ -257,6 +257,8 @@ impl Game<'_> {
         // (`yRotO`/`xRotO`), as the local tick does; `tick` returns before it
         // reaches its own write when this window is a server client.
         self.rope_rot_old = (self.yaw, self.pitch);
+        // Before the tick, and a rider's toggle in `remote_ride`.
+        let was_flying = self.player.as_ref().is_some_and(|p| p.flying);
         // A passenger moves with its vehicle (Entity.rideTick), not by itself.
         let riding = self.screen != Screen::Dead && self.remote_ride(keys, sprint_window)?;
         // The server sends no passenger's position: they sit where their
@@ -283,7 +285,6 @@ impl Game<'_> {
             [player.velocity.x, player.velocity.y, player.velocity.z],
             [player.position.x, player.position.y, player.position.z],
         );
-        let was_flying = player.flying;
         self.sync_player_body();
         // LivingEntity.tickDeath: the local player counts its deathTime once
         // per client tick while dead (the camera's death roll and zoom).
@@ -358,6 +359,16 @@ impl Game<'_> {
                 // frostbite overlay shows it (#8156).
                 passenger.passenger_block_effects_tick()?;
             }
+        }
+        // Player.tick holds the player at the world's edge after the move: X
+        // and Z clamp, Y does not (Player.java:264-265). A passenger is left
+        // alone: Entity.rideTick runs Player.tick and only then seats the rider
+        // on the vehicle (`Entity.java:2433-2439`), so the seat's position is
+        // what survives the tick, and clamping here would pull a rider off a
+        // seat that legally sits past the edge.
+        if !riding {
+            player.position.x = player.position.x.clamp(-2.9999999E7, 2.9999999E7);
+            player.position.z = player.position.z.clamp(-2.9999999E7, 2.9999999E7);
         }
         // The server decides fire the window cannot predict (blaze fireballs,
         // fire aspect, lightning): Entity.isOnFire reads the synched flag, so

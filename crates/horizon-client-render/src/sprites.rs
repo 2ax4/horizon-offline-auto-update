@@ -290,12 +290,12 @@ pub struct Sprites {
     /// The one missing texture layer those share.
     overflow_layer: Option<u32>,
 }
-/// The most block sprite layers the renderer draws from: its arrays
-/// (`gfx::SPRITE_ARRAYS`) of the layers known before the GPU is (`gfx::sprite_split`,
-/// 2048 unless `HORIZON_SPRITE_SPLIT` asks for fewer). A GPU that holds fewer per array
-/// still refuses more, as before.
+/// The most block sprite layers the renderer draws from: the arrays the opened adapter binds
+/// (`gfx::adapter_sprite_arrays`, eight until one is open) of the layers known before the GPU
+/// is (`gfx::sprite_split`, 2048 unless `HORIZON_SPRITE_SPLIT` asks for fewer). A GPU that
+/// holds fewer layers per array still refuses more, as before.
 pub fn max_layers() -> usize {
-    crate::gfx::SPRITE_ARRAYS as usize * crate::gfx::sprite_split() as usize
+    crate::gfx::adapter_sprite_arrays() as usize * crate::gfx::sprite_split() as usize
 }
 /// Layers [`Sprites::plan_within_capacity`] keeps free for what later loaders add
 /// (connected-texture tiles, run-time sprites).
@@ -329,14 +329,50 @@ pub fn set_labpbr_maps(on: bool) {
 pub fn labpbr_maps() -> bool {
     LABPBR_MAPS.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// The LabPBR maps' budget in bytes from the `pbrBudgetMiB` setting (0 follows the block
+/// textures' budget), for resources loaded from now on.
+static PBR_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The LabPBR maps' budget from the `pbrBudgetMiB` setting, so a pack's colours and its maps
+/// can be sized apart; 0 gives the maps their share of the block textures' budget again.
+pub fn set_pbr_budget(mib: u32) {
+    PBR_BUDGET.store(u64::from(mib) << 20, std::sync::atomic::Ordering::Relaxed);
+}
 /// Budget for either complete normal or specular image set: a quarter of the block textures'
 /// budget, so raising `textureBudgetMiB` sharpens a pack's LabPBR maps along with its colours.
 fn map_bytes(texture_budget: u64) -> u64 {
     texture_budget / 4
 }
-/// [`map_bytes`] for the budget the next resource load keeps to.
+/// The budget the next resource load keeps a map set to: `pbrBudgetMiB` when set, else
+/// [`map_bytes`] of the block textures' budget.
 fn max_map_bytes() -> u64 {
-    map_bytes(TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed))
+    map_budget(
+        TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
+        PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+/// The side a sheet's LabPBR maps are laid out at, from its largest map and its colours' side,
+/// for given budgets in bytes (`pbr_budget` 0 for unset). An explicit `pbrBudgetMiB` may keep
+/// maps sharper than the colours; without it the maps never exceed them.
+fn pbr_side(
+    largest_map: u32,
+    colour_side: u32,
+    layers: u64,
+    texture_budget: u64,
+    pbr_budget: u64,
+) -> u32 {
+    let cap = if pbr_budget == 0 {
+        largest_map.min(colour_side)
+    } else {
+        largest_map
+    };
+    side_within(cap, layers, map_budget(texture_budget, pbr_budget))
+}
+/// [`max_map_bytes`] for given budgets: `pbr_budget` in bytes, 0 for unset.
+fn map_budget(texture_budget: u64, pbr_budget: u64) -> u64 {
+    match pbr_budget {
+        0 => map_bytes(texture_budget),
+        bytes => bytes,
+    }
 }
 /// Fewer layers than any game has (vanilla's are about 1300): what a map is kept at while
 /// loading assumes at least these many share the array.
@@ -648,7 +684,13 @@ impl Sprites {
         self.specular.clear();
         let largest_map = self.pbr.iter().flatten().flatten().map(|m| m.0).max();
         self.pbr_size = largest_map.map_or(SPRITE_SIZE, |l| {
-            side_within(l.min(size), layers, max_map_bytes())
+            pbr_side(
+                l,
+                size,
+                layers,
+                TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
+                PBR_BUDGET.load(std::sync::atomic::Ordering::Relaxed),
+            )
         });
         if largest_map.is_some() {
             let pbr_size = self.pbr_size;
@@ -1107,6 +1149,14 @@ impl Sprites {
         }
         let columns = png_width / width;
         let count = columns * (png_height / height);
+        // A frame size from `.mcmeta` can cut a valid image into millions of frames, each its
+        // own allocation (and a clip as long); refuse before any is made.
+        if count > MAX_SPRITE_FRAMES {
+            return Err(format!(
+                "sprite {name} has {count} frames, more than the {MAX_SPRITE_FRAMES} allowed"
+            )
+            .into());
+        }
         // Layers are square; a frame of another shape is nearest-resampled to
         // its longer side so UVs (normalized per layer) are unchanged. That square is
         // made only at the layers' size (`lay_out`).
@@ -1280,6 +1330,10 @@ impl Sprites {
         Ok(layer)
     }
 }
+
+/// Most frames one animated sprite may be cut into. Real sheets have a few hundred (the largest
+/// kept in tests has 16,448); the cap bounds the per-frame allocations, not the decoded pixels.
+pub(crate) const MAX_SPRITE_FRAMES: u32 = 1 << 17;
 
 /// Refuses `count` square frames of `side` before they are made: a frame of any shape becomes a
 /// square layer, so a 32768x1 image of a few hundred bytes squared at its own side would ask for
@@ -1651,6 +1705,20 @@ mod tests {
         assert_eq!(side_within(1024, 1300, map_bytes(1536 << 20)), 256);
     }
     #[test]
+    fn a_separate_pbr_budget_overrides_the_maps_without_touching_the_textures() {
+        // Unset, the maps keep their quarter of the textures' budget.
+        assert_eq!(
+            map_budget(DEFAULT_TEXTURE_BUDGET, 0),
+            map_bytes(DEFAULT_TEXTURE_BUDGET)
+        );
+        // Set, they ignore it: 1300 layers in 4 MiB pack at 16 px, in 384 MiB at 256 px.
+        assert_eq!(side_within(1024, 1300, map_budget(1536 << 20, 4 << 20)), 16);
+        assert_eq!(
+            side_within(1024, 1300, map_budget(DEFAULT_TEXTURE_BUDGET, 384 << 20)),
+            256
+        );
+    }
+    #[test]
     fn a_labpbr_map_selects_whole_texels_and_missing_layers_get_defaults() {
         // Selecting a texel preserves encoded channels, including categorical values.
         let frame = [
@@ -1721,6 +1789,27 @@ mod tests {
         assert_eq!(
             sprites.specular[..128 * 128 * 4],
             resample(&maps[2], 16, 128)
+        );
+    }
+    #[test]
+    fn an_explicit_pbr_budget_keeps_maps_sharper_than_the_colours() {
+        // `pbr_side` takes the budgets as arguments, so this never sets the process-wide
+        // `PBR_BUDGET` that the other `finish()` tests read in parallel.
+        let side = |pbr_mib: u64| pbr_side(64, 16, 1, DEFAULT_TEXTURE_BUDGET, pbr_mib << 20);
+        assert_eq!(side(0), 16);
+        assert_eq!(side(64), 64);
+        let mut sprites = Sprites {
+            native: vec![(16, Arc::new(vec![vec![0; 16 * 16 * 4]]), 0)],
+            pbr: vec![[
+                Some((64, Arc::new(vec![[9, 8, 7, 6].repeat(64 * 64)]))),
+                None,
+            ]],
+            ..Default::default()
+        };
+        sprites.finish();
+        assert_eq!(
+            sprites.pbr_size, 16,
+            "without pbrBudgetMiB the maps follow the colours"
         );
     }
     #[test]
@@ -2460,6 +2549,19 @@ mod png_size_tests {
         });
         let source = super::ResourceSource::indexed(files.into_iter().collect());
         super::Sprites::decode_file_data(&source, path, "minecraft:block/test", Some(png))
+    }
+
+    /// A valid PNG with a 1x1 `.mcmeta` frame size would be cut into one allocation per
+    /// texel (67 million for 8192x8192); the frame count is refused before any is made.
+    #[test]
+    fn a_frame_size_that_splits_a_sprite_into_millions_of_frames_is_refused() {
+        let mcmeta = r#"{"animation":{"width":1,"height":1}}"#;
+        let Err(error) = decode_sprite(&grey_png(1024, 1024), Some(mcmeta)) else {
+            panic!("a million frames must be refused");
+        };
+        assert!(error.to_string().contains("frames"), "{error}");
+        let ok = decode_sprite(&grey_png(256, 256), Some(mcmeta)).unwrap();
+        assert_eq!(ok.frames.len(), 256 * 256);
     }
 
     /// A real 32768x1 (or 1x32768) PNG is a few hundred bytes and decodes to 128 KiB; its

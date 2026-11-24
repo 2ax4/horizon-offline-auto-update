@@ -47,6 +47,7 @@ id = "soft_light"          # [a-z0-9_]{1,64}: the settings key and the registry 
 name = "Soft Light"
 version = "1.0.0"
 api = "0.2"                # the shader API line the WGSL is written for
+post_opaque = true         # optional, let post passes read the world before translucent terrain
 description = "..."        # optional, like authors and license
 shared = ["common.wgsl"]   # optional: WGSL put before every stage's file, in order
 
@@ -184,7 +185,8 @@ keeps drawing. What a pack works with:
 - **Linear light.** Every colour a stage reads or returns is linear light, 1.0 at paper white and more brighter. Horizon
   decodes vanilla's values with a 2.2 power and encodes the results the frame stores. Depth, normals, light levels,
   `emission`, the LabPBR maps and `[[textures]]` stay data. `[[lights]]` and `[[particle_lights]]` colours are still
-  written in vanilla's gamma, and Horizon decodes them. Alpha is coverage only, and a post pass's alpha is ignored.
+  written in vanilla's gamma, and Horizon decodes them. Alpha is coverage only, and a post pass's alpha is ignored
+  unless the pass has an `output`, whose target keeps it.
 - **The display in `Frame`:** `hdr`, `headroom`, `paper_white`, `peak` and `black_level`, after `shadow_center_texel`.
   With HDR on, where the device keeps the HUD on a layer of its own, they are the display's, and the pack's picture is
   shown in HDR, with the HUD laid over it as without a pack. Otherwise they are SDR's (`hdr` 0, `headroom` 1,
@@ -221,6 +223,11 @@ keeps drawing. What a pack works with:
   coverage: the texture's alpha times the layer's opacity is cut below 0.1 and blends, the returned alpha is ignored,
   and the check refuses a `discard` reachable from `entity`. Under `"pack"` the returned alpha is cut and blends, and
   the stage may `discard`. Dissolve masks and culling are Horizon's under either.
+- **`[frame] jitter`**: `false` (the default), `true`, or an option's id (on while it isn't 0). While the pack's
+  `[[post]]` chain draws the frame, Horizon moves the world's projection every frame by TAA's Halton offset and says
+  it in `frame.jitter` and `frame.previous_jitter`, for a temporal pass of the pack's own; Horizon adds no resolve,
+  history or upscaling for it. Under a pack the renderer resolves it changes nothing
+  ([reference](shaders-reference-0.2.md#frame-jitter)).
 - **`[frame] fog`**: `"engine"` (the default) or `"pack"`, which fogs what its stages draw itself. Under `"pack"`
   Horizon skips its fog on what `material` and `entity` return, and every stage gets `vanilla_fog(position)`,
   vanilla's fog at a point, with the frame's two fog distances it reads (`fog_environment`, `fog_render`), so a pack
@@ -238,11 +245,13 @@ coverage = "engine"        # optional: engine (default) or pack, when the materi
 [entity]                   # optional: the colour of entities and block entities (items and particles later)
 file = "entity.wgsl"
 coverage = "engine"        # optional: engine (default) or pack, when the stage cuts or fades entities itself
+surface = true             # optional, default false: the stage gets `set_surface`, and `surface_at` reads entities too
 
 [frame]
 blend = "gamma"            # optional: gamma (default) or linear
 primaries = "bt709"        # optional: bt709 (default) or bt2020, which needs blend = "linear"
 fog = "engine"             # optional: engine (default) or pack, when the pack fogs what its stages draw
+jitter = false             # optional: true (or an option's id) moves the world by TAA's offset under the pack's [[post]] chain
 
 [ray_tracing]              # optional, needs [[post]], [[before_world]], [material] or [entity]: the post stage gets `trace` and `trace_any`, other supported stages get them where they call them
 lights = true              # optional, default false: the light sources (`ray_lights_near`, `ray_light`) in the stages that name them
@@ -252,7 +261,7 @@ step = true                # optional, default false: `trace_step`, a ray query 
 
 API 0.1, the gamma line before it, is retired. To move a pack over, set `api = "0.2"` and treat every colour as
 linear light: decode a constant written for display values with a 2.2 power, compute luminance with
-`frame.luminance`, and stop returning `input.color.a` from post passes (their alpha is ignored). The example pack,
+`frame.luminance`, and stop returning `input.color.a` from post passes (their alpha is ignored, but for one with an `output`). The example pack,
 `crates/horizon-shader-api/packs/golden_hour`, was moved this way. `packs/traced_shadows` and
 `packs/traced_water` are the smallest packs that trace rays, from a post pass and from the material stage
 ([the guide](../shaders.md#ray-tracing)); `packs/traced_lights` lights a post pass with the block light sources. `packs/horizon_hdr` is Horizon's own HDR look as a pack, from the look file
@@ -301,6 +310,23 @@ but still lights dropped and framed items and particles itself. Block entities k
 no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
+
+- 2026-11-24: API 0.2 (addition, experimental): `[frame] jitter` (off by default), `true` or an option's id: under
+  the pack's own `[[post]]` chain the world moves by TAA's sub-pixel offset every frame, read in `frame.jitter` and
+  `frame.previous_jitter`, so a temporal pass has sub-pixel detail to gather (#20296). A pack without the key is
+  unchanged. Older 0.2 builds refuse unknown `[frame]` keys, so a pack that sets it doesn't load there.
+- 2026-11-24: API 0.2 (fix, experimental): a post pass with an `output`, a target of the pack's own or a kept
+  texture, keeps the alpha it returns; before, only a kept texture's did (#20563).
+- API 0.2 (addition): `post_opaque = true` lets native post passes read the pre-translucent
+  color and depth. They reuse the material stage's capture, and only packs that read it request
+  that capture (#3734).
+- 2026-11-22: API 0.2 (addition, preview; first build: Nightly `TBD`): `[entity] surface = true` (off by default)
+  gives the entity stage `set_surface`, the material stage's, and the entities it lights write the surface target the
+  post stage's `surface_at` and `scene_surface` read: where an entity shows, `present` is true and holds its normal
+  (the triangle's where `entity` leaves it unset), smoothness and `data`, so traced light, denoisers and probes can
+  treat entities like solid terrain. Translucent entities store their frontmost point; quads Horizon draws itself
+  (beacon beams, End portals) and mods' prepared models store none. A pack without the key is drawn and checked as
+  before, its prelude has no new name, and the surface target stays 1x1 unless its material calls `set_surface`.
 
 - 2026-11-22: API 0.2 (addition, preview): `[sky] sun_path_rotation`, degrees from -90 to 90 (0 when absent): the
   tilt of the sun's and moon's path, as `shaders/` packs' `sunPathRotation`. It turns `sun_direction`,

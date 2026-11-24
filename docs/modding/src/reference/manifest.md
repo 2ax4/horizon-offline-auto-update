@@ -81,6 +81,10 @@ refused with `InvalidRequest`, and nothing is created. The call answers a code (
 the calling mod's own declaration grants it, and the question names that mod; a request whose caller is unidentified is
 refused with `NotPermitted`. Creating a world, and level create, unload or delete, are not part of it.
 
+The same declaration lets a mod that draws its own title main page join a server from it: `request_title(Connect(address))`
+joins as Direct Connection's Join does. The page's other requests (`WorldList`, `CreateWorld`, `ServerList`, `Options`,
+`Mods`, `Quit`, `MainPage`) are what any player can click on the title and need no permission. The call answers `NativeTitleResult`.
+
 Set `level_reset` in the `[native]` section (default off) to let the mod regenerate the Overworld, the Nether and the End
 with `RuntimeLevels::reset_vanilla`:
 
@@ -151,6 +155,18 @@ These are all original declarations, including inactive sides, not the effective
 graph. `LoadBefore` is ordering-only: its version `*` is a marker, order is `Before` and side
 is `Both`, not an API library declaration. The metadata is the same on client and server (NeoForge's
 `ModContainer.getModInfo`, `IModInfo` and `getModProperties`).
+
+A port of a Java mod records the mod it came from as top-level `ported_from`, so its licence travels with the port
+([Porting Java modpacks](https://github.com/horizon-rust/horizon/blob/main/docs/modpacks.md#licences)):
+
+```toml
+ported_from = { id = "totemcounter", version = "1.14.0+mc26.3-fabric", license = "MIT", url = "https://modrinth.com/mod/totemcounter" }
+```
+
+`id` is the original's mod id (`fabric.mod.json` `id`, `mods.toml` `modId`), `license` an SPDX id or the original's
+own licence string; `id`, `version` and `license` are not empty and at most 256 bytes each. `url` is the original's
+page, an `http://` or `https://` link of at most 2048 characters. All four are required, and an unknown key inside
+the table refuses the manifest. Launchers older than this key refuse a manifest that carries it.
 
 Load rules name other mods without linking against them (NeoForge's `INCOMPATIBLE`, `DISCOURAGED` and
 `ordering = "BEFORE"`). The game checks them alongside ordinary dependencies for the selected content and loaded code:
@@ -252,7 +268,7 @@ the mod list. The scaffold does not create a default icon.
 | What | Limit |
 | --- | --- |
 | A registry file, as downloaded | 64 MiB |
-| Selected native source files, excluding the manifest, icon and resources | 511 files, 64 MiB unpacked in total |
+| Selected native source files, excluding the manifest, icon and resources | 65,536 files, 64 MiB unpacked in total |
 | Content files | 65,536 files, 16 MiB each, 512 MiB in total |
 | `horizon-mod.toml` | 32 MiB |
 | `icon.png` | 256 KiB encoded, 512 × 512 pixels |

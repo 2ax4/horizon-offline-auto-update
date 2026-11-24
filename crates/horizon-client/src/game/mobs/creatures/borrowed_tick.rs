@@ -22,9 +22,15 @@ fn route_player_events(
             };
             events.insert(k, *event);
         }
-        // A hoglin broadcast carries the source's player, not the receiving
-        // hoglin's independently selected player.
+        // A hoglin broadcast or an alert carries the source's player as it is now,
+        // not the receiver's independently selected player, nor the source's
+        // binding when the batch is delivered (an earlier alert may rebind it).
         if let MobEvent::HoglinAttackTarget {
+            target: Who::Player,
+            player,
+            ..
+        }
+        | MobEvent::SetTarget {
             target: Who::Player,
             player,
             ..
@@ -141,6 +147,7 @@ impl Game<'_> {
         let mut positions: Option<horizon_client::fast_hash::FxHashMap<u32, usize>> = None;
         let mut index = horizon_client::fast_hash::FxHashMap::<u32, u32>::default();
         let mut villager_slots = Vec::new();
+        let mut village = horizon_client::mobs::village_index::VillageIndex::default();
         let mut solid_slots = Vec::new();
         let mut species_slots = horizon_client::mobs::species_slots::SpeciesSlots::new(&snapshot);
         for (i, s) in snapshot.iter().enumerate() {
@@ -203,6 +210,7 @@ impl Game<'_> {
                         Some(positions) => {
                             let Some(&i) = positions.get(&snapshot[slot].id) else {
                                 keep[slot] = false;
+                                village.mark(slot, &snapshot[slot], &snapshot[slot]);
                                 snapshot[slot].alive = false;
                                 // The row's mob left the list at a boundary: the
                                 // tick view must answer a removed handle with nothing.
@@ -224,6 +232,7 @@ impl Game<'_> {
                     }
                     if m.removed && !resuming {
                         keep[slot] = false;
+                        village.mark(slot, &snapshot[slot], &snapshot[slot]);
                         snapshot[slot].alive = false;
                         // `removed` is the view's authoritative gone: a dead body
                         // that is still in the level keeps resolving (arismoko/horizon#795).
@@ -367,6 +376,7 @@ impl Game<'_> {
                                     others_grid: Some(&grid),
                                     others_index: Some(&index),
                                     others_villagers: Some(&villager_slots),
+                                    village: Some(&village),
                                     species_slots: Some(&species_slots),
                                     others_solid: Some(&solid_slots),
                                     live_mobs: None,
@@ -510,6 +520,7 @@ impl Game<'_> {
                         others_grid: Some(&grid),
                         others_index: Some(&index),
                         others_villagers: Some(&villager_slots),
+                        village: Some(&village),
                         species_slots: Some(&species_slots),
                         others_solid: Some(&solid_slots),
                         difficulty,
@@ -707,6 +718,7 @@ impl Game<'_> {
                     // ServerLevel ticks entities one after another: the ones
                     // after this mob see it as it is now.
                     let fresh = seen(m, uuid, world_items!(self));
+                    village.mark(slot, &snapshot[slot], &fresh);
                     let reclassified = snapshot[slot].species != fresh.species;
                     snapshot[slot] = fresh;
                     if reclassified {
@@ -820,6 +832,7 @@ impl Game<'_> {
                 }
             }
             villager_slots.clear();
+            village = horizon_client::mobs::village_index::VillageIndex::default();
             species_slots = horizon_client::mobs::species_slots::SpeciesSlots::new(&snapshot);
             solid_slots.clear();
             for (slot, s) in snapshot.iter().enumerate() {
@@ -1055,6 +1068,37 @@ mod hoglin_routing_tests {
                 player, ..
             } if player == expected));
         }
+    }
+}
+
+#[cfg(test)]
+mod alert_routing_tests {
+    use super::*;
+
+    /// Player 12 hit zombified piglin 9001 and player 13 hit 9002 before one tick. 9001's
+    /// tick alerts 9002, and 9002's alerts 9003. The batch is delivered after the tick, so
+    /// 9001's alert has rebound 9002 to player 12 by the time 9002's alert is applied; vanilla
+    /// hands each alerted mob `getLastHurtByMob()` as it alerts, so 9003 still goes for 13.
+    #[test]
+    fn two_attackers_in_one_tick_each_alert_carries_its_own() {
+        let mut events = Vec::new();
+        for (source, seen, alerted) in [(9001, Some(12), 9002), (9002, Some(13), 9003)] {
+            let from = events.len();
+            events.push(MobEvent::SetTarget {
+                mob: alerted,
+                target: Who::Player,
+                player: None,
+            });
+            route_player_events(&mut events, from, seen, &[], &mut Vec::new(), source);
+        }
+        let carried: Vec<(u32, Option<u32>)> = events
+            .iter()
+            .map(|e| match e {
+                MobEvent::SetTarget { mob, player, .. } => (*mob, *player),
+                other => panic!("an alert stays an alert: {other:?}"),
+            })
+            .collect();
+        assert_eq!(carried, [(9002, Some(12)), (9003, Some(13))]);
     }
 }
 

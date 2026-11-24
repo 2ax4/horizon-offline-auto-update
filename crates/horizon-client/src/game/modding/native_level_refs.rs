@@ -3,7 +3,7 @@
 //! reach any loaded level; both-side reads also reach the client's current level.
 //! A handle of an earlier open or an unloaded block reads `None` (or `false`).
 use super::Game;
-use horizon_client::{streaming::Streaming, world::World};
+use horizon_client::{mobs::spawn_rules, streaming::Streaming, world::World};
 use horizon_core::{
     geometry::Direction,
     position::{BlockPos, ChunkPos},
@@ -12,8 +12,9 @@ use horizon_items::items::ItemStack;
 use horizon_world::registry::BlockStateId;
 use mod_api::world::mod_chunk_tickets::ModTicket;
 use mod_api::{
-    BlockHit, BlockTransformPreview, ChunkRef, ChunkStatus, ClipBlock, ClipFluid, DimensionKey,
-    Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData, TicketController, Vec3,
+    BlockHit, BlockTransformPreview, ChunkDeltaCursor, ChunkDeltas, ChunkRef, ChunkStatus, ClipBlock,
+    ClipFluid, DimensionKey, Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData,
+    TicketController, Vec3,
 };
 
 fn block_pos([x, y, z]: [i32; 3]) -> BlockPos {
@@ -214,21 +215,37 @@ impl Game<'_> {
     /// `LevelReader.getBiome`: the noise cell selected by this level's BiomeManager zoom.
     /// Unlike a generating server query, an absent selected column returns None.
     fn native_read_biome(&self, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+        let biome = self.native_biome_index(level, pos, true)?;
+        Some(world_biomes!(self).get(biome).name.clone())
+    }
+
+    /// The biome at `pos` in the world's biome table: `zoomed`, `LevelReader.getBiome` through
+    /// the level's biome zoom; otherwise the noise biome of the block's quart
+    /// (`BiomeManager.getNoiseBiomeAtPosition`). None for a stale level or an unloaded column.
+    pub(super) fn native_biome_index(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        zoomed: bool,
+    ) -> Option<u16> {
         let world = self.native_level_read_world(level)?;
-        let streaming = if level.dimension() == self.native_level_key() {
-            &self.streaming
+        let [qx, qy, qz] = if zoomed {
+            let streaming = if level.dimension() == self.native_level_key() {
+                &self.streaming
+            } else {
+                self.levels.parked_streaming_of(level.dimension_id())?
+            };
+            streaming.biome_zoom.quart_at_block(block_pos(pos))
         } else {
-            self.levels.parked_streaming_of(level.dimension_id())?
+            pos.map(|v| v >> 2)
         };
-        let [qx, qy, qz] = streaming.biome_zoom.quart_at_block(block_pos(pos));
         let chunk = world.chunks.get(&(qx >> 2, qz >> 2))?;
         // ChunkAccess clamps to the dimension's height, not our padded storage.
         // Clamp before conversion to preserve signed block-coordinate extremes.
         let min_qy = world.shape.min_y >> 2;
         let max_qy = (world.shape.max_y() - 1) >> 2;
         let y = qy.clamp(min_qy, max_qy) << 2;
-        let biome = chunk.biome(qx << 2, y, qz << 2);
-        Some(world_biomes!(self).get(biome).name.clone())
+        Some(chunk.biome(qx << 2, y, qz << 2))
     }
 
     /// The authoritative server's `LevelReader.getBiome`, including parked levels.
@@ -379,6 +396,38 @@ impl Game<'_> {
                 .map(|(x, z)| mod_api::__private::game::chunk_ref(level, [x, z]))
                 .collect(),
         )
+    }
+    /// Read the current client level's residency and content journal without loading any chunk.
+    pub(super) fn level_chunk_deltas(
+        &self,
+        level: LevelRef,
+        since: Option<ChunkDeltaCursor>,
+    ) -> Option<ChunkDeltas> {
+        if self.native_client_level()? != level {
+            return None;
+        }
+        let chunks = &self.world.chunks;
+        let now = chunks.touch_cursor();
+        let cursor = ChunkDeltaCursor::new(level, now);
+        let touched = since
+            .and_then(|since| since.for_level(level))
+            .filter(|&(_, seq)| seq <= now.1)
+            .and_then(|since| chunks.touched_since(since));
+        let loaded = |&(x, z)| mod_api::__private::built::chunk_delta([x, z], true);
+        let full = touched.is_none();
+        let mut changes: Vec<_> = match touched {
+            Some(keys) => keys.map(loaded).collect(),
+            None => chunks.keys().map(loaded).collect(),
+        };
+        changes.sort_unstable_by_key(|delta| delta.pos);
+        if !full {
+            changes.dedup_by_key(|delta| delta.pos);
+            for delta in &mut changes {
+                let [x, z] = delta.pos;
+                delta.loaded = chunks.contains_key(&(x, z));
+            }
+        }
+        Some(mod_api::__private::built::chunk_deltas(cursor, full, changes))
     }
     /// Whether this chunk is loaded; false on a client or for a stale handle.
     pub(super) fn chunk_loaded(&self, chunk: ChunkRef) -> bool {
@@ -797,6 +846,29 @@ impl Game<'_> {
     pub(super) fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool> {
         Some(self.level_brightness(level, LightLayer::Sky, pos)? >= 15)
     }
+    /// `LevelReader.canSeeSkyFromBelowWater`: at and above the level's sea level `canSeeSky`;
+    /// below it, the sky seen at sea level and nothing on the way down that dampens light but
+    /// water, lava and bubble columns. The spawn rules' own scan. None on a client, for a stale
+    /// handle and for a position that isn't loaded.
+    pub(super) fn level_can_see_sky_from_below_water(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+    ) -> Option<bool> {
+        let world = self.native_level_world(level)?;
+        let [x, y, z] = pos;
+        if !world.is_loaded_at(x, y, z) {
+            return None;
+        }
+        let sea = self.level_sea_level(level)?;
+        let facts = self.res.facts();
+        Some(spawn_rules::sky_from_below_water(
+            sea,
+            y,
+            |y| world_brightness(world, LightLayer::Sky, [x, y, z]) >= 15,
+            |y| spawn_rules::lets_the_sky_through(facts, world.block(x, y, z)),
+        ))
+    }
     /// `LevelLightEngine.checkBlock` at `pos`, queued with the level's light edits: the next
     /// update asks a `dynamic_light` block's parts again (`ask_edited_light_emission`) and
     /// relights the cell, which `LightTables::differs` lets through for such a state set to
@@ -921,6 +993,38 @@ impl Game<'_> {
         self.map(id)
             .and_then(|map| map.paint(colors))
             .unwrap_or(false)
+    }
+    /// `MapItemSavedData.setLocked` for a mod's call (`set_locked`). False on a client, for a
+    /// stale handle and a map nothing made; true otherwise, the flag set as given.
+    pub(super) fn level_set_map_locked(&mut self, level: LevelRef, id: i32, locked: bool) -> bool {
+        if !self.native_world_data_allowed(level) {
+            return false;
+        }
+        match self.map(id) {
+            Some(map) => {
+                map.set_locked(locked);
+                true
+            }
+            None => false,
+        }
+    }
+    /// `MapItem.create` for a mod's call: a new map in `level`'s dimension, centred on `center`
+    /// as given, at `scale` with `colors`. None on a client, for a stale handle, a scale over 4
+    /// and a colour list that is not 128 by 128.
+    pub(super) fn level_new_map(
+        &mut self,
+        level: LevelRef,
+        center: [i32; 2],
+        scale: u8,
+        colors: &[u8],
+    ) -> Option<i32> {
+        if !self.native_world_data_allowed(level) || scale > 4 || colors.len() != 128 * 128 {
+            return None;
+        }
+        let mut data = crate::game::maps::MapData::fresh(0.0, 0.0, scale, level.dimension_id());
+        data.center = center;
+        data.colors.copy_from_slice(colors);
+        Some(self.new_map_id(data))
     }
     /// Queue the level to be saved at the start of the next server tick. False for a stale
     /// handle and on a client.
@@ -1393,6 +1497,27 @@ mod tests {
             assert!(!stale.set_map_data(game, id, &colors));
             assert_eq!(level.map_data(game, i32::MAX), None, "a map nothing made");
 
+            // The locked flag changes alone: the pixels stay; refusals change nothing.
+            assert!(level.set_map_locked(game, id, true));
+            assert!(level.set_map_locked(game, id, true), "already locked is still true");
+            let locked = level.map_data(game, id).unwrap();
+            assert_eq!((locked.locked, locked.colors[5 + 2 * 128]), (true, 34));
+            assert!(!stale.set_map_locked(game, id, false));
+            assert!(!level.set_map_locked(game, i32::MAX, false), "a map nothing made");
+            assert!(level.map_data(game, id).unwrap().locked);
+            // A new map keeps the centre, scale and colours it is given, in the level's dimension.
+            let mut painted = vec![0u8; 128 * 128];
+            painted[7 + 3 * 128] = 52;
+            let made = level.new_map(game, [64, -64], 2, &painted).unwrap();
+            assert_ne!(made, id);
+            let new = level.map_data(game, made).unwrap();
+            assert_eq!(new.center, [64, -64]);
+            assert_eq!((new.scale, new.dimension.as_str()), (2, "minecraft:overworld"));
+            assert_eq!((new.colors[7 + 3 * 128], new.locked), (52, false));
+            assert_eq!(level.new_map(game, [0, 0], 5, &painted), None, "scale over 4");
+            assert_eq!(level.new_map(game, [0, 0], 0, &painted[..10]), None);
+            assert_eq!(stale.new_map(game, [0, 0], 0, &painted), None);
+
             // Ticks run only in the level in place, at a loaded position inside its height.
             let height = level.height(game).unwrap();
             assert!(!level.block_tick(game, [0, height.0, 0]));
@@ -1610,6 +1735,53 @@ mod tests {
             assert_eq!(level.fluid_flow(game, [8, y, 8]), Some(Vec3::ZERO));
             assert_eq!(level.fluid_flow(game, [5, y, 5]), Some(Vec3::ZERO));
             assert_eq!(level.fluid_flow(game, [16, y, 0]), None);
+        });
+    }
+
+    /// `can_see_sky_from_below_water` is the spawn rules' scan down from sea level: kelp stops
+    /// it, a bubble column (`liquid()`) and water don't, and the block at the position itself
+    /// isn't scanned; at and above sea level it is `can_see_sky`. A position that isn't loaded
+    /// and a stale handle read None.
+    #[test]
+    #[ignore = "daily"]
+    fn the_sky_from_below_water_stops_at_kelp_and_not_at_a_bubble_column() {
+        use horizon_client::chunk::Chunk;
+        use std::sync::Arc;
+
+        with_game(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let level = game.level(game.dim.id()).unwrap();
+            let sea = level.sea_level(game).unwrap();
+            let registry = &game.pack.assets.registry;
+            let water = registry.default_state("minecraft:water").unwrap();
+            let kelp = registry.default_state("minecraft:kelp").unwrap();
+            let column = registry.default_state("minecraft:bubble_column").unwrap();
+            for x in 0..3 {
+                for y in sea - 12..sea {
+                    game.world.set(x, y, 0, water).unwrap();
+                }
+            }
+            game.world.set(0, sea - 8, 0, kelp).unwrap();
+            game.world.set(1, sea - 8, 0, column).unwrap();
+            assert_eq!(level.can_see_sky(game, [0, sea, 0]), Some(true));
+            let below = |x, y| level.can_see_sky_from_below_water(game, [x, y, 0]);
+            assert_eq!(below(0, sea - 12), Some(false), "kelp stops the scan");
+            assert_eq!(
+                below(1, sea - 12),
+                Some(true),
+                "a bubble column is liquid()"
+            );
+            assert_eq!(below(2, sea - 12), Some(true), "open water");
+            assert_eq!(below(0, sea - 8), Some(true), "the kelp's own position");
+            assert_eq!(below(0, sea + 4), Some(true), "above sea level");
+            assert_eq!(below(1_000_000, sea - 12), None, "not loaded");
+            let stale = LevelRef::new(WorldEpoch::new(level.epoch().get() + 1), level.dimension());
+            assert_eq!(
+                stale.can_see_sky_from_below_water(game, [2, sea - 12, 0]),
+                None
+            );
         });
     }
 
@@ -2950,6 +3122,78 @@ mod environment_read_tests {
 
     #[test]
     #[ignore = "daily"]
+    fn environment_floats_read_time_weather_and_the_biome_at_a_position() {
+        use crate::game::execution_role::ExecutionRole;
+        use horizon_protocol::connection::Pipe;
+
+        with_game(|game| {
+            let overworld = game.level("minecraft:overworld").unwrap();
+            paint_biome(game, "minecraft:plains");
+            game.world.weather.rain_level = (0.0, 0.0);
+            game.world.weather.thunder_level = (0.0, 0.0);
+            let sun = |game: &crate::game::Game<'_>| {
+                overworld.environment_float(
+                    game,
+                    "minecraft:visual/sky_light_factor",
+                    [8.5, 64.0, 8.5],
+                )
+            };
+            // data/minecraft/timeline/day.json: 1.0 from 730 to 11270, 0.24 from 13140 to 22860.
+            game.world.day_time = 6000;
+            assert_eq!(sun(game), Some(1.0));
+            assert_eq!(
+                overworld.environment_float(game, "visual/sky_light_factor", [8.5, 64.0, 8.5]),
+                Some(1.0),
+                "the namespace may be left out"
+            );
+            game.world.day_time = 18000;
+            assert_eq!(sun(game), Some(0.24));
+            game.world.day_time = 6000;
+            game.world.weather.rain_level = (1.0, 1.0);
+            let rainy = sun(game).unwrap();
+            assert!(rainy < 1.0, "rain dims the sky: {rainy}");
+            game.world.weather.rain_level = (0.0, 0.0);
+            // The biome layer: pale_garden.json sets audio/music_volume to 0.
+            let music = |game: &crate::game::Game<'_>| {
+                overworld.environment_float(game, "audio/music_volume", [8.5, 64.0, 8.5])
+            };
+            assert_eq!(music(game), Some(1.0));
+            paint_biome(game, "minecraft:pale_garden");
+            assert_eq!(music(game), Some(0.0));
+            assert_eq!(
+                overworld.environment_float(game, "visual/sky_color", [8.5, 64.0, 8.5]),
+                None,
+                "not a float"
+            );
+            assert_eq!(
+                overworld.environment_float(game, "visual/nothing", [0.0; 3]),
+                None
+            );
+            let stale = LevelRef::new(
+                WorldEpoch::new(overworld.epoch().get() + 1),
+                overworld.dimension(),
+            );
+            assert_eq!(
+                stale.environment_float(game, "visual/sky_light_factor", [0.0; 3]),
+                None
+            );
+
+            game.options.execution_role = ExecutionRole::Client;
+            game.options.dedicated = None;
+            let (client, _server) = Pipe::pair();
+            game.connect_local(client, "EnvironmentReadTest").unwrap();
+            game.remote.as_mut().unwrap().logged_in = true;
+            let level = game.level("minecraft:overworld").unwrap();
+            assert_eq!(
+                level.environment_float(game, "visual/sky_light_factor", [8.5, 64.0, 8.5]),
+                None,
+                "server only"
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn sky_and_logical_height_read_the_named_dimension_and_client_state() {
         use crate::game::execution_role::ExecutionRole;
         use horizon_client::chunk::LevelShape;
@@ -3278,7 +3522,10 @@ mod environment_read_tests {
             let in_piece = start.pieces[0].bounding_box().min;
             let in_box = start.bounding_box.min;
             assert!(
-                !start.pieces.iter().any(|p| p.bounding_box().is_inside(in_box)),
+                !start
+                    .pieces
+                    .iter()
+                    .any(|p| p.bounding_box().is_inside(in_box)),
                 "the box's corner is outside every piece"
             );
             let refer = |game: &mut crate::game::Game<'_>, pos: [i32; 3]| {

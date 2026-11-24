@@ -85,14 +85,17 @@ original classes, game shaders, textures or prepared resources are distributed h
 developers, with upstream fixes applied
 ([gfx-rs/wgpu#10124](https://github.com/gfx-rs/wgpu/pull/10124),
 [gfx-rs/wgpu#10714](https://github.com/gfx-rs/wgpu/pull/10714)). On NVIDIA with a Wayland surface
-its Vulkan backend also waits for each swapchain image on the CPU (an acquire fence), so no frame
-waits on the GPU for an image the compositor still holds. Its GL backend also reports
+its Vulkan backend also waits for each swapchain image on the CPU (an acquire fence), by default in
+every present mode but Immediate, so no frame waits on the GPU for an image the compositor still
+holds (`HORIZON_ACQUIRE_FENCE=0` or `=1` turns it off or on in any mode).
+Its GL backend also reports
 the context's sampled textures and samplers per shader stage (usually 32 on desktop GL,
 where WebGL2's minimum 16 was reported before), so a pipeline layout the driver accepts is
 not refused. Its GL backend copies depth and stencil textures with a framebuffer blit, where
 `glCopyTexSubImage` read only colour and left the copy empty. Its DirectX 12 backend leaves out
 an adapter that offers neither `IDXGIAdapter4` nor `IDXGIAdapter3`, where an `unwrap` ended the
-program. It is licensed under MIT or
+program, and gives an intermediate texture-copy buffer's allocation back when its command
+encoder is reset, where only the resource was dropped and the allocation leaked. It is licensed under MIT or
 Apache-2.0; both licenses are in that folder
 (`LICENSE.MIT`, `LICENSE.APACHE`).
 
@@ -106,6 +109,8 @@ The GLSL frontend also resets the common type for each comma-separated declarato
 variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
+It limits recursive parsing and lowering of GLSL after preprocessing and reports a source diagnostic
+when the nesting limit is exceeded.
 The HLSL backend writes an ordinary level-zero texture sample as `SampleLevel(..., 0.0)`, while
 comparison textures keep `SampleCmpLevelZero`; HLSL has no ordinary `SampleLevelZero` method.
 The shared interpolation defaults also compile with `glsl-in` alone, without needing the

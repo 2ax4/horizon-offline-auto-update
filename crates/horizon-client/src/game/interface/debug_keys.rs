@@ -554,17 +554,17 @@ impl Game<'_> {
     pub(super) fn debug_tps_line(&self, d: &mut debug_overlay::Displayer) {
         if self.player.is_some() {
             let [tx, rx] = self.debug_charts.packet_rates.map(|n| n.round() as i64);
+            let target_ms = || {
+                horizon_core::java_number::format_fixed(f64::from(1000.0 / self.clock.rate()), 1)
+            };
             let (target, status) = if self.clock.sprinting() {
                 ("-".to_owned(), " (sprinting)")
             } else if self.clock.stepping() {
-                (
-                    format!("{:.1}", 1000.0 / self.clock.rate()),
-                    " (frozen - stepping)",
-                )
+                (target_ms(), " (frozen - stepping)")
             } else if self.clock.frozen() {
-                (format!("{:.1}", 1000.0 / self.clock.rate()), " (frozen)")
+                (target_ms(), " (frozen)")
             } else {
-                (format!("{:.1}", 1000.0 / self.clock.rate()), "")
+                (target_ms(), "")
             };
             if self.remote.is_none() || self.integrated.is_some() {
                 let tick_ms = self
@@ -573,8 +573,9 @@ impl Game<'_> {
                     .map_or(self.debug_charts.smoothed_tick_ms, |server| {
                         server.smoothed_tick_ms()
                     });
+                let tick_ms = horizon_core::java_number::format_fixed(f64::from(tick_ms), 1);
                 d.line(format!(
-                    "Integrated server @ {tick_ms:.1}/{target} ms{status}, {tx} tx, {rx} rx",
+                    "Integrated server @ {tick_ms}/{target} ms{status}, {tx} tx, {rx} rx",
                 ));
             } else if let Some(remote) = &self.remote {
                 d.line(format!(
@@ -1116,12 +1117,13 @@ impl Game<'_> {
         }
         for a in self.armor_stands.iter().filter(|a| !a.invisible) {
             // ArmorStand.getDimensions: a marker has none, a small one is
-            // half scale with its eyes at 0.9875.
-            let (size, eye) = match (a.marker, a.small) {
-                (true, _) => ((0.0, 0.0), 0.0),
-                (_, true) => ((0.25, 0.9875), 0.9875),
-                _ => ((0.5, 1.975), 1.7775),
-            };
+            // half scale with its eyes at 0.9875; both times its `minecraft:scale`.
+            let size = a.box_size();
+            let eye = match (a.marker, a.small) {
+                (true, _) => 0.0,
+                (_, true) => 0.9875,
+                _ => 1.7775,
+            } * a.scale;
             g.hitbox(
                 at(a.previous, a.position),
                 size,

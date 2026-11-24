@@ -65,6 +65,27 @@ pub enum Fog {
     Pack,
 }
 
+/// `[frame] jitter`: whether Horizon moves the world's projection by TAA's sub-pixel offset
+/// every frame under the pack's own `[[post]]` chain, and says it in `frame.jitter`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Jitter {
+    /// `false` or absent: no offset while the pack's post chain draws the frame.
+    #[default]
+    Off,
+    /// `true`: the offset every frame.
+    On,
+    /// The id of an option: the offset while it is not 0 (a bool on, a number other than 0),
+    /// as the pack's temporal pass runs.
+    While(String),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawJitter {
+    On(bool),
+    While(String),
+}
+
 impl Primaries {
     /// `Frame.luminance`: the weights that give a colour's luminance in these primaries.
     pub const fn luminance(self) -> [f32; 3] {
@@ -128,8 +149,13 @@ pub struct Manifest {
     pub material_coverage: Coverage,
     /// `[entity] coverage`.
     pub entity_coverage: Coverage,
+    /// 0.2, `[entity] surface`: the entity stage gets `set_surface` and writes the post stage's
+    /// `scene_surface` where an entity shows, as the material stage does for solid terrain.
+    pub entity_surface: bool,
     /// `[frame] fog`.
     pub fog: Fog,
+    /// `[frame] jitter`.
+    pub jitter: Jitter,
     pub options: Vec<PackOption>,
     /// How the settings page lays the options out; the first page is the one it opens on.
     /// Empty: one page with every option.
@@ -159,6 +185,8 @@ pub struct Manifest {
     /// 0.2: the motion guide the post stage's `motion_at` reads, if the pack asks for it;
     /// needs `[[post]]`.
     pub motion: Option<Motion>,
+    /// Whether post passes may read the color and depth before translucent terrain.
+    pub post_opaque: bool,
     /// 0.2: kept resources and compute passes.
     pub kept: crate::kept::Kept,
 }
@@ -433,6 +461,10 @@ pub struct Stage {
     /// `Manifest::material_coverage` and `Manifest::entity_coverage`.
     #[serde(default)]
     pub coverage: Option<String>,
+    /// 0.2, the entity stage only: whether it gets `set_surface` and writes the post stage's
+    /// `scene_surface` where an entity shows (false when absent), `Manifest::entity_surface`.
+    #[serde(default)]
+    pub surface: Option<bool>,
     /// The sky stage only: whether Minecraft's clouds still draw (true when absent); false for
     /// a pack whose sky draws its own.
     #[serde(default)]
@@ -599,6 +631,8 @@ struct Raw {
     displacement: Option<RawDisplacement>,
     ray_tracing: Option<RayTracing>,
     motion: Option<Motion>,
+    #[serde(default)]
+    post_opaque: bool,
     kept: Option<crate::kept::RawKept>,
     #[serde(default)]
     resource: Vec<crate::kept::RawResource>,
@@ -629,6 +663,7 @@ struct RawFrame {
     blend: Option<String>,
     primaries: Option<String>,
     fog: Option<String>,
+    jitter: Option<RawJitter>,
 }
 
 #[derive(Default, Deserialize)]
@@ -821,6 +856,11 @@ impl Manifest {
             Some("pack") => Fog::Pack,
             Some(f) => return Err(err(format!("frame.fog {f:?}: engine or pack"))),
         };
+        let jitter = match raw.frame.as_ref().and_then(|f| f.jitter.as_ref()) {
+            None | Some(RawJitter::On(false)) => Jitter::Off,
+            Some(RawJitter::On(true)) => Jitter::On,
+            Some(RawJitter::While(id)) => Jitter::While(id.clone()),
+        };
         let id_ok = (1..=64).contains(&raw.id.len())
             && raw
                 .id
@@ -880,6 +920,20 @@ impl Manifest {
                 "`coverage` is a key of [material] and [entity] only".into()
             ));
         }
+        if raw
+            .sky
+            .iter()
+            .chain(&raw.material)
+            .chain(&raw.vertex)
+            .chain(&raw.weather)
+            .chain(&raw.post)
+            .chain(&raw.tonemap)
+            .chain(&raw.before_world)
+            .any(|s| s.surface.is_some())
+        {
+            return Err(err("`surface` is a key of [entity] only".into()));
+        }
+        let entity_surface = raw.entity.as_ref().and_then(|s| s.surface) == Some(true);
         if raw
             .sky
             .iter()
@@ -954,6 +1008,9 @@ impl Manifest {
             ));
         }
         let passes = raw.post.iter().filter(|p| !p.compute).count();
+        if raw.post_opaque && passes == 0 {
+            return Err(err("post_opaque needs a raster [[post]] pass".into()));
+        }
         if passes > MAX_POST_PASSES {
             return Err(err(format!(
                 "{passes} post passes; a pack may chain {MAX_POST_PASSES}"
@@ -1195,6 +1252,11 @@ impl Manifest {
             }
             ms => ms.map(|ms| ms as f32),
         };
+        if let Jitter::While(id) = &jitter
+            && !options.iter().any(|o| o.id == *id)
+        {
+            return Err(err(format!("frame.jitter: `{id}` is no option")));
+        }
         if let Some(r) = &raw.reflection {
             if raw.material.is_none() {
                 return Err(err("[reflection] needs [material]".into()));
@@ -1322,7 +1384,9 @@ impl Manifest {
             primaries,
             material_coverage,
             entity_coverage,
+            entity_surface,
             fog,
+            jitter,
             options,
             pages,
             tags: raw.tags,
@@ -1336,6 +1400,7 @@ impl Manifest {
             displacement,
             ray_tracing: raw.ray_tracing,
             motion: raw.motion,
+            post_opaque: raw.post_opaque,
             kept,
         })
     }

@@ -1870,14 +1870,15 @@ impl Game<'_> {
             }
         }
         if drops {
-            let dynamic = self.pending.dynamic(pos);
+            let dynamic = self.pending.dynamic(pos, &self.items().component_defaults);
             // LootContextParams.EXPLOSION_RADIUS under DESTROY_WITH_DECAY: the
             // tables' survives_explosion and explosion_decay draw from their
             // random sequence.
             let decay = (interaction == BlockInteraction::DestroyWithDecay).then_some(radius);
-            let place = self.loot_place_at(
+            let place = self.loot_place_with_block(
                 pos.map(|v| f64::from(v) + 0.5),
                 self.loot_block_entity(pos, &name),
+                Some(state),
             );
             // `Explosion.getDirectSourceEntity`.
             let entity = self

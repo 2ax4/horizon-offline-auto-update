@@ -130,7 +130,18 @@ pub fn component_value(tag: &horizon_core::nbt::Tag) -> crate::server::json::Jso
         Tag::Byte(b) => Json::Bool(*b != 0),
         Tag::Int(i) => Json::Number(i.to_string()),
         Tag::Long(i) => Json::Number(i.to_string()),
+        Tag::Short(i) => Json::Number(i.to_string()),
+        Tag::Float(bits) => finite_number(f64::from(f32::from_bits(*bits))),
+        Tag::Double(bits) => finite_number(f64::from_bits(*bits)),
         _ => Json::Null,
+    }
+}
+fn finite_number(value: f64) -> crate::server::json::Json {
+    use crate::server::json::Json;
+    if value.is_finite() {
+        Json::Number(value.to_string())
+    } else {
+        Json::Null
     }
 }
 
@@ -2762,9 +2773,37 @@ fn frame_one(
         {
             writer.frame_into(&SharedFrames::get().contents(body, t)?, out);
         }
+        // At `MAX_FRAME` or over, `contents` refuses it before anything is written (a threshold
+        // above 2 MiB).
+        horizon_protocol::connection::Framing::Network(Some(t))
+            if body.len() < t && body.len() < horizon_protocol::frame::MAX_FRAME =>
+        {
+            writer.frame_small_into(body, out);
+        }
         _ => writer.frame_into(&writer.contents(body)?, out),
     }
     Ok(())
+}
+
+/// [`frame_body`] for a run of bodies: a small one is framed without touching the connection's
+/// counters, its count and bytes added to `tally`, for the caller to give to
+/// `ConnWriter::count_frames` once (two atomic adds for each packet, 32 000 packets a tick).
+pub(super) fn frame_body_tallied(
+    writer: &mut ConnWriter,
+    body: &[u8],
+    out: &mut Vec<u8>,
+    tally: &mut (i64, i64),
+) -> horizon_protocol::Result<()> {
+    if let horizon_protocol::connection::Framing::Network(Some(t)) = writer.framing()
+        && body.len() < t
+        && body.len() < horizon_protocol::frame::MAX_FRAME
+        && writer.for_client_is_plain()
+    {
+        tally.1 += writer.frame_small_uncounted(body, out);
+        tally.0 += 1;
+        return Ok(());
+    }
+    frame_body(writer, body, out)
 }
 
 /// The keep-alive clock of a play connection, shared by its network thread
@@ -2788,6 +2827,54 @@ impl KeepAliveWatch {
 #[cfg(test)]
 mod tests {
     include!("profession_join_tests.rs");
+
+    /// A body too long for a frame is refused, not framed small, even under a compression
+    /// threshold above `MAX_FRAME`: nothing is written and the cipher does not move on.
+    #[test]
+    fn a_body_too_long_for_a_frame_is_refused_under_a_high_threshold() {
+        use horizon_protocol::frame::MAX_FRAME;
+        let writer = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut c = Connection::from_stream(stream).unwrap();
+            c.set_compression(i32::MAX);
+            c.enable_encryption(&[5; 16]);
+            let (_, writer) = c.split();
+            (listener, writer)
+        };
+        let ((_a, mut refused), (_b, mut fresh)) = (writer(), writer());
+        let long = vec![1u8; MAX_FRAME];
+        let mut out = Vec::new();
+        assert!(frame_body(&mut refused, &long, &mut out).is_err());
+        let mut tally = (0, 0);
+        assert!(frame_body_tallied(&mut refused, &long, &mut out, &mut tally).is_err());
+        assert!(out.is_empty());
+        assert_eq!(tally, (0, 0));
+        // One byte shorter still fits.
+        let mut framed = Vec::new();
+        frame_body(&mut writer().1, &long[1..], &mut framed).unwrap();
+        assert!(!framed.is_empty());
+        let (mut after, mut want) = (Vec::new(), Vec::new());
+        frame_body(&mut refused, &[1, 2, 3], &mut after).unwrap();
+        frame_body(&mut fresh, &[1, 2, 3], &mut want).unwrap();
+        assert_eq!(after, want);
+    }
+
+    /// A float, double or short in a component (a translate `with` argument) is a JSON number.
+    #[test]
+    fn component_json_keeps_numeric_arguments() {
+        use horizon_core::nbt::Tag;
+        let with = Tag::List(vec![
+            Tag::Float(2.5f32.to_bits()),
+            Tag::Double(1.0f64.to_bits()),
+            Tag::Short(7),
+        ]);
+        let tag = Tag::compound([("translate", Tag::String("k".into())), ("with", with)]);
+        assert_eq!(
+            component_json(&tag),
+            r#"{"translate":"k","with":[2.5,1,7]}"#
+        );
+    }
 
     /// Bodies shared between players reach each of them as the same bytes, in the order
     /// they were sent among the player's own.

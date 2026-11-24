@@ -171,18 +171,21 @@ impl Game<'_> {
                 s.biome_blend,
                 s.smooth_lighting,
                 s.cutout_leaves,
+                s.better_grass_mode(),
                 s.horizon.opaque_ice,
                 leaf_culling,
             ) != (
                 st.biome_blend,
                 st.smooth_lighting,
                 st.cutout_leaves,
+                st.better_grass_mode,
                 st.opaque_ice,
                 st.leaf_culling,
             );
         self.streaming.biome_blend = self.settings.biome_blend;
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
+        self.streaming.better_grass_mode = self.settings.better_grass_mode();
         self.streaming.opaque_ice = self.settings.horizon.opaque_ice;
         self.streaming.leaf_culling = leaf_culling;
         if reload {
@@ -226,15 +229,10 @@ impl Game<'_> {
         self.remote.as_ref()?.far_terrain
     }
 
-    /// LOD Distance as far terrain uses it (`graphics::lod_distance_capped`).
+    /// LOD Distance as far terrain uses it.
     pub(super) fn lod_distance(&self) -> u32 {
         let (distance, _) = self.far_terrain_choice();
-        match &self.renderer {
-            Some(renderer) => {
-                horizon_client::graphics::lod_distance_capped(distance, &renderer.info)
-            }
-            None => distance.min(horizon_client::lod::MAX_CHUNKS),
-        }
+        distance.min(horizon_client::lod::MAX_CHUNKS)
     }
 
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
@@ -311,8 +309,7 @@ impl Game<'_> {
     /// discarded, then every loaded section is rebuilt.
     pub(super) fn all_sections_changed(&mut self) {
         self.clear_lod();
-        self.streaming
-            .free(std::mem::take(&mut self.pending_uploads));
+        self.streaming.free(self.pending_uploads.take_all());
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.clear_sections(self.world.layout());
         }

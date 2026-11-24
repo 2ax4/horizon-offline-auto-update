@@ -4,6 +4,7 @@ use super::*;
 
 impl Launcher {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let migration_error = instances::absorb_held_selection().err();
         horizon_launcher::game_shader_api::draws_here();
         horizon_launcher::storage::eviction::cleanup_after_start();
         let (tx, rx) = channel();
@@ -25,6 +26,9 @@ impl Launcher {
         })
         .detach();
         let mut settings = Settings::load();
+        if migration_error.is_some() {
+            settings.instance_versions_migrated = false;
+        }
         i18n::set(settings.language());
         if settings.minecraft_dir.is_none() {
             settings.minecraft_dir = backend::default_minecraft_dir();
@@ -87,7 +91,8 @@ impl Launcher {
             min_restart_tried: horizon_launcher::update_handoff::min_restarted(),
             update_install: None,
             instance_install: None,
-            install_next: None,
+            manual_install_for: None,
+            install_queue: VecDeque::new(),
             stable_install: None,
             stable_failed: None,
             bar: (0., 0.),
@@ -157,6 +162,7 @@ impl Launcher {
             restyle: true,
             background_error: None,
             location_target: None,
+            location_real_target: horizon_launcher::data_location::linked_data_folder_target(),
             location_error: location_page::startup_error(),
             location_note: location_page::startup_note(),
             args_input: line_edit::LineEdit::new(settings.game_args.clone(), 1024, 38),
@@ -170,7 +176,7 @@ impl Launcher {
             proxy_focused: false,
             proxy_focus: cx.focus_handle(),
             settings,
-            settings_save_error: None,
+            settings_save_error: migration_error,
             links: backend::Links::default(),
             preparing: false,
             prepare_log: VecDeque::new(),
@@ -181,6 +187,8 @@ impl Launcher {
             client_error: None,
             client_started: None,
             client_home: None,
+            client_build: None,
+            api_notice: Default::default(),
             crash: None,
             servers: servers_page::Servers::new(),
             internet: internet::Internet::new(),
@@ -349,6 +357,15 @@ impl Launcher {
 
     /// Keeps the current choices in memory if writing fails; every page offers the same retry.
     pub(crate) fn save_settings(&mut self) -> bool {
+        if !self.settings.instance_versions_migrated {
+            if let Err(error) = instances::absorb_held_selection() {
+                self.settings_save_error = Some(error);
+                return false;
+            }
+            self.settings.selection_from(&Settings::load());
+            self.settings.instance_versions_migrated = true;
+            self.reload_instances();
+        }
         self.settings_save_error = self.settings.save().err();
         self.settings_save_error.is_none()
     }
@@ -575,11 +592,13 @@ impl Launcher {
         let Some(release) = self.updates.horizon.clone() else {
             return;
         };
-        if self.installing.is_some() || self.removing.contains(&release.tag) {
+        if self.installing.is_some()
+            || !self.install_queue.is_empty()
+            || self.removing.contains(&release.tag)
+        {
             return;
         }
-        self.update_install = Some(release.tag.clone());
-        self.install(&release);
+        self.queue_install(release, InstallSource::Update);
     }
 
     /// What installed native build `version` was made from (`native_status::Build`), read once.

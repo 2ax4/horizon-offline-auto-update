@@ -144,7 +144,9 @@ impl Game<'_> {
         };
         // A dead player acts no more, but the death screen still respawns and chats: its
         // commands run as anyone's (ServerGamePacketListenerImpl.handleChatCommand doesn't
-        // look at the player's health).
+        // look at the player's health). Resource-pack answers are connection status, not an
+        // action, and ServerCommonPacketListenerImpl.handleResourcePackResponse accepts them
+        // regardless of health.
         if host.hub.guests[gi].dead
             && !matches!(
                 packet,
@@ -152,6 +154,7 @@ impl Game<'_> {
                     | S::ChatCommand(_)
                     | S::ChatCommandSigned(_)
                     | S::CustomClickAction(_)
+                    | S::ResourcePack(_)
             )
         {
             return;
@@ -630,6 +633,8 @@ impl Game<'_> {
                     });
                 }
             }
+            // The mods' `container_click` first: a canceled click changes nothing.
+            S::ContainerClick(p) if self.lan_container_click_vetoed(conn, &p) => {}
             // AbstractContainerMenu.quickMoveStack of a mod container: the mods first.
             S::ContainerClick(p) if self.lan_mod_quick_move(conn, &p) => {}
             S::ContainerClick(p) if self.lan_merchant_click(conn, &p) => {}
@@ -660,16 +665,20 @@ impl Game<'_> {
             // STOP_RIDING_JUMP: AbstractHorse and Camel handleStopJump do
             // nothing, and a nautilus' dash is not stopped this way.
             S::PlayerCommand(p) if p.action == 4 => {}
-            // ServerboundResourcePackPacket in play: the server has nothing to
-            // do with it (a declined required pack is handled on the connection).
+            // ServerboundResourcePackPacket in play: `resource_pack_status_v2` hears the answer
+            // even after death; `resource_pack_status` only while the player lives, as it always
+            // did (a declined server.properties required pack is handled on the connection).
             S::ResourcePack(r) => {
                 let Some(host) = self.lan.as_ref() else {
                     return;
                 };
                 let guest = &host.hub.guests[gi];
-                let (uuid, name) = (guest.uuid, guest.name.clone());
+                let (uuid, name, dead) = (guest.uuid, guest.name.clone(), guest.dead);
                 self.as_guest(conn, |g| {
-                    g.native_resource_pack_status(uuid, &name, r.action);
+                    g.native_resource_pack_status_v2(uuid, &name, r.id, r.action);
+                    if !dead {
+                        g.native_resource_pack_status(uuid, &name, r.action);
+                    }
                 });
             }
             // START_SPRINTING and STOP_SPRINTING: the hub has set the sprint
@@ -1109,6 +1118,7 @@ impl Game<'_> {
                         .then(|| g.entity_pick_result(p.id))
                         .flatten()
                 });
+                self.guest_pick_avatar_profile(conn, p.id, p.include_data);
             }
             _ => {}
         }
@@ -1247,9 +1257,8 @@ impl Game<'_> {
         stack: &Option<horizon_protocol::item::Stack>,
     ) -> Option<ItemStack> {
         let s = stack.as_ref()?;
-        let mut out = self.lan.as_ref()?.hub.stack_from_network(s);
-        out.count = out.count.max(1);
-        Some(out)
+        let out = self.lan.as_ref()?.hub.stack_from_network(s);
+        (out.count > 0 && &*out.item != "minecraft:air").then_some(out)
     }
 
     /// `LivingEntity.tickDeath`: 20 ticks after dying the player is removed,

@@ -102,6 +102,17 @@ pub trait ClientSession {
         )
     }
     /// Side: client.
+    /// The locator bar's tracked waypoints: each waypoint's identifier, target, icon style and
+    /// icon colour, in the order the server sent them. What this client has been sent; None
+    /// outside a logged-in client world. Sends nothing.
+    fn client_waypoints(&self) -> Option<ClientWaypoints> {
+        crate::world::phase::unprovided(
+            "ClientSession::client_waypoints",
+            "client_waypoints",
+            crate::world::phase::LoadAccess::ClientSetup,
+        )
+    }
+    /// Side: client.
     /// Existing local frame counters; None outside a logged-in client world.
     /// This read collects no history and sends nothing anywhere.
     fn client_frame_stats(&self) -> Option<ClientFrameStats> {
@@ -179,6 +190,30 @@ pub trait Commands {
             crate::world::phase::LoadAccess::WorldOnly,
         )
     }
+    /// Side: server.
+    /// The command `label` names (Paper's `Server.getCommandMap().getCommand(label)`), a leading
+    /// slash dropped: a usage a native mod registered (`register_commands`), else vanilla's root
+    /// command, an alias resolved to its target (`tp` gives `teleport`, with `aliases` naming
+    /// `tp`). `level` is the lowest a mod's usages ask, or vanilla's permission for the root.
+    /// None when neither has the name. Reads only; it runs nothing. Horizon has no permission
+    /// nodes: the level is the answer.
+    fn command_info(&mut self, label: &str) -> Option<CommandInfo> {
+        crate::world::phase::unprovided(
+            "Commands::command_info",
+            "command_info",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
+    /// Side: server.
+    /// The root names of every command the server answers, mods' and vanilla's (aliases
+    /// included), sorted, each once. Empty without a server world.
+    fn command_names(&mut self) -> Vec<String> {
+        crate::world::phase::unprovided(
+            "Commands::command_names",
+            "command_names",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
 }
 /// The levels service, reached through its host.
 pub trait Levels {
@@ -212,6 +247,29 @@ pub trait Messages {
         crate::world::phase::unprovided(
             "Messages::broadcast",
             "broadcast",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
+    /// Side: server.
+    /// Writes `line` to the server console and its log at `level` (`Logger.info`, `warning`,
+    /// `severe`), prefixed with `[mod_id] ` so the line names the mod that wrote it; `mod_id` is
+    /// the id the mod gives, as the other calls taking a mod id. The line is cut to its first
+    /// 4096 bytes at a character boundary; control characters in it (line breaks included) are
+    /// replaced by spaces, so one call is always one log line. Refuses with
+    /// `ConsoleLogRefusal::EmptyModId`, `ModIdTooLong` (over 64 bytes) or `InvalidModId` (a
+    /// control character in the id) and then logs nothing.
+    /// It is also the reply a mod gives a console command after the command has returned: the
+    /// console sender of `run_command_with_output` is the console itself, so a delayed answer
+    /// goes here. Other console listeners (`console_line`) hear the line too.
+    fn console_log(
+        &self,
+        mod_id: &str,
+        level: ConsoleLevel,
+        line: &str,
+    ) -> Result<(), ConsoleLogRefusal> {
+        crate::world::phase::unprovided(
+            "Messages::console_log",
+            "console_log",
             crate::world::phase::LoadAccess::WorldOnly,
         )
     }
